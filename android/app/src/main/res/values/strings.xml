@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">XinChat Android</string>
+    <string name="title_activity_main">XinChat Android</string>
+    <string name="package_name">com.xinchat.android</string>
+    <string name="custom_url_scheme">com.xinchat.android</string>
+</resources>
