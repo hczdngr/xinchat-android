@@ -25,7 +25,15 @@ body {
     radial-gradient(circle at 80% 0%, rgba(147, 182, 244, 0.7), transparent 42%),
     linear-gradient(140deg, #f2f7ff 0%, #dbe8ff 50%, #c7ddff 100%);
   line-height: 1.6;
-  font-family: 'Space Grotesk', 'Segoe UI', system-ui, sans-serif;
+  font-family:
+    'Noto Sans SC',
+    'PingFang SC',
+    'Microsoft YaHei',
+    'Hiragino Sans GB',
+    'Source Han Sans SC',
+    'Space Grotesk',
+    system-ui,
+    sans-serif;
   font-size: 15px;
   text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;
