@@ -25,6 +25,26 @@ See [Vite Configuration Reference](https://vite.dev/config/).
 npm install
 ```
 
+## Backend (Koa)
+
+The backend now lives in `src/backend`.
+The old `backend/` folder is preserved; `npm run backend` starts `src/backend`.
+
+```sh
+cd src/backend
+npm install
+npm run dev
+```
+
+Or run from project root:
+
+```sh
+npm run backend
+```
+
+Default URL: `http://localhost:3001`  
+Admin: `http://localhost:3001/admin`
+
 ### Compile and Hot-Reload for Development
 
 ```sh

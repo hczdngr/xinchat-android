@@ -1,415 +1,424 @@
-<script setup>
-const props = defineProps({
-  profile: {
-    type: Object,
-    default: () => ({}),
-  },
-})
+﻿<script setup>
+import { computed, onMounted, ref } from 'vue'
 
-const emit = defineEmits(['logout'])
+const apiBase = import.meta.env.VITE_API_BASE || 'http://localhost:3001'
+const token = localStorage.getItem('xinchat.token') || ''
+
+const profileData = ref({
+  username: '',
+  nickname: '',
+  avatar: '',
+  uid: null,
+})
+const friends = ref([])
+const latestMap = ref({})
+const loadingFriends = ref(false)
+
+const displayName = computed(
+  () => profileData.value.nickname || profileData.value.username || '加载中...'
+)
+const avatarUrl = computed(() => profileData.value.avatar || '')
+const avatarText = computed(() => displayName.value.slice(0, 2))
+
+const getAvatarText = (value) => {
+  const text = String(value || '').trim()
+  if (!text) return '??'
+  return text.slice(0, 2)
+}
+
+const authHeaders = () => (token ? { Authorization: `Bearer ${token}` } : {})
+
+const loadProfile = async () => {
+  if (!token) return
+  try {
+    const response = await fetch(`${apiBase}/api/profile`, {
+      headers: { ...authHeaders() },
+    })
+    const data = await response.json().catch(() => ({}))
+    if (response.ok && data?.success && data?.user) {
+      profileData.value = { ...profileData.value, ...data.user }
+    }
+  } catch {}
+}
+
+const formatMessage = (msg) => {
+  if (!msg) return ''
+  if (msg.type === 'text') return msg.data?.content || msg.data?.text || ''
+  if (msg.type === 'image') return '[图片]'
+  if (msg.type === 'file') return '[文件]'
+  if (msg.type === 'voice') return '[语音]'
+  return '[消息]'
+}
+
+const formatTime = (value) => {
+  if (!value) return ''
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return ''
+  return date.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })
+}
+
+const loadLatestForFriend = async (uid) => {
+  try {
+    const params = new URLSearchParams({
+      targetType: 'private',
+      targetUid: String(uid),
+      limit: '1',
+    })
+    const response = await fetch(`${apiBase}/api/chat/get?${params.toString()}`, {
+      headers: { ...authHeaders() },
+    })
+    const data = await response.json().catch(() => ({}))
+    if (response.ok && data?.success && Array.isArray(data?.data)) {
+      const last = data.data[data.data.length - 1]
+      if (last) {
+        latestMap.value = {
+          ...latestMap.value,
+          [uid]: {
+            text: formatMessage(last),
+            time: formatTime(last.createdAt),
+          },
+        }
+      }
+    }
+  } catch {}
+}
+
+const loadFriends = async () => {
+  if (!token) return
+  loadingFriends.value = true
+  try {
+    const response = await fetch(`${apiBase}/api/friends/list`, {
+      headers: { ...authHeaders() },
+    })
+    const data = await response.json().catch(() => ({}))
+    if (response.ok && data?.success && Array.isArray(data?.friends)) {
+      friends.value = data.friends
+      await Promise.all(
+        data.friends.map((friend) => loadLatestForFriend(friend.uid))
+      )
+    }
+  } catch {}
+  loadingFriends.value = false
+}
+
+onMounted(async () => {
+  await loadProfile()
+  await loadFriends()
+})
 </script>
 
 <template>
-  <div class="home">
-    <header class="topbar">
-      <div class="brand">
-        <div class="brand-mark">XC</div>
-        <div class="brand-text">
-          <p class="brand-title">XinChat</p>
-          <p class="brand-subtitle">Online</p>
+  <div class="page">
+    <header class="header">
+      <div class="user-info">
+        <div class="avatar">
+          <img v-if="avatarUrl" :src="avatarUrl" alt="avatar" />
+          <span v-else>{{ avatarText }}</span>
         </div>
+
+        <div class="username">{{ displayName }}</div>
       </div>
-      <div class="user">
-        <div class="avatar">{{ (props.profile.nickname || 'U')[0] }}</div>
-        <div>
-          <p class="user-name">{{ props.profile.nickname || props.profile.username || 'User' }}</p>
-          <p class="user-id">UID {{ props.profile.uid || '100000000' }}</p>
-        </div>
-        <button class="ghost" type="button" @click="emit('logout')">Logout</button>
+
+      <div class="add-btn">
+        <div class="icon-plus"></div>
       </div>
     </header>
 
-    <div class="content">
-      <aside class="sidebar">
-        <div class="icon-pill active">??</div>
-        <div class="icon-pill">??</div>
-        <div class="icon-pill">?</div>
-        <div class="icon-pill">??</div>
-      </aside>
-
-      <section class="panel list">
-        <div class="search">
-          <input type="text" placeholder="Search chats or friends" />
-          <button class="primary small" type="button">+</button>
-        </div>
-        <div class="list-block">
-          <p class="list-title">Private chats</p>
-          <div class="list-item active">
-            <div class="avatar">RW</div>
-            <div>
-              <p class="list-name">rw0ter</p>
-              <p class="list-sub">UID 100000000</p>
-            </div>
-          </div>
-          <div class="list-item">
-            <div class="avatar">DE</div>
-            <div>
-              <p class="list-name">demo_user</p>
-              <p class="list-sub">UID 100000001</p>
-            </div>
-          </div>
-        </div>
-      </section>
-
-      <section class="panel chat">
-        <div class="chat-header">
-          <div>
-            <p class="chat-title">rw0ter</p>
-            <p class="chat-sub">Private �� Online</p>
-          </div>
-          <div class="chat-status">
-            <span class="badge">PRIVATE</span>
-            <span class="badge ghost">ONLINE</span>
-          </div>
-        </div>
-        <div class="chat-body">
-          <div class="bubble">
-            <p>Welcome to XinChat mobile.</p>
-            <span>14:17</span>
-          </div>
-          <div class="bubble me">
-            <p>Let us build the next view.</p>
-            <span>14:18</span>
-          </div>
-        </div>
-        <div class="chat-input">
-          <div class="tools">
-            <span>??</span>
-            <span>??</span>
-            <span>???</span>
-            <span>???</span>
-          </div>
-          <div class="send-row">
-            <input type="text" placeholder="Type a message" />
-            <button class="primary" type="button">Send</button>
-          </div>
-        </div>
-      </section>
+    <div class="search-container">
+      <div class="search-box">
+        <svg class="search-icon-svg" viewBox="0 0 24 24">
+          <path
+            d="M15.5 14h-.79l-.28-.27C15.41 12.59 16 11.11 16 9.5 16 5.91 13.09 3 9.5 3S3 5.91 3 9.5 5.91 16 9.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19l-4.99-5zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14z"
+          />
+        </svg>
+        <span>搜索</span>
+      </div>
     </div>
+
+    <div class="content">
+      <div v-if="loadingFriends" class="empty">正在加载联系人...</div>
+      <div v-else-if="friends.length === 0" class="empty">暂无联系人</div>
+      <div v-else class="contacts">
+        <div v-for="friend in friends" :key="friend.uid" class="contact-item">
+          <div class="contact-avatar">
+            <img v-if="friend.avatar" :src="friend.avatar" alt="avatar" />
+            <span v-else>{{ getAvatarText(friend.nickname || friend.username) }}</span>
+          </div>
+          <div class="contact-info">
+            <div class="contact-name">
+              {{ friend.nickname || friend.username }}
+            </div>
+            <div class="contact-sub">
+              {{ latestMap[friend.uid]?.text || '暂无消息' }}
+            </div>
+          </div>
+          <div class="contact-time">
+            {{ latestMap[friend.uid]?.time || '' }}
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <nav class="bottom-nav">
+      <div class="nav-item active">
+        <svg class="nav-icon" viewBox="0 0 24 24">
+          <path
+            d="M20 2H4c-1.1 0-2 .9-2 2v18l4-4h14c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2z"
+          />
+        </svg>
+        <span class="nav-text">消息</span>
+      </div>
+      <div class="nav-item">
+        <svg class="nav-icon" viewBox="0 0 24 24">
+          <path
+            d="M12 12c2.21 0 4-1.79 4-4s-1.79-4-4-4-4 1.79-4 4 1.79 4 4 4zm0 2c-2.67 0-8 1.34-8 4v2h16v-2c0-2.66-5.33-4-8-4z"
+          />
+        </svg>
+        <span class="nav-text">联系人</span>
+      </div>
+    </nav>
   </div>
 </template>
 
 <style scoped>
-.home {
-  display: grid;
-  gap: 1.2rem;
-  padding: 1.5rem;
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+  -webkit-tap-highlight-color: transparent;
 }
 
-.topbar {
+.page {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  background-color: #f5f6fa;
+  height: 100vh;
   display: flex;
-  justify-content: space-between;
-  align-items: center;
-  gap: 1rem;
-  padding: 1rem 1.2rem;
-  background: rgba(255, 255, 255, 0.7);
-  border-radius: 20px;
-  box-shadow: 0 10px 20px rgba(30, 68, 120, 0.15);
-  backdrop-filter: blur(16px);
-}
-
-.brand {
-  display: flex;
-  gap: 0.75rem;
-  align-items: center;
-}
-
-.brand-mark {
-  width: 56px;
-  height: 56px;
-  border-radius: 18px;
-  display: grid;
-  place-items: center;
-  background: rgba(255, 255, 255, 0.65);
-  box-shadow: 0 12px 24px rgba(35, 80, 150, 0.2);
-  border: 1px solid rgba(110, 164, 242, 0.45);
+  flex-direction: column;
   overflow: hidden;
+}
+
+.header {
+  background-color: #f5f6fa;
+  padding: 12px 20px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  height: 64px;
+  z-index: 100;
+}
+
+.user-info {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+
+.avatar {
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  overflow: hidden;
+  border: 1px solid rgba(0, 0, 0, 0.05);
+  background: #fff;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.avatar svg,
+.avatar img,
+.contact-avatar img {
+  width: 100%;
+  height: 100%;
+}
+
+.avatar span,
+.contact-avatar span {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  height: 100%;
+  font-size: 16px;
   font-weight: 700;
   color: #2f6bd9;
+  letter-spacing: 0.04em;
+  text-align: center;
+  line-height: 1;
 }
-
-.brand-title {
-  font-size: 1.1rem;
+.username {
+  font-size: 19px;
   font-weight: 600;
-  letter-spacing: 0.02em;
+  color: #1a1a1a;
+  letter-spacing: 0.5px;
+  line-height: 1;
 }
 
-.brand-subtitle {
-  font-size: 0.9rem;
-  color: var(--ice-600);
-}
-
-.user {
+.add-btn {
+  width: 30px;
+  height: 30px;
   display: flex;
   align-items: center;
-  gap: 0.8rem;
+  justify-content: center;
 }
 
-.user-name {
-  font-weight: 600;
+.icon-plus {
+  position: relative;
+  width: 20px;
+  height: 20px;
 }
 
-.user-id {
-  font-size: 0.8rem;
-  color: var(--ice-600);
+.icon-plus::before,
+.icon-plus::after {
+  content: '';
+  position: absolute;
+  background-color: #1a1a1a;
+  border-radius: 2px;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+}
+
+.icon-plus::before {
+  width: 2px;
+  height: 20px;
+}
+
+.icon-plus::after {
+  width: 20px;
+  height: 2px;
+}
+
+.search-container {
+  padding: 6px 16px 12px;
+  background-color: #f5f6fa;
+}
+
+.search-box {
+  background-color: #ffffff;
+  height: 38px;
+  border-radius: 8px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  color: #8a8a8a;
+  font-size: 15px;
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.02);
+}
+
+.search-icon-svg {
+  width: 18px;
+  height: 18px;
+  fill: #a0a0a0;
 }
 
 .content {
-  display: grid;
-  grid-template-columns: auto 1fr;
-  gap: 1rem;
-}
-
-.sidebar {
-  display: grid;
-  gap: 0.9rem;
-  padding: 1rem 0.6rem;
-  background: rgba(255, 255, 255, 0.7);
-  border-radius: 20px;
-  box-shadow: 0 10px 20px rgba(30, 68, 120, 0.12);
-}
-
-.icon-pill {
-  width: 44px;
-  height: 44px;
-  border-radius: 16px;
-  display: grid;
-  place-items: center;
-  background: #e9f1ff;
-  color: #2f6bd9;
-  font-size: 1.1rem;
-}
-
-.icon-pill.active {
-  background: #2f6bd9;
-  color: #eef5ff;
-  box-shadow: 0 12px 24px rgba(47, 107, 217, 0.35);
-}
-
-.panel {
-  background: rgba(255, 255, 255, 0.85);
-  border-radius: 24px;
-  padding: 1.2rem;
-  box-shadow: 0 18px 36px rgba(28, 66, 118, 0.16);
-  backdrop-filter: blur(14px);
-}
-
-.list {
-  display: grid;
-  gap: 1rem;
-}
-
-.search {
-  display: grid;
-  grid-template-columns: 1fr auto;
-  gap: 0.6rem;
-}
-
-.search input {
-  border-radius: 14px;
-  border: 1px solid rgba(110, 145, 196, 0.3);
-  padding: 0.75rem 0.9rem;
-  background: #f4f8ff;
-}
-
-.primary.small {
-  padding: 0.6rem 0.9rem;
-  font-size: 0.9rem;
-  border-radius: 12px;
-}
-
-.list-title {
-  font-size: 0.9rem;
-  text-transform: uppercase;
-  letter-spacing: 0.08em;
-  color: var(--ice-600);
-  margin-bottom: 0.5rem;
-}
-
-.list-item {
-  display: flex;
-  gap: 0.75rem;
-  align-items: center;
-  padding: 0.8rem;
-  border-radius: 16px;
-  background: #f6f9ff;
-}
-
-.list-item.active {
-  border: 1px solid rgba(110, 164, 242, 0.5);
-  background: #edf4ff;
-}
-
-.list-name {
-  font-weight: 600;
-}
-
-.list-sub {
-  font-size: 0.8rem;
-  color: var(--ice-600);
-}
-
-.chat {
-  display: grid;
-  grid-template-rows: auto 1fr auto;
-  min-height: 65vh;
-}
-
-.chat-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  gap: 1rem;
-}
-
-.chat-title {
-  font-weight: 700;
-  font-size: 1.1rem;
-}
-
-.chat-sub {
-  color: var(--ice-600);
-  font-size: 0.85rem;
-}
-
-.chat-status {
-  display: flex;
-  gap: 0.5rem;
-}
-
-.badge {
-  padding: 0.35rem 0.7rem;
-  border-radius: 999px;
-  background: #2f6bd9;
-  color: #eef5ff;
-  font-size: 0.75rem;
-  letter-spacing: 0.06em;
-}
-
-.badge.ghost {
-  background: #e7f0ff;
-  color: #2f6bd9;
-}
-
-.chat-body {
-  display: grid;
-  gap: 0.8rem;
-  padding: 1rem 0;
+  flex: 1;
   overflow-y: auto;
+  padding: 0 16px 16px;
 }
 
-.bubble {
-  max-width: 70%;
-  background: #f2f6ff;
-  padding: 0.8rem 1rem;
-  border-radius: 16px;
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.6);
-  color: var(--ice-900);
-}
-
-.bubble span {
-  display: block;
-  font-size: 0.75rem;
-  color: var(--ice-600);
-  margin-top: 0.4rem;
-}
-
-.bubble.me {
-  justify-self: end;
-  background: #2f6bd9;
-  color: #eef5ff;
-}
-
-.bubble.me span {
-  color: rgba(238, 245, 255, 0.8);
-}
-
-.chat-input {
+.contacts {
   display: grid;
-  gap: 0.8rem;
-  border-top: 1px solid rgba(110, 145, 196, 0.2);
-  padding-top: 1rem;
+  gap: 10px;
 }
 
-.tools {
-  display: flex;
-  gap: 0.7rem;
-  color: var(--ice-600);
-}
-
-.send-row {
+.contact-item {
   display: grid;
-  grid-template-columns: 1fr auto;
-  gap: 0.6rem;
-}
-
-.send-row input {
-  border-radius: 14px;
-  border: 1px solid rgba(110, 145, 196, 0.3);
-  padding: 0.75rem 0.9rem;
-  background: #f4f8ff;
-}
-
-.ghost {
-  border: 1px solid rgba(120, 158, 212, 0.35);
-  background: transparent;
-  color: var(--ice-900);
-  padding: 0.55rem 0.9rem;
+  grid-template-columns: auto 1fr auto;
+  gap: 12px;
+  align-items: center;
+  background: #ffffff;
   border-radius: 12px;
-  font-size: 0.85rem;
+  padding: 10px 12px;
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.03);
 }
 
-.primary {
-  background: #2f6bd9;
-  color: #eef5ff;
-  border: none;
-  padding: 0.9rem 1rem;
-  border-radius: 14px;
+.contact-avatar {
+  width: 42px;
+  height: 42px;
+  border-radius: 50%;
+  overflow: hidden;
+  border: 1px solid rgba(0, 0, 0, 0.06);
+  background: #fff;
+  display: flex;
+  align-items: center;
+  justify-content: center;
   font-weight: 600;
-  font-size: 1rem;
-  box-shadow: 0 12px 28px rgba(38, 90, 170, 0.25);
-  transition: transform 0.2s ease, box-shadow 0.2s ease, opacity 0.2s ease;
+  color: #0099ff;
 }
 
-.primary:disabled {
-  opacity: 0.6;
-  box-shadow: none;
+.contact-avatar span {
+  font-size: 16px;
 }
 
-.primary:not(:disabled):active {
-  transform: translateY(1px);
-  box-shadow: 0 6px 16px rgba(38, 98, 85, 0.18);
+.contact-info {
+  display: grid;
+  gap: 4px;
 }
 
-@media (min-width: 900px) {
-  .content {
-    grid-template-columns: auto 320px 1fr;
-  }
+.contact-name {
+  font-size: 15px;
+  font-weight: 600;
+  color: #1a1a1a;
 }
 
-@media (max-width: 900px) {
-  .content {
-    grid-template-columns: 1fr;
-  }
+.contact-sub {
+  font-size: 12px;
+  color: #8a8a8a;
+  line-height: 1.2;
+}
 
-  .sidebar {
-    grid-auto-flow: column;
-    grid-template-columns: repeat(4, 1fr);
-    justify-items: center;
-  }
+.contact-time {
+  font-size: 11px;
+  color: #9a9a9a;
+}
 
-  .chat {
-    min-height: 50vh;
-  }
+.empty {
+  font-size: 12px;
+  color: #9a9a9a;
+  padding: 12px 0;
+}
+
+.bottom-nav {
+  height: 60px;
+  background-color: #f9f9f9;
+  border-top: 1px solid rgba(0, 0, 0, 0.08);
+  display: flex;
+  align-items: center;
+  padding-bottom: constant(safe-area-inset-bottom);
+  padding-bottom: env(safe-area-inset-bottom);
+}
+
+.nav-item {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  height: 100%;
+}
+
+.nav-text {
+  font-size: 11px;
+  color: #7d7d7d;
+  font-weight: 500;
+}
+
+.nav-icon {
+  width: 28px;
+  height: 28px;
+  fill: #7d7d7d;
+}
+
+.nav-item.active .nav-text {
+  color: #0099ff;
+  font-weight: 600;
+}
+
+.nav-item.active .nav-icon {
+  fill: #0099ff;
 }
 </style>

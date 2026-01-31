@@ -1,4 +1,4 @@
-<script setup>
+﻿<script setup>
 const props = defineProps({
   username: {
     type: String,
@@ -35,6 +35,7 @@ const emit = defineEmits([
   'update:password',
   'toggle-password',
   'submit',
+  'go-register',
 ])
 </script>
 
@@ -55,7 +56,7 @@ const emit = defineEmits([
     </header>
 
     <div class="title-area">
-      <h1>&#x6DFB;&#x52A0;&#x8D26;&#x53F7;</h1>
+      <h1>添加账号</h1>
     </div>
 
     <form class="form-container" @submit.prevent="emit('submit')">
@@ -65,7 +66,7 @@ const emit = defineEmits([
           type="text"
           name="username"
           autocomplete="username"
-          placeholder="&#x8F93;&#x5165;QQ&#x53F7;"
+          placeholder="输入昵称"
           @input="emit('update:username', $event.target.value)"
         />
       </div>
@@ -76,13 +77,13 @@ const emit = defineEmits([
           :type="props.showPassword ? 'text' : 'password'"
           name="password"
           autocomplete="current-password"
-          placeholder="&#x8F93;&#x5165;QQ&#x5BC6;&#x7801;"
+          placeholder="输入信聊密码"
           @input="emit('update:password', $event.target.value)"
         />
       </div>
 
       <button class="login-btn" type="submit" :disabled="!props.canSubmit || props.loading">
-        {{ props.loading ? '��¼��...' : '��¼' }}
+        {{ props.loading ? '登录中...' : '登录' }}
       </button>
 
       <p v-if="props.error" class="message error">{{ props.error }}</p>
@@ -92,52 +93,16 @@ const emit = defineEmits([
         <input class="agreement-input" type="checkbox" checked />
         <span class="checkbox-custom"></span>
         <span>
-          &#x5DF2;&#x9605;&#x8BFB;&#x5E76;&#x540C;&#x610F;
-          <a href="#">&#x670D;&#x52A1;&#x534F;&#x8BAE;</a>
-          &#x548C;
-          <a href="#">QQ&#x9690;&#x79C1;&#x4FDD;&#x62A4;&#x6307;&#x5F15;</a>
+          已阅读并同意
+          <a href="#">服务协议</a>
+          和
+          <a href="#">信聊隐私保护指引</a>
         </span>
       </label>
     </form>
 
     <nav class="bottom-nav">
-      <div class="nav-item">
-        <div class="icon-circle">
-          <svg
-            class="icon-svg"
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            stroke-width="1.5"
-            stroke-linecap="round"
-            stroke-linejoin="round"
-          >
-            <rect x="5" y="2" width="14" height="20" rx="2" ry="2"></rect>
-            <line x1="12" y1="18" x2="12.01" y2="18"></line>
-          </svg>
-        </div>
-        <span>&#x624B;&#x673A;&#x53F7;&#x767B;&#x5F55;</span>
-      </div>
-
-      <div class="nav-item">
-        <div class="icon-circle">
-          <svg
-            class="icon-svg"
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            stroke-width="1.5"
-            stroke-linecap="round"
-            stroke-linejoin="round"
-          >
-            <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"></path>
-            <circle cx="12" cy="7" r="4"></circle>
-          </svg>
-        </div>
-        <span>&#x5176;&#x4ED6;&#x65B9;&#x5F0F;&#x767B;&#x5F55;</span>
-      </div>
-
-      <div class="nav-item">
+      <button class="nav-item nav-button" type="button" @click="emit('go-register')">
         <div class="icon-circle">
           <svg
             class="icon-svg"
@@ -152,28 +117,11 @@ const emit = defineEmits([
             <line x1="5" y1="12" x2="19" y2="12"></line>
           </svg>
         </div>
-        <span>&#x6CE8;&#x518C;</span>
-      </div>
-
-      <div class="nav-item">
-        <div class="icon-circle">
-          <svg
-            class="icon-svg"
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            stroke-width="1.5"
-            stroke-linecap="round"
-            stroke-linejoin="round"
-          >
-            <circle cx="12" cy="12" r="1"></circle>
-            <circle cx="19" cy="12" r="1"></circle>
-            <circle cx="5" cy="12" r="1"></circle>
-          </svg>
-        </div>
-        <span>&#x66F4;&#x591A;</span>
-      </div>
+        <span>注册</span>
+      </button>
     </nav>
+
+    <footer class="footer">Copyright © 2025-2026 WebClass All Rights Reserved.</footer>
   </div>
 </template>
 
@@ -318,7 +266,7 @@ const emit = defineEmits([
   margin-top: auto;
   padding-bottom: 40px;
   display: flex;
-  justify-content: space-around;
+  justify-content: center;
   padding-left: 20px;
   padding-right: 20px;
 }
@@ -330,6 +278,13 @@ const emit = defineEmits([
   gap: 8px;
   color: #666;
   font-size: 12px;
+}
+
+.nav-button {
+  background: none;
+  border: none;
+  padding: 0;
+  cursor: pointer;
 }
 
 .icon-circle {
@@ -361,5 +316,15 @@ const emit = defineEmits([
 
 .success {
   color: #2f6bd9;
+}
+
+.footer {
+  margin-bottom: 20px;
+  text-align: center;
+  font-size: 11px;
+  color: #999;
+  width: 100%;
+  padding: 0 20px;
+  line-height: 1.5;
 }
 </style>
