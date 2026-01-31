@@ -1,10 +1,15 @@
 ﻿<script setup>
+import { ref } from 'vue'
 const props = defineProps({
   username: {
     type: String,
     default: '',
   },
   password: {
+    type: String,
+    default: '',
+  },
+  confirmPassword: {
     type: String,
     default: '',
   },
@@ -29,9 +34,13 @@ const props = defineProps({
 const emit = defineEmits([
   'update:username',
   'update:password',
+  'update:confirmPassword',
   'submit',
   'back',
 ])
+
+const showPassword = ref(false)
+const showConfirmPassword = ref(false)
 </script>
 
 <template>
@@ -51,10 +60,33 @@ const emit = defineEmits([
       <div class="input-group">
         <input
           :value="props.password"
-          type="password"
+          :type="showPassword ? 'text' : 'password'"
           placeholder="输入信聊密码"
           @input="emit('update:password', $event.target.value)"
         />
+        <button
+          class="toggle-btn"
+          type="button"
+          @click="showPassword = !showPassword"
+        >
+          {{ showPassword ? '隐藏' : '显示' }}
+        </button>
+      </div>
+
+      <div class="input-group">
+        <input
+          :value="props.confirmPassword"
+          :type="showConfirmPassword ? 'text' : 'password'"
+          placeholder="确认信聊密码"
+          @input="emit('update:confirmPassword', $event.target.value)"
+        />
+        <button
+          class="toggle-btn"
+          type="button"
+          @click="showConfirmPassword = !showConfirmPassword"
+        >
+          {{ showConfirmPassword ? '隐藏' : '显示' }}
+        </button>
       </div>
 
       <label class="agreement">
@@ -122,6 +154,7 @@ const emit = defineEmits([
   display: flex;
   align-items: center;
   padding: 0 15px;
+  gap: 8px;
 }
 
 .input-group input {
@@ -136,6 +169,16 @@ const emit = defineEmits([
 
 .input-group input::placeholder {
   color: #ccc;
+}
+
+.toggle-btn {
+  border: none;
+  background: none;
+  color: #4b6fa7;
+  font-size: 12px;
+  cursor: pointer;
+  padding: 0 4px;
+  white-space: nowrap;
 }
 
 .agreement {

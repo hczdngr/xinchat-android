@@ -14,6 +14,7 @@ const view = ref('login')
 
 const registerUsername = ref('')
 const registerPassword = ref('')
+const registerConfirmPassword = ref('')
 const registerLoading = ref(false)
 const registerError = ref('')
 const registerStatus = ref('')
@@ -25,9 +26,14 @@ const profile = ref(
 )
 
 const canSubmit = computed(() => username.value.trim() && password.value)
-const canRegister = computed(
-  () => registerUsername.value.trim() && registerPassword.value
-)
+const canRegister = computed(() => {
+  const nameOk = registerUsername.value.trim().length > 0
+  const pwdOk = registerPassword.value.length > 0
+  const confirmOk =
+    registerConfirmPassword.value.length > 0 &&
+    registerConfirmPassword.value === registerPassword.value
+  return nameOk && pwdOk && confirmOk
+})
 const isAuthed = computed(() => Boolean(token.value))
 
 
@@ -105,6 +111,7 @@ const logout = () => {
 const goRegister = () => {
   registerError.value = ''
   registerStatus.value = ''
+  registerConfirmPassword.value = ''
   view.value = 'register'
 }
 
@@ -119,7 +126,13 @@ const register = async () => {
   registerStatus.value = ''
 
   if (!canRegister.value) {
-    registerError.value = '请输入昵称和密码。'
+    if (!registerUsername.value.trim() || !registerPassword.value) {
+      registerError.value = '请输入昵称和密码。'
+    } else if (registerConfirmPassword.value !== registerPassword.value) {
+      registerError.value = '两次输入的密码不一致。'
+    } else {
+      registerError.value = '请确认密码。'
+    }
     return
   }
 
@@ -159,6 +172,8 @@ const register = async () => {
 
     setAuthSession(loginData)
     view.value = 'login'
+    registerConfirmPassword.value = ''
+    registerConfirmPassword.value = ''
   } catch (err) {
     registerError.value = '网络错误，请检查服务器后重试。'
   } finally {
@@ -186,6 +201,7 @@ const register = async () => {
       v-else-if="!isAuthed && view === 'register'"
       v-model:username="registerUsername"
       v-model:password="registerPassword"
+      v-model:confirmPassword="registerConfirmPassword"
       :loading="registerLoading"
       :error="registerError"
       :status="registerStatus"

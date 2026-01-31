@@ -105,9 +105,9 @@ const formatMessage = (msg) => {
   return '[消息]'
 }
 
-const formatTime = (value) => {
-  if (!value) return ''
-  const date = new Date(value)
+const formatTime = (value, fallbackMs) => {
+  if (!value && !Number.isFinite(fallbackMs)) return ''
+  const date = value ? new Date(value) : new Date(fallbackMs)
   if (Number.isNaN(date.getTime())) return ''
   return date.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })
 }
@@ -174,7 +174,7 @@ const updateLatest = (uid, entry) => {
     ...latestMap.value,
     [uid]: {
       text: messageText || '暂无消息',
-      time: formatTime(entry?.createdAt || entry?.raw?.createdAt),
+      time: formatTime(entry?.createdAt || entry?.raw?.createdAt, entry?.createdAtMs),
     },
   }
 }
@@ -211,6 +211,7 @@ const loadLatestForFriend = async (uid) => {
     const params = new URLSearchParams({
       targetType: 'private',
       targetUid: String(uid),
+      type: 'text',
       limit: '1',
     })
     const response = await fetch(`${apiBase}/api/chat/get?${params.toString()}`,
@@ -230,14 +231,16 @@ const loadLatestForFriend = async (uid) => {
 
 const loadUnreadCount = async (uid) => {
   const sinceTs = getReadAt(uid)
-  if (!sinceTs) return
   try {
     const params = new URLSearchParams({
       targetType: 'private',
       targetUid: String(uid),
+      type: 'text',
       limit: String(UNREAD_LIMIT),
-      sinceTs: String(sinceTs),
     })
+    if (sinceTs > 0) {
+      params.set('sinceTs', String(sinceTs))
+    }
     const response = await fetch(`${apiBase}/api/chat/get?${params.toString()}`,
       {
         headers: { ...authHeaders() },
@@ -284,6 +287,7 @@ const loadHistory = async (uid, { beforeId } = {}) => {
     const params = new URLSearchParams({
       targetType: 'private',
       targetUid: String(uid),
+      type: 'text',
       limit: String(PAGE_LIMIT),
     })
     if (beforeId) {
@@ -614,7 +618,7 @@ onUnmounted(() => {
             <div class="bubble">
               <div class="text">{{ item.content }}</div>
               <div class="meta">
-                <span class="time">{{ formatTime(item.createdAt) }}</span>
+                <span class="time">{{ formatTime(item.createdAt, item.createdAtMs) }}</span>
                 <span
                   v-if="item.senderUid !== selfUid"
                   class="read"

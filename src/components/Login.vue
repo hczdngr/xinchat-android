@@ -80,6 +80,13 @@ const emit = defineEmits([
           placeholder="输入信聊密码"
           @input="emit('update:password', $event.target.value)"
         />
+        <button
+          class="toggle-btn"
+          type="button"
+          @click="emit('toggle-password')"
+        >
+          {{ props.showPassword ? '隐藏' : '显示' }}
+        </button>
       </div>
 
       <button class="login-btn" type="submit" :disabled="!props.canSubmit || props.loading">
@@ -177,10 +184,11 @@ const emit = defineEmits([
   align-items: center;
   justify-content: center;
   box-shadow: 0 2px 8px rgba(0, 0, 0, 0.02);
+  gap: 8px;
 }
 
 .input-group input {
-  width: 100%;
+  flex: 1;
   height: 100%;
   border: none;
   outline: none;
@@ -192,6 +200,16 @@ const emit = defineEmits([
 
 .input-group input::placeholder {
   color: #c0c4cc;
+}
+
+.toggle-btn {
+  border: none;
+  background: none;
+  color: #5d6b85;
+  font-size: 12px;
+  cursor: pointer;
+  padding: 0 6px;
+  white-space: nowrap;
 }
 
 .login-btn {

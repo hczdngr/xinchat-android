@@ -1,1 +1,58 @@
-                        清理与文档
+﻿# 信聊聊天协议与最小运行说明
+
+## 统一消息字段（前端对外约定）
+- id: string，消息唯一 ID
+- senderUid: number，发送者 UID
+- targetUid: number，接收者 UID
+- targetType: string，仅支持 private
+- content: string，纯文本内容
+- createdAt: string，ISO 时间
+- createdAtMs: number，时间戳（毫秒）
+
+说明：后端存储在 data.content，前端通过 normalizeMessage 统一映射为 content。
+
+## HTTP API
+- POST /api/chat/send
+  - Header: Authorization: Bearer <token>
+  - Body: { senderUid, targetUid, targetType:'private', type:'text', content }
+  - Resp: { success, data, message }
+
+- GET /api/chat/get?targetUid=...&targetType=private&limit=...&beforeId=...
+  - Header: Authorization: Bearer <token>
+  - 支持分页：beforeId / sinceId / sinceTs / beforeTs
+  - Resp: { success, data, message }
+
+- DELETE /api/chat/del
+  - Header: Authorization: Bearer <token>
+  - Body: { id }
+  - Resp: { success, data, message }
+
+## WebSocket
+- 连接：/ws?token=...
+- 推送类型：
+  - chat: { type:'chat', data: message }
+  - presence: { type:'presence', data:{ uid, online } }
+  - heartbeat: 前端发送 { type:'heartbeat' }，服务端超时断开
+
+## 前端状态约定
+- messagesByUid[uid]: 消息列表
+- messageIdSet: 去重集合
+- unreadMap[uid]: 未读数（本地 readAt 计算）
+- activeChatUid: 当前会话 UID
+- localStorage: xinchat.readAt
+
+## 分页策略
+- 首次加载：limit + targetUid
+- 上拉加载：limit + beforeId（保持滚动位置）
+- 去重：收到 WS 或历史接口时，用 messageIdSet 过滤
+
+## 最小可运行脚本
+1) 启动后端：
+   - npm run backend
+2) 启动前端：
+   - npm install
+   - npm run dev
+
+## 环境变量
+- VITE_API_BASE=http://<你的后端IP>:3001
+
