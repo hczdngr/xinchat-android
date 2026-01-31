@@ -2,7 +2,7 @@
 import { computed, nextTick, onMounted, onUnmounted, reactive, ref } from 'vue'
 import FoundFriends from './FoundFriends.vue'
 
-const apiBase = import.meta.env.VITE_API_BASE || 'http://localhost:3001'
+const apiBase = import.meta.env.VITE_API_BASE || 'http://192.168.0.6:3001'
 const token = localStorage.getItem('xinchat.token') || ''
 const READ_AT_KEY = 'xinchat.readAt'
 const PAGE_LIMIT = 30
@@ -745,6 +745,8 @@ onUnmounted(() => {
   display: flex;
   flex-direction: column;
   overflow: hidden;
+  padding-top: env(safe-area-inset-top);
+  box-sizing: border-box;
 }
 
 .header {
@@ -975,13 +977,15 @@ onUnmounted(() => {
 }
 
 .bottom-nav {
-  height: 60px;
+  height: 68px;
   background-color: #f9f9f9;
   border-top: 1px solid rgba(0, 0, 0, 0.08);
   display: flex;
   align-items: center;
   padding-bottom: constant(safe-area-inset-bottom);
   padding-bottom: env(safe-area-inset-bottom);
+  padding-top: 6px;
+  box-sizing: border-box;
 }
 
 .nav-item {

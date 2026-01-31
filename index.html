@@ -2,12 +2,55 @@
 <html lang="">
   <head>
     <meta charset="UTF-8">
-    <link rel="icon" href="/favicon.ico">
+    <link rel="icon" href="/logo.png">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Vite App</title>
+    <title>XinChat</title>
+    <style>
+      html, body { height: 100%; margin: 0; background: #f2f3f5; }
+      body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Arial, sans-serif; }
+      #app { min-height: 100%; }
+      .boot-screen {
+        min-height: 100vh;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        gap: 18px;
+        color: #1a1a1a;
+        background: #f2f3f5;
+      }
+      .boot-logo {
+        width: 88px;
+        height: 88px;
+        border-radius: 22px;
+        background: #ffffff;
+        box-shadow: 0 10px 24px rgba(0, 0, 0, 0.08);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        overflow: hidden;
+      }
+      .boot-logo img {
+        width: 56px;
+        height: 56px;
+        object-fit: contain;
+      }
+      .boot-title { font-size: 20px; font-weight: 600; letter-spacing: 1px; }
+      .boot-sub { font-size: 12px; color: #8a8a8a; }
+      body.app-ready .boot-screen { display: none; }
+      [v-cloak] { display: none; }
+    </style>
   </head>
   <body>
-    <div id="app"></div>
+    <div id="app">
+      <div class="boot-screen">
+        <div class="boot-logo">
+          <img src="/logo.png" alt="XinChat" />
+        </div>
+        <div class="boot-title">正在进入登录</div>
+        <div class="boot-sub">XinChat</div>
+      </div>
+    </div>
     <script type="module" src="/src/main.js"></script>
   </body>
 </html>

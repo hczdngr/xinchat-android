@@ -60,7 +60,7 @@ const emit = defineEmits([
       <label class="agreement">
         <input class="agreement-input" type="checkbox" checked />
         <span class="checkbox-circle"></span>
-        <span>
+        <span class="agreement-text">
           已阅读并同意
           <a href="#">服务协议</a>
           和
@@ -89,10 +89,14 @@ const emit = defineEmits([
 
 .page {
   min-height: 100vh;
+  height: 100vh;
   display: flex;
   flex-direction: column;
   background-color: #f0f2f5;
   padding-top: 80px;
+  padding-top: calc(80px + env(safe-area-inset-top));
+  box-sizing: border-box;
+  overflow: hidden;
 }
 
 .title {
@@ -138,6 +142,7 @@ const emit = defineEmits([
   margin-top: 15px;
   display: flex;
   align-items: center;
+  position: relative;
   font-size: 13px;
   color: #666;
   gap: 8px;
@@ -145,11 +150,12 @@ const emit = defineEmits([
 }
 
 .agreement-input {
-  width: 18px;
-  height: 18px;
   margin: 0;
   opacity: 0;
-  cursor: pointer;
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  pointer-events: none;
 }
 
 .checkbox-circle {
@@ -177,6 +183,10 @@ const emit = defineEmits([
   top: 50%;
   left: 50%;
   transform: translate(-50%, -50%);
+}
+
+.agreement-text {
+  line-height: 1.4;
 }
 
 .agreement a {

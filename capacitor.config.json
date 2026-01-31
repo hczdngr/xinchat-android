@@ -1,9 +1,5 @@
 {
   "appId": "com.xinchat.android",
   "appName": "XinChat Android",
-  "webDir": "dist",
-  "server": {
-    "url": "http://10.178.46.43:5173",
-    "cleartext": true
-  }
+  "webDir": "dist"
 }

@@ -18,7 +18,7 @@ const props = defineProps({
 
 const emit = defineEmits(['back', 'refresh-friends'])
 
-const apiBase = import.meta.env.VITE_API_BASE || 'http://localhost:3001'
+const apiBase = import.meta.env.VITE_API_BASE || 'http://192.168.0.6:3001'
 const token = localStorage.getItem('xinchat.token') || ''
 
 const activeTab = ref('search')

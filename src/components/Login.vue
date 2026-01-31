@@ -41,7 +41,7 @@ const emit = defineEmits([
 
 <template>
   <div class="login-qq">
-    <header class="header">
+    <!-- <header class="header">
       <svg
         class="back-icon"
         viewBox="0 0 24 24"
@@ -53,7 +53,7 @@ const emit = defineEmits([
       >
         <polyline points="15 18 9 12 15 6"></polyline>
       </svg>
-    </header>
+    </header> -->
 
     <div class="title-area">
       <h1>添加账号</h1>
@@ -128,8 +128,12 @@ const emit = defineEmits([
 <style scoped>
 .login-qq {
   min-height: 100vh;
+  height: 100vh;
   display: flex;
   flex-direction: column;
+  padding-top: env(safe-area-inset-top);
+  box-sizing: border-box;
+  overflow: hidden;
 }
 
 .header {

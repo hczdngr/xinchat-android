@@ -18,7 +18,7 @@ const registerLoading = ref(false)
 const registerError = ref('')
 const registerStatus = ref('')
 
-const apiBase = import.meta.env.VITE_API_BASE || 'http://localhost:3001'
+const apiBase = import.meta.env.VITE_API_BASE || 'http://192.168.0.6:3001'
 const token = ref(localStorage.getItem('xinchat.token') || '')
 const profile = ref(
   JSON.parse(localStorage.getItem('xinchat.profile') || 'null') || {}
@@ -29,6 +29,7 @@ const canRegister = computed(
   () => registerUsername.value.trim() && registerPassword.value
 )
 const isAuthed = computed(() => Boolean(token.value))
+
 
 const setAuthSession = (data) => {
   localStorage.setItem('xinchat.token', data.token || '')
@@ -167,7 +168,7 @@ const register = async () => {
 </script>
 
 <template>
-  <div class="page">
+  <div class="page" v-cloak>
     <Login
       v-if="!isAuthed && view === 'login'"
       v-model:username="username"
@@ -201,4 +202,5 @@ const register = async () => {
   min-height: 100vh;
   background: #f2f3f5;
 }
+
 </style>
