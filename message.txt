@@ -1,0 +1,96 @@
+﻿XinChat 前端聊天协议与运行说明
+
+一、消息字段（前端统一结构）
+- id: string 唯一消息 ID
+- senderUid: number 发送者 UID
+- targetUid: number 接收者 UID
+- targetType: 'private'
+- content: string 文本内容
+- createdAt: string ISO 时间
+- createdAtMs: number 毫秒时间戳（前端用 createdAt 解析补全）
+
+二、HTTP API（Authorization: Bearer <token>）
+1) 登录
+POST /api/login
+Body: { username, password }
+
+2) 注册
+POST /api/register
+Body: { username, password }
+
+3) 发送文本
+POST /api/chat/send
+Body: { senderUid, targetUid, targetType: 'private', type: 'text', content }
+
+4) 拉取历史
+GET /api/chat/get?targetType=private&targetUid=...&limit=...&beforeId=...
+
+5) 删除/撤回
+DELETE /api/chat/del
+Body: { id }
+
+6) 获取用户资料
+GET /api/profile
+
+7) 获取好友列表
+GET /api/friends/list
+
+三、WebSocket 协议
+连接：/ws?token=...
+客户端发送：
+- { type: 'heartbeat' }
+
+服务端推送：
+- { type: 'chat', data: <message> }
+- { type: 'presence', data: { uid, online } }
+- { type: 'presence_snapshot', data: [{ uid, online }] }
+
+四、前端状态与规则
+- messagesByUid: 按好友 UID 维护消息列表
+- messageIdSet: 用于去重（WS 与历史合并）
+- unreadMap: 未读数（本地计算）
+- readAtMap: 本地最后阅读时间戳（localStorage: xinchat.readAt）
+
+五、最小可运行脚本
+1) 启动后端
+cd backend
+npm install
+npm run dev
+
+2) 启动前端
+npm install
+npm run dev
+
+六、环境变量
+- VITE_API_BASE: 后端地址（默认 http://localhost:3001）
+
+七、好友与请求（前端显示逻辑）
+1) 搜索用户
+GET /api/friends/search?uid=...
+显示逻辑：
+- 结果 UID 在好友列表内 → “已是好友”
+- 结果 UID 在 outgoing pending 内 → “请求已发送”
+- 结果 UID 在 incoming pending 内 → “对方已请求你”
+
+2) 发送请求
+POST /api/friends/add
+Body: { friendUid }
+返回状态：
+- pending → 前端显示“请求已发送”
+- accepted / already_friends → 前端刷新好友列表
+
+3) 请求列表
+GET /api/friends/requests
+前端展示：
+- incoming 列表：显示“同意/拒绝”
+- outgoing 列表：显示“等待处理/已拒绝”
+
+4) 处理请求
+POST /api/friends/respond
+Body: { requesterUid, action: 'accept' | 'reject' }
+前端处理：刷新请求列表 + 刷新好友列表
+
+5) 删除好友
+DELETE /api/friends/remove
+Body: { friendUid }
+前端处理：刷新好友列表
