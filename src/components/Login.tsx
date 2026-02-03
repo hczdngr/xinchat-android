@@ -7,6 +7,7 @@ import {
   TextInput,
   View,
 } from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import Svg, { Circle, Line, Path } from 'react-native-svg';
 
 type Props = {
@@ -38,8 +39,15 @@ export default function Login({
   onSubmit,
   onGoRegister,
 }: Props) {
+  const insets = useSafeAreaInsets();
+
   return (
-    <View style={styles.page}>
+    <View
+      style={[
+        styles.page,
+        { paddingTop: insets.top + 40, paddingBottom: 30 + insets.bottom },
+      ]}
+    >
       <View style={styles.titleArea}>
         <Text style={styles.title}>添加账号</Text>
       </View>
@@ -102,11 +110,10 @@ const styles = StyleSheet.create({
     flex: 1,
     backgroundColor: '#f2f3f5',
     paddingHorizontal: 24,
-    paddingTop: 40,
   },
   titleArea: {
     alignItems: 'center',
-    marginTop: 40,
+    marginTop: 20,
     marginBottom: 40,
   },
   title: {
@@ -175,7 +182,6 @@ const styles = StyleSheet.create({
   footer: {
     marginTop: 'auto',
     alignItems: 'center',
-    paddingBottom: 30,
     gap: 12,
   },
   registerBtn: {

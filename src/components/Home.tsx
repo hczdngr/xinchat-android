@@ -53,6 +53,7 @@ const RECONNECT_MAX_MS = 10000;
 
 export default function Home({ profile }: { profile: Profile }) {
   const insets = useSafeAreaInsets();
+  const navPad = Math.max(insets.bottom, 10);
   const tokenRef = useRef<string>('');
   const [profileData, setProfileData] = useState<Profile>({
     username: '',
@@ -761,7 +762,7 @@ export default function Home({ profile }: { profile: Profile }) {
             })}
           </ScrollView>
 
-          <View style={styles.chatInput}>
+          <View style={[styles.chatInput, { paddingBottom: 12 + insets.bottom }]}>
             <TextInput
               value={draftMessage}
               placeholder="输入消息..."
@@ -853,14 +854,33 @@ export default function Home({ profile }: { profile: Profile }) {
               : null}
           </ScrollView>
 
-          <View style={[styles.bottomNav, { paddingBottom: insets.bottom }]}>
-            <Pressable style={[styles.navItem, homeTab === 'messages' && styles.navItemActive]} onPress={() => setHomeTab('messages')}>
+          <View
+            style={[
+              styles.bottomNav,
+              { paddingTop: navPad, paddingBottom: navPad, minHeight: 55 + navPad * 2 },
+            ]}
+          >
+            <Pressable
+              style={[
+                styles.navItem,
+                { paddingVertical: navPad },
+                homeTab === 'messages' && styles.navItemActive,
+              ]}
+              onPress={() => setHomeTab('messages')}
+            >
               <Svg viewBox="0 0 24 24" width={28} height={28} fill={homeTab === 'messages' ? '#0099ff' : '#7d7d7d'}>
                 <Path d="M20 2H4c-1.1 0-2 .9-2 2v18l4-4h14c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2z" />
               </Svg>
               <Text style={[styles.navText, homeTab === 'messages' && styles.navTextActive]}>消息</Text>
             </Pressable>
-            <Pressable style={[styles.navItem, homeTab === 'contacts' && styles.navItemActive]} onPress={() => setHomeTab('contacts')}>
+            <Pressable
+              style={[
+                styles.navItem,
+                { paddingVertical: navPad },
+                homeTab === 'contacts' && styles.navItemActive,
+              ]}
+              onPress={() => setHomeTab('contacts')}
+            >
               <Svg viewBox="0 0 24 24" width={28} height={28} fill={homeTab === 'contacts' ? '#0099ff' : '#7d7d7d'}>
                 <Path d="M12 12c2.21 0 4-1.79 4-4s-1.79-4-4-4-4 1.79-4 4 1.79 4 4 4zm0 2c-2.67 0-8 1.34-8 4v2h16v-2c0-2.66-5.33-4-8-4z" />
               </Svg>
@@ -960,7 +980,7 @@ const styles = StyleSheet.create({
     paddingBottom: 12,
   },
   bottomNav: {
-    height: 55,
+    minHeight: 55,
     backgroundColor: '#f9f9f9',
     borderTopWidth: 1,
     borderTopColor: 'rgba(0,0,0,0.05)',
@@ -971,7 +991,6 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
     gap: 3,
-    paddingVertical: 6,
   },
   navItemActive: {},
   navText: {

@@ -7,6 +7,7 @@ import {
   TextInput,
   View,
 } from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import Svg, { Circle, Line, Path } from 'react-native-svg';
 
 type Props = {
@@ -38,11 +39,17 @@ export default function Register({
   onSubmit,
   onBack,
 }: Props) {
+  const insets = useSafeAreaInsets();
   const [showPassword, setShowPassword] = useState(false);
   const [showConfirm, setShowConfirm] = useState(false);
 
   return (
-    <View style={styles.page}>
+    <View
+      style={[
+        styles.page,
+        { paddingTop: insets.top + 40, paddingBottom: 20 + insets.bottom },
+      ]}
+    >
       <View style={styles.titleArea}>
         <Text style={styles.title}>欢迎注册信聊</Text>
       </View>
@@ -119,11 +126,10 @@ const styles = StyleSheet.create({
     flex: 1,
     backgroundColor: '#f0f2f5',
     paddingHorizontal: 24,
-    paddingTop: 40,
   },
   titleArea: {
     alignItems: 'center',
-    marginTop: 40,
+    marginTop: 20,
     marginBottom: 40,
   },
   title: {
@@ -190,7 +196,6 @@ const styles = StyleSheet.create({
   },
   footer: {
     marginTop: 'auto',
-    paddingBottom: 20,
     textAlign: 'center',
     fontSize: 11,
     color: '#999',
