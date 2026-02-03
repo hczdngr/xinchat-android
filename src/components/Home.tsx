@@ -1,5 +1,6 @@
 ﻿import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
+  Dimensions,
   Image,
   Pressable,
   ScrollView,
@@ -13,6 +14,7 @@ import Svg, { Line, Path } from 'react-native-svg';
 import { API_BASE } from '../config';
 import { storage } from '../storage';
 import FoundFriends from './FoundFriends';
+import Profile from './Profile';
 
 type Profile = {
   uid?: number;
@@ -40,11 +42,15 @@ type Message = {
   raw?: any;
 };
 
-type LatestMap = Record<number, { text: string; time: string }>;
+type LatestMap = Record<number, { text: string; time: string; ts: number }>;
 type ReadAtMap = Record<number, number>;
 type BucketMap = Record<number, Message[]>;
+type PinnedMap = Record<number, boolean>;
+type HiddenMap = Record<number, boolean>;
 
 const READ_AT_KEY = 'xinchat.readAt';
+const PINNED_KEY = 'xinchat.pinned';
+const HIDDEN_KEY = 'xinchat.hiddenChats';
 const PAGE_LIMIT = 30;
 const UNREAD_LIMIT = 200;
 const HEARTBEAT_MS = 20000;
@@ -53,8 +59,9 @@ const RECONNECT_MAX_MS = 10000;
 
 export default function Home({ profile }: { profile: Profile }) {
   const insets = useSafeAreaInsets();
-  const navPad = Math.max(insets.bottom, 10);
+  const navPad = Math.min(insets.bottom, 6);
   const tokenRef = useRef<string>('');
+  const [tokenReady, setTokenReady] = useState(false);
   const [profileData, setProfileData] = useState<Profile>({
     username: '',
     nickname: '',
@@ -71,10 +78,15 @@ export default function Home({ profile }: { profile: Profile }) {
   const [historyLoading, setHistoryLoading] = useState<Record<number, boolean>>({});
   const [historyHasMore, setHistoryHasMore] = useState<Record<number, boolean>>({});
   const [readAtMap, setReadAtMap] = useState<ReadAtMap>({});
+  const [pinnedMap, setPinnedMap] = useState<PinnedMap>({});
+  const [hiddenMap, setHiddenMap] = useState<HiddenMap>({});
+  const [menuVisible, setMenuVisible] = useState(false);
+  const [menuTargetUid, setMenuTargetUid] = useState<number | null>(null);
+  const [menuPosition, setMenuPosition] = useState({ x: 0, y: 0 });
 
   const [activeChatUid, setActiveChatUid] = useState<number | null>(null);
   const [draftMessage, setDraftMessage] = useState('');
-  const [activeView, setActiveView] = useState<'list' | 'found'>('list');
+  const [activeView, setActiveView] = useState<'list' | 'found' | 'profile'>('list');
   const [friendsRefreshKey, setFriendsRefreshKey] = useState(0);
   const [homeTab, setHomeTab] = useState<'messages' | 'contacts'>('messages');
 
@@ -110,9 +122,40 @@ export default function Home({ profile }: { profile: Profile }) {
   useEffect(() => {
     const loadToken = async () => {
       tokenRef.current = (await storage.getString('xinchat.token')) || '';
+      setTokenReady(true);
     };
     void loadToken();
   }, []);
+
+  useEffect(() => {
+    const loadProfile = async () => {
+      if (!tokenReady || !tokenRef.current) return;
+      try {
+        const response = await fetch(API_BASE + '/api/profile', {
+          headers: { Authorization: `Bearer ${tokenRef.current}` },
+        });
+        const data = await response.json().catch(() => ({}));
+        if (response.ok && data?.success && data?.user) {
+          setProfileData((prev) => ({ ...prev, ...data.user }));
+          await storage.setJson('xinchat.profile', {
+            uid: data.user.uid,
+            username: data.user.username,
+            nickname: data.user.nickname,
+            avatar: data.user.avatar,
+            signature: data.user.signature,
+            gender: data.user.gender,
+            birthday: data.user.birthday,
+            country: data.user.country,
+            province: data.user.province,
+            region: data.user.region,
+          });
+        }
+      } catch (error) {
+        console.warn('Profile request failed', error);
+      }
+    };
+    void loadProfile();
+  }, [tokenReady]);
 
   useEffect(() => {
     const loadReadAt = async () => {
@@ -122,6 +165,23 @@ export default function Home({ profile }: { profile: Profile }) {
       }
     };
     void loadReadAt();
+  }, []);
+
+  useEffect(() => {
+    const loadPinned = async () => {
+      const stored = await storage.getJson<PinnedMap>(PINNED_KEY);
+      if (stored) {
+        setPinnedMap(stored);
+      }
+    };
+    const loadHidden = async () => {
+      const stored = await storage.getJson<HiddenMap>(HIDDEN_KEY);
+      if (stored) {
+        setHiddenMap(stored);
+      }
+    };
+    void loadPinned();
+    void loadHidden();
   }, []);
 
   const displayName = useMemo(
@@ -220,6 +280,14 @@ export default function Home({ profile }: { profile: Profile }) {
     await storage.setJson(READ_AT_KEY, nextMap);
   }, []);
 
+  const persistPinnedMap = useCallback(async (nextMap: PinnedMap) => {
+    await storage.setJson(PINNED_KEY, nextMap);
+  }, []);
+
+  const persistHiddenMap = useCallback(async (nextMap: HiddenMap) => {
+    await storage.setJson(HIDDEN_KEY, nextMap);
+  }, []);
+
   const getReadAt = useCallback((uid: number) => {
     const value = Number(readAtMapRef.current[uid]);
     return Number.isFinite(value) ? value : 0;
@@ -258,16 +326,35 @@ export default function Home({ profile }: { profile: Profile }) {
         [uid]: {
           text: messageText || '暂无消息',
           time: formatTime(entry?.createdAt || entry?.raw?.createdAt, entry?.createdAtMs),
+          ts: Number.isFinite(entry?.createdAtMs)
+            ? entry.createdAtMs
+            : Number.isFinite(Date.parse(entry?.createdAt))
+              ? Date.parse(entry?.createdAt)
+              : Date.now(),
         },
       }));
     },
     [formatMessage, formatTime]
   );
 
+  const unhideChat = useCallback(
+    (uid: number) => {
+      if (!hiddenMap[uid]) return;
+      setHiddenMap((prev) => {
+        const next = { ...prev };
+        delete next[uid];
+        void persistHiddenMap(next);
+        return next;
+      });
+    },
+    [hiddenMap, persistHiddenMap]
+  );
+
   const insertMessages = useCallback(
     (uid: number, list: any[], { prepend }: { prepend?: boolean } = {}) => {
       if (!uid) return;
       ensureMessageBucket(uid);
+      unhideChat(uid);
       const bucket = messagesByUidRef.current[uid] || [];
       let idSet = messageIdSetsRef.current.get(uid);
       if (!idSet) {
@@ -290,7 +377,7 @@ export default function Home({ profile }: { profile: Profile }) {
       }
       recalcUnread(uid, nextBucket);
     },
-    [ensureMessageBucket, normalizeMessage, recalcUnread, selfUid, updateLatest]
+    [ensureMessageBucket, normalizeMessage, recalcUnread, selfUid, unhideChat, updateLatest]
   );
 
   const loadLatestForFriend = useCallback(
@@ -441,6 +528,14 @@ export default function Home({ profile }: { profile: Profile }) {
   }, []);
 
   const closeFoundFriends = useCallback(() => {
+    setActiveView('list');
+  }, []);
+
+  const openProfile = useCallback(() => {
+    setActiveView('profile');
+  }, []);
+
+  const closeProfile = useCallback(() => {
     setActiveView('list');
   }, []);
 
@@ -687,6 +782,117 @@ export default function Home({ profile }: { profile: Profile }) {
     };
   }, [connectWs, loadFriends, loadProfile, teardownWs]);
 
+  const messageItems = useMemo(() => {
+    const filtered = friends.filter((friend) => !hiddenMap[friend.uid]);
+    return filtered
+      .map((friend) => {
+        const latest = latestMap[friend.uid];
+        return {
+          friend,
+          latest,
+          pinned: Boolean(pinnedMap[friend.uid]),
+          unread: unreadMap[friend.uid] || 0,
+        };
+      })
+      .sort((a, b) => {
+        if (a.pinned !== b.pinned) return a.pinned ? -1 : 1;
+        const ta = a.latest?.ts || 0;
+        const tb = b.latest?.ts || 0;
+        return tb - ta;
+      });
+  }, [friends, hiddenMap, latestMap, pinnedMap, unreadMap]);
+
+  const closeMenu = useCallback(() => {
+    setMenuVisible(false);
+    setMenuTargetUid(null);
+  }, []);
+
+  const openMenu = useCallback((event: any, uid: number) => {
+    const { width, height } = Dimensions.get('window');
+    const menuWidth = 160;
+    const menuHeight = 96;
+    const x = Math.min(event.nativeEvent.pageX, width - menuWidth - 10);
+    const y = Math.min(event.nativeEvent.pageY, height - menuHeight - 10);
+    setMenuPosition({ x, y });
+    setMenuTargetUid(uid);
+    setMenuVisible(true);
+  }, []);
+
+  const togglePin = useCallback(() => {
+    if (!menuTargetUid) return;
+    setPinnedMap((prev) => {
+      const next = { ...prev, [menuTargetUid]: !prev[menuTargetUid] };
+      if (!next[menuTargetUid]) {
+        delete next[menuTargetUid];
+      }
+      void persistPinnedMap(next);
+      return next;
+    });
+    closeMenu();
+  }, [closeMenu, menuTargetUid, persistPinnedMap]);
+
+  const deleteChat = useCallback(async () => {
+    if (!menuTargetUid) return;
+    const uid = menuTargetUid;
+    closeMenu();
+
+    const deleteBatch = async (beforeId?: number | string) => {
+      const params = new URLSearchParams({
+        targetType: 'private',
+        targetUid: String(uid),
+        type: 'text',
+        limit: String(PAGE_LIMIT),
+      });
+      if (beforeId) {
+        params.set('beforeId', String(beforeId));
+      }
+      const response = await fetch(`${API_BASE}/api/chat/get?${params.toString()}`, {
+        headers: { ...authHeaders() },
+      });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok || !data?.success || !Array.isArray(data?.data)) {
+        return { done: true, lastId: null as null | number | string };
+      }
+      const list = data.data;
+      for (const item of list) {
+        if (!item?.id) continue;
+        await fetch(`${API_BASE}/api/chat/del`, {
+          method: 'DELETE',
+          headers: { 'Content-Type': 'application/json', ...authHeaders() },
+          body: JSON.stringify({ id: item.id }),
+        }).catch(() => undefined);
+      }
+      if (list.length < PAGE_LIMIT) {
+        return { done: true, lastId: null as null | number | string };
+      }
+      return { done: false, lastId: list[0]?.id || null };
+    };
+
+    let beforeId: number | string | null = undefined;
+    for (;;) {
+      const result = await deleteBatch(beforeId || undefined);
+      if (result.done || !result.lastId) break;
+      beforeId = result.lastId;
+    }
+
+    setHiddenMap((prev) => {
+      const next = { ...prev, [uid]: true };
+      void persistHiddenMap(next);
+      return next;
+    });
+    setMessagesByUid((prev) => {
+      const next = { ...prev };
+      delete next[uid];
+      return next;
+    });
+    setLatestMap((prev) => {
+      const next = { ...prev };
+      delete next[uid];
+      return next;
+    });
+    setUnreadMap((prev) => ({ ...prev, [uid]: 0 }));
+  }, [authHeaders, closeMenu, menuTargetUid, persistHiddenMap]);
+
   return (
     <View style={[styles.page, { paddingTop: insets.top }]}>
       {activeView === 'found' && !activeChatUid ? (
@@ -699,11 +905,19 @@ export default function Home({ profile }: { profile: Profile }) {
         />
       ) : null}
 
+      {activeView === 'profile' && !activeChatUid ? (
+        <Profile
+          profile={profileData}
+          onBack={closeProfile}
+          onEdit={() => {}}
+        />
+      ) : null}
+
       {activeChatUid ? (
         <>
           <View style={styles.chatHeader}>
             <Pressable style={styles.chatBack} onPress={closeChat}>
-              <Text style={styles.backChevron}>{"<"}</Text>
+              <BackIcon />
             </Pressable>
             <View>
               <Text style={styles.chatName}>
@@ -783,17 +997,17 @@ export default function Home({ profile }: { profile: Profile }) {
         </>
       ) : null}
 
-      {!activeChatUid && activeView !== 'found' ? (
+      {!activeChatUid && activeView !== 'found' && activeView !== 'profile' ? (
         <View style={styles.home}>
           <View style={styles.header}>
             <View style={styles.headerLeft}>
-              <View style={styles.avatarContainer}>
+              <Pressable style={styles.avatarContainer} onPress={openProfile}>
                 {avatarUrl ? (
                   <Image source={{ uri: avatarUrl }} style={styles.avatarImg} />
                 ) : (
                   <Text style={styles.avatarFallback}>{avatarText}</Text>
                 )}
-              </View>
+              </Pressable>
               <Text style={styles.username}>{displayName}</Text>
             </View>
             <Pressable style={styles.headerRight} onPress={openFoundFriends}>
@@ -813,57 +1027,104 @@ export default function Home({ profile }: { profile: Profile }) {
             </View>
           </View>
 
-          <ScrollView style={styles.content} contentContainerStyle={styles.contentInner}>
-            {loadingFriends ? <Text style={styles.empty}>正在加载联系人...</Text> : null}
-            {!loadingFriends && friends.length === 0 ? (
-              <Text style={styles.empty}>暂无联系人</Text>
-            ) : null}
-            {!loadingFriends && friends.length > 0
-              ? friends.map((friend) => (
+          {homeTab === 'messages' ? (
+            <ScrollView style={styles.msgList} contentContainerStyle={styles.msgListInner}>
+              {loadingFriends ? <Text style={styles.empty}>正在加载消息...</Text> : null}
+              {!loadingFriends && messageItems.length === 0 ? (
+                <Text style={styles.empty}>暂无消息</Text>
+              ) : null}
+              {!loadingFriends &&
+                messageItems.map(({ friend, latest, pinned, unread }) => (
                   <Pressable
                     key={friend.uid}
-                    style={styles.contactItem}
+                    style={[styles.msgItem, pinned && styles.msgItemPinned]}
                     onPress={() => openChat(friend)}
+                    onLongPress={(event) => openMenu(event, friend.uid)}
                   >
-                    <View style={styles.contactAvatar}>
-                      <Text style={styles.avatarText}>
-                        {getAvatarText(friend.nickname || friend.username)}
-                      </Text>
-                      <View style={[styles.presence, friend.online && styles.presenceOnline]} />
-                    </View>
-                    <View style={styles.contactInfo}>
-                      <Text style={styles.contactName}>
-                        {friend.nickname || friend.username || '联系人'}
-                      </Text>
-                      <Text style={styles.contactSub}>
-                        {latestMap[friend.uid]?.text || '暂无消息'}
-                      </Text>
-                    </View>
-                    <View style={styles.contactMeta}>
-                      <Text style={styles.contactTime}>{latestMap[friend.uid]?.time || ''}</Text>
-                      {unreadMap[friend.uid] > 0 ? (
-                        <View style={styles.unreadBadge}>
-                          <Text style={styles.unreadText}>
-                            {unreadMap[friend.uid] > 99 ? '99+' : unreadMap[friend.uid]}
+                    <View style={styles.avatarBox}>
+                      {friend.avatar ? (
+                        <Image source={{ uri: friend.avatar }} style={styles.msgAvatar} />
+                      ) : (
+                        <View style={styles.msgAvatarFallback}>
+                          <Text style={styles.msgAvatarText}>
+                            {getAvatarText(friend.nickname || friend.username)}
+                          </Text>
+                        </View>
+                      )}
+                      {unread > 0 ? (
+                        <View style={styles.badge}>
+                          <Text style={styles.badgeText}>
+                            {unread > 99 ? '99+' : unread}
                           </Text>
                         </View>
                       ) : null}
                     </View>
+                    <View style={styles.msgContentWrapper}>
+                      <View style={styles.msgTopRow}>
+                        <Text style={styles.msgNickname} numberOfLines={1}>
+                          {friend.nickname || friend.username || '联系人'}
+                        </Text>
+                        <Text style={styles.msgTime}>{latest?.time || ''}</Text>
+                      </View>
+                      <Text style={styles.msgPreview} numberOfLines={1}>
+                        {latest?.text || '暂无消息'}
+                      </Text>
+                    </View>
                   </Pressable>
-                ))
-              : null}
-          </ScrollView>
+                ))}
+            </ScrollView>
+          ) : (
+            <ScrollView style={styles.content} contentContainerStyle={styles.contentInner}>
+              {loadingFriends ? <Text style={styles.empty}>正在加载联系人...</Text> : null}
+              {!loadingFriends && friends.length === 0 ? (
+                <Text style={styles.empty}>暂无联系人</Text>
+              ) : null}
+              {!loadingFriends && friends.length > 0
+                ? friends.map((friend) => (
+                    <Pressable
+                      key={friend.uid}
+                      style={styles.contactItem}
+                      onPress={() => openChat(friend)}
+                    >
+                      <View style={styles.contactAvatar}>
+                        <Text style={styles.avatarText}>
+                          {getAvatarText(friend.nickname || friend.username)}
+                        </Text>
+                        <View style={[styles.presence, friend.online && styles.presenceOnline]} />
+                      </View>
+                      <View style={styles.contactInfo}>
+                        <Text style={styles.contactName}>
+                          {friend.nickname || friend.username || '联系人'}
+                        </Text>
+                        <Text style={styles.contactSub}>
+                          {latestMap[friend.uid]?.text || '暂无消息'}
+                        </Text>
+                      </View>
+                      <View style={styles.contactMeta}>
+                        <Text style={styles.contactTime}>{latestMap[friend.uid]?.time || ''}</Text>
+                        {unreadMap[friend.uid] > 0 ? (
+                          <View style={styles.unreadBadge}>
+                            <Text style={styles.unreadText}>
+                              {unreadMap[friend.uid] > 99 ? '99+' : unreadMap[friend.uid]}
+                            </Text>
+                          </View>
+                        ) : null}
+                      </View>
+                    </Pressable>
+                  ))
+                : null}
+            </ScrollView>
+          )}
 
           <View
             style={[
               styles.bottomNav,
-              { paddingTop: navPad, paddingBottom: navPad, minHeight: 55 + navPad * 2 },
+              { paddingTop: navPad, paddingBottom: navPad },
             ]}
           >
             <Pressable
               style={[
                 styles.navItem,
-                { paddingVertical: navPad },
                 homeTab === 'messages' && styles.navItemActive,
               ]}
               onPress={() => setHomeTab('messages')}
@@ -876,7 +1137,6 @@ export default function Home({ profile }: { profile: Profile }) {
             <Pressable
               style={[
                 styles.navItem,
-                { paddingVertical: navPad },
                 homeTab === 'contacts' && styles.navItemActive,
               ]}
               onPress={() => setHomeTab('contacts')}
@@ -885,6 +1145,23 @@ export default function Home({ profile }: { profile: Profile }) {
                 <Path d="M12 12c2.21 0 4-1.79 4-4s-1.79-4-4-4-4 1.79-4 4 1.79 4 4 4zm0 2c-2.67 0-8 1.34-8 4v2h16v-2c0-2.66-5.33-4-8-4z" />
               </Svg>
               <Text style={[styles.navText, homeTab === 'contacts' && styles.navTextActive]}>联系人</Text>
+            </Pressable>
+          </View>
+        </View>
+      ) : null}
+
+      {menuVisible && menuTargetUid ? (
+        <View style={styles.menuOverlay}>
+          <Pressable style={styles.menuBackdrop} onPress={closeMenu} />
+          <View style={[styles.menuPanel, { left: menuPosition.x, top: menuPosition.y }]}>
+            <Pressable style={styles.menuItem} onPress={togglePin}>
+              <Text style={styles.menuText}>
+                {pinnedMap[menuTargetUid] ? '取消置顶' : '置顶该聊天'}
+              </Text>
+            </Pressable>
+            <View style={styles.menuDivider} />
+            <Pressable style={styles.menuItem} onPress={deleteChat}>
+              <Text style={[styles.menuText, styles.menuDanger]}>删除聊天</Text>
             </Pressable>
           </View>
         </View>
@@ -978,6 +1255,96 @@ const styles = StyleSheet.create({
   contentInner: {
     paddingHorizontal: 16,
     paddingBottom: 12,
+  },
+  msgList: {
+    flex: 1,
+    backgroundColor: '#f5f6fa',
+  },
+  msgListInner: {
+    paddingBottom: 20,
+  },
+  msgItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingVertical: 12,
+    paddingHorizontal: 15,
+    backgroundColor: 'transparent',
+    borderBottomWidth: 1,
+    borderBottomColor: 'rgba(0,0,0,0.03)',
+  },
+  msgItemPinned: {
+    backgroundColor: '#e6e6e6',
+  },
+  avatarBox: {
+    position: 'relative',
+    marginRight: 12,
+  },
+  msgAvatar: {
+    width: 48,
+    height: 48,
+    borderRadius: 8,
+    resizeMode: 'cover',
+    borderWidth: 1,
+    borderColor: 'rgba(0,0,0,0.03)',
+  },
+  msgAvatarFallback: {
+    width: 48,
+    height: 48,
+    borderRadius: 8,
+    backgroundColor: '#f0f2f5',
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderWidth: 1,
+    borderColor: 'rgba(0,0,0,0.03)',
+  },
+  msgAvatarText: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: '#4a9df8',
+  },
+  badge: {
+    position: 'absolute',
+    top: -5,
+    right: -5,
+    backgroundColor: '#ff4d4f',
+    borderRadius: 8,
+    minWidth: 16,
+    height: 16,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 4,
+    borderWidth: 1,
+    borderColor: '#fff',
+  },
+  badgeText: {
+    color: '#fff',
+    fontSize: 10,
+    fontWeight: '600',
+  },
+  msgContentWrapper: {
+    flex: 1,
+    overflow: 'hidden',
+    gap: 4,
+  },
+  msgTopRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+  msgNickname: {
+    fontSize: 16,
+    color: '#1a1a1a',
+    fontWeight: '500',
+    flexShrink: 1,
+    paddingRight: 8,
+  },
+  msgTime: {
+    fontSize: 12,
+    color: '#b2b2b2',
+  },
+  msgPreview: {
+    fontSize: 14,
+    color: '#999',
   },
   bottomNav: {
     minHeight: 55,
@@ -1074,6 +1441,41 @@ const styles = StyleSheet.create({
     color: '#9a9a9a',
     fontSize: 12,
     paddingVertical: 12,
+  },
+  menuOverlay: {
+    ...StyleSheet.absoluteFillObject,
+    zIndex: 100,
+  },
+  menuBackdrop: {
+    ...StyleSheet.absoluteFillObject,
+  },
+  menuPanel: {
+    position: 'absolute',
+    width: 160,
+    backgroundColor: 'rgba(255,255,255,0.96)',
+    borderRadius: 12,
+    overflow: 'hidden',
+    shadowColor: '#000',
+    shadowOpacity: 0.2,
+    shadowOffset: { width: 0, height: 8 },
+    shadowRadius: 24,
+    elevation: 6,
+  },
+  menuItem: {
+    paddingVertical: 12,
+    paddingHorizontal: 16,
+    alignItems: 'center',
+  },
+  menuText: {
+    fontSize: 14,
+    color: '#333',
+  },
+  menuDivider: {
+    height: 1,
+    backgroundColor: '#e5e5e5',
+  },
+  menuDanger: {
+    color: '#ff4d4f',
   },
   chatHeader: {
     flexDirection: 'row',
@@ -1198,6 +1600,20 @@ const styles = StyleSheet.create({
     fontWeight: '600',
   },
 });
+
+function BackIcon() {
+  return (
+    <Svg width={24} height={24} viewBox="0 0 24 24" fill="none">
+      <Path
+        d="M15 18L9 12L15 6"
+        stroke="currentColor"
+        strokeWidth={2}
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </Svg>
+  );
+}
 
 
 

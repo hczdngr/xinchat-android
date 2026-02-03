@@ -1,5 +1,9 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
+  Animated,
+  BackHandler,
+  Dimensions,
+  PanResponder,
   Pressable,
   ScrollView,
   StyleSheet,
@@ -7,6 +11,7 @@ import {
   TextInput,
   View,
 } from 'react-native';
+import Svg, { Path } from 'react-native-svg';
 import { API_BASE } from '../config';
 import { storage } from '../storage';
 
@@ -40,7 +45,9 @@ export default function FoundFriends({
   onBack,
   onRefreshFriends,
 }: Props) {
-  const [activeTab, setActiveTab] = useState<'search' | 'requests' | 'friends'>('search');
+  const appear = useRef(new Animated.Value(0)).current;
+  const isLeaving = useRef(false);
+  const [activeTab, setActiveTab] = useState<'search' | 'requests'>('search');
   const [searchUid, setSearchUid] = useState('');
   const [searching, setSearching] = useState(false);
   const [searchError, setSearchError] = useState('');
@@ -52,8 +59,33 @@ export default function FoundFriends({
   const [outgoingRequests, setOutgoingRequests] = useState<Request[]>([]);
   const [requestsError, setRequestsError] = useState('');
 
-  const [friendsLoading, setFriendsLoading] = useState(false);
-  const [friendsError, setFriendsError] = useState('');
+  const runExit = useCallback(() => {
+    if (isLeaving.current) return;
+    isLeaving.current = true;
+    Animated.timing(appear, {
+      toValue: 0,
+      duration: 180,
+      useNativeDriver: true,
+    }).start(() => {
+      onBack();
+    });
+  }, [appear, onBack]);
+  const panResponder = useRef(
+    PanResponder.create({
+      onMoveShouldSetPanResponder: (evt, gestureState) => {
+        const { width } = Dimensions.get('window');
+        const edgeSize = 20;
+        const x = evt.nativeEvent.pageX;
+        const isEdge = x <= edgeSize || x >= width - edgeSize;
+        return isEdge && Math.abs(gestureState.dx) > 12 && Math.abs(gestureState.dy) < 24;
+      },
+      onPanResponderRelease: (_, gestureState) => {
+        if (Math.abs(gestureState.dx) >= 30) {
+          runExit();
+        }
+      },
+    })
+  ).current;
 
   const friendUidSet = useMemo(() => new Set((friends || []).map((f) => f.uid)), [friends]);
   const outgoingPendingSet = useMemo(
@@ -210,36 +242,51 @@ export default function FoundFriends({
     }
   };
 
-  const removeFriend = async (uid: number) => {
-    setFriendsLoading(true);
-    setFriendsError('');
-    try {
-      const response = await fetch(`${API_BASE}/api/friends/remove`, {
-        method: 'DELETE',
-        headers: { 'Content-Type': 'application/json', ...(await authHeaders()) },
-        body: JSON.stringify({ friendUid: uid }),
-      });
-      const data = await response.json().catch(() => ({}));
-      if (response.ok && data?.success) {
-        onRefreshFriends();
-      } else {
-        setFriendsError(data?.message || '删除失败。');
-      }
-    } catch {
-      setFriendsError('网络错误，请稍后重试。');
-    }
-    setFriendsLoading(false);
-  };
 
   useEffect(() => {
     void loadRequests();
   }, [loadRequests, refreshKey]);
 
+  useEffect(() => {
+    Animated.timing(appear, {
+      toValue: 1,
+      duration: 220,
+      useNativeDriver: true,
+    }).start();
+  }, [appear]);
+
+  useEffect(() => {
+    const handler = () => {
+      runExit();
+      return true;
+    };
+    const sub = BackHandler.addEventListener('hardwareBackPress', handler);
+    return () => sub.remove();
+  }, [runExit]);
+
   return (
-    <View style={styles.page}>
+    <Animated.View
+      style={[
+        styles.page,
+        {
+          opacity: appear,
+          transform: [
+            {
+              translateX: appear.interpolate({
+                inputRange: [0, 1],
+                outputRange: [18, 0],
+              }),
+            },
+          ],
+        },
+      ]}
+      {...panResponder.panHandlers}
+    >
+      <Pressable style={styles.edgeLeft} onPress={runExit} />
+      <Pressable style={styles.edgeRight} onPress={runExit} />
       <View style={styles.header}>
-        <Pressable onPress={onBack} style={styles.backBtn}>
-          <Text style={styles.backText}>‹</Text>
+        <Pressable onPress={runExit} style={styles.backBtn}>
+          <BackIcon />
         </Pressable>
         <Text style={styles.title}>发现好友</Text>
       </View>
@@ -261,14 +308,6 @@ export default function FoundFriends({
             请求
           </Text>
         </Pressable>
-        <Pressable
-          onPress={() => setActiveTab('friends')}
-          style={[styles.tab, activeTab === 'friends' && styles.tabActive]}
-        >
-          <Text style={[styles.tabText, activeTab === 'friends' && styles.tabTextActive]}>
-            好友
-          </Text>
-        </Pressable>
       </View>
 
       <ScrollView style={styles.panel}>
@@ -278,6 +317,8 @@ export default function FoundFriends({
               <TextInput
                 value={searchUid}
                 placeholder="输入好友 UID"
+                placeholderTextColor="#999"
+                selectionColor="#333"
                 onChangeText={setSearchUid}
                 style={styles.searchInput}
                 keyboardType="numeric"
@@ -362,30 +403,8 @@ export default function FoundFriends({
           </>
         ) : null}
 
-        {activeTab === 'friends' ? (
-          <>
-            <Text style={styles.sectionTitle}>好友列表</Text>
-            {friendsError ? <Text style={styles.error}>{friendsError}</Text> : null}
-            {friendsLoading ? <Text style={styles.empty}>更新中...</Text> : null}
-            {!friendsLoading && friends.length === 0 ? (
-              <Text style={styles.empty}>暂无好友</Text>
-            ) : null}
-            {!friendsLoading &&
-              friends.map((friend) => (
-                <View key={friend.uid} style={styles.row}>
-                  <View>
-                    <Text style={styles.rowName}>{friend.nickname || friend.username}</Text>
-                    <Text style={styles.rowSub}>UID {friend.uid}</Text>
-                  </View>
-                  <Pressable onPress={() => removeFriend(friend.uid)}>
-                    <Text style={styles.ghostBtn}>删除</Text>
-                  </Pressable>
-                </View>
-              ))}
-          </>
-        ) : null}
       </ScrollView>
-    </View>
+    </Animated.View>
   );
 }
 
@@ -454,6 +473,7 @@ const styles = StyleSheet.create({
   searchInput: {
     flex: 1,
     fontSize: 14,
+    color: '#333',
   },
   searchBtn: {
     backgroundColor: '#4a9df8',
@@ -563,4 +583,34 @@ const styles = StyleSheet.create({
     fontSize: 12,
     paddingVertical: 12,
   },
+  edgeLeft: {
+    position: 'absolute',
+    left: 0,
+    top: 0,
+    bottom: 0,
+    width: 20,
+    zIndex: 5,
+  },
+  edgeRight: {
+    position: 'absolute',
+    right: 0,
+    top: 0,
+    bottom: 0,
+    width: 20,
+    zIndex: 5,
+  },
 });
+
+function BackIcon() {
+  return (
+    <Svg width={24} height={24} viewBox="0 0 24 24" fill="none">
+      <Path
+        d="M15 18L9 12L15 6"
+        stroke="currentColor"
+        strokeWidth={2}
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </Svg>
+  );
+}
