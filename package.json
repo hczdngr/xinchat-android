@@ -1,29 +1,43 @@
 {
-  "name": "xinchat-android",
-  "version": "0.0.0",
+  "name": "com.xinchat.android",
+  "version": "0.0.1",
   "private": true,
-  "type": "module",
-  "engines": {
-    "node": "^20.19.0 || >=22.12.0"
-  },
   "scripts": {
+    "android": "react-native run-android",
     "backend": "npm --prefix backend install && npm --prefix backend run start",
-    "dev": "vite",
-    "build": "vite build",
-    "preview": "vite preview",
-    "android:sync": "vite build && npx cap sync android",
-    "android:watch": "node scripts/cap-watch.mjs"
+    "ios": "react-native run-ios",
+    "lint": "eslint .",
+    "start": "react-native start",
+    "test": "jest"
   },
   "dependencies": {
-    "@capacitor/android": "^8.0.1",
-    "@capacitor/cli": "^8.0.1",
-    "@capacitor/clipboard": "^8.0.0",
-    "@capacitor/core": "^8.0.1",
-    "vue": "^3.5.26"
+    "@react-native-async-storage/async-storage": "^2.2.0",
+    "react": "19.2.0",
+    "react-native": "0.83.1",
+    "react-native-safe-area-context": "^5.5.2",
+    "react-native-svg": "^15.12.0"
   },
   "devDependencies": {
-    "@vitejs/plugin-vue": "^6.0.3",
-    "vite": "^7.3.0",
-    "vite-plugin-vue-devtools": "^8.0.5"
+    "@babel/core": "^7.25.2",
+    "@babel/preset-env": "^7.25.3",
+    "@babel/runtime": "^7.25.0",
+    "@react-native-community/cli": "20.0.0",
+    "@react-native-community/cli-platform-android": "20.0.0",
+    "@react-native-community/cli-platform-ios": "20.0.0",
+    "@react-native/babel-preset": "0.83.1",
+    "@react-native/eslint-config": "0.83.1",
+    "@react-native/metro-config": "0.83.1",
+    "@react-native/typescript-config": "0.83.1",
+    "@types/jest": "^29.5.13",
+    "@types/react": "^19.2.0",
+    "@types/react-test-renderer": "^19.1.0",
+    "eslint": "^8.19.0",
+    "jest": "^29.6.3",
+    "prettier": "2.8.8",
+    "react-test-renderer": "19.2.0",
+    "typescript": "^5.8.3"
+  },
+  "engines": {
+    "node": ">=20"
   }
 }

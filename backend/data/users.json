@@ -1,0 +1,35 @@
+[
+  {
+    "uid": 100000000,
+    "username": "xkitme",
+    "passwordHash": "e0df276c6811b60920d616c8c18c3f366315b73b156a839cf03c5bee5a6100eae686563afcda81ce9b77eca3e9f5236e52a9045efbaf32a400dc71032bb54179",
+    "salt": "88ee0db07b3fcb2cda3c5d9fbe785a77",
+    "iterations": 120000,
+    "keylen": 64,
+    "digest": "sha512",
+    "createdAt": "2026-02-03T12:38:31.281Z",
+    "friends": [],
+    "signature": "这个人很神秘，暂未填写签名",
+    "avatar": "",
+    "nickname": "xkitme",
+    "gender": "",
+    "birthday": "",
+    "country": "",
+    "province": "",
+    "region": "",
+    "token": "12f787b08f950aa74bc487bbcb945e2a1a1f16d3723a3a6c94bb7c1f7ba9bcc9",
+    "tokenExpiresAt": "2026-08-03T12:38:31.449Z",
+    "tokens": [
+      {
+        "token": "12f787b08f950aa74bc487bbcb945e2a1a1f16d3723a3a6c94bb7c1f7ba9bcc9",
+        "expiresAt": "2026-08-03T12:38:31.449Z"
+      }
+    ],
+    "lastLoginAt": "2026-02-03T12:38:31.449Z",
+    "online": false,
+    "friendRequests": {
+      "incoming": [],
+      "outgoing": []
+    }
+  }
+]

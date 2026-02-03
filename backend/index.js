@@ -660,10 +660,10 @@ export function startServer(port = PORT) {
     uids.forEach((uid) => sendToUid(uid, payload));
   });
 
-  return server.listen(port, async () => {
+  return server.listen(port, '0.0.0.0', async () => {
     await Promise.all([ensureStorage(), ensureChatStorage()]);
     await resetOnlineState();
-    console.log(`Backend listening on http://localhost:${port}`);
+    console.log(`Backend listening on http://0.0.0.0:${port}`);
   });
 }
 

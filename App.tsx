@@ -1,0 +1,244 @@
+import { useEffect, useMemo, useState } from 'react';
+import { StatusBar } from 'react-native';
+import { SafeAreaProvider } from 'react-native-safe-area-context';
+import Home from './src/components/Home';
+import Login from './src/components/Login';
+import Register from './src/components/Register';
+import { API_BASE } from './src/config';
+import { storage } from './src/storage';
+
+const TOKEN_KEY = 'xinchat.token';
+const PROFILE_KEY = 'xinchat.profile';
+
+type Profile = {
+  uid?: number;
+  username?: string;
+  nickname?: string;
+  avatar?: string;
+  signature?: string;
+  gender?: string;
+  birthday?: string;
+  country?: string;
+  province?: string;
+  region?: string;
+  tokenExpiresAt?: string | number;
+};
+
+const emptyProfile: Profile = {};
+
+function App() {
+  const [username, setUsername] = useState('');
+  const [password, setPassword] = useState('');
+  const [showPassword, setShowPassword] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState('');
+  const [status, setStatus] = useState('');
+  const [view, setView] = useState<'login' | 'register'>('login');
+
+  const [registerUsername, setRegisterUsername] = useState('');
+  const [registerPassword, setRegisterPassword] = useState('');
+  const [registerConfirmPassword, setRegisterConfirmPassword] = useState('');
+  const [registerLoading, setRegisterLoading] = useState(false);
+  const [registerError, setRegisterError] = useState('');
+  const [registerStatus, setRegisterStatus] = useState('');
+
+  const [token, setToken] = useState('');
+  const [profile, setProfile] = useState<Profile>(emptyProfile);
+
+  const canSubmit = useMemo(() => username.trim().length > 0 && password.length > 0, [
+    username,
+    password,
+  ]);
+  const canRegister = useMemo(() => {
+    const nameOk = registerUsername.trim().length > 0;
+    const pwdOk = registerPassword.length > 0;
+    const confirmOk =
+      registerConfirmPassword.length > 0 && registerConfirmPassword === registerPassword;
+    return nameOk && pwdOk && confirmOk;
+  }, [registerUsername, registerPassword, registerConfirmPassword]);
+  const isAuthed = useMemo(() => Boolean(token), [token]);
+
+  useEffect(() => {
+    const loadSession = async () => {
+      const storedToken = (await storage.getString(TOKEN_KEY)) || '';
+      const storedProfile = (await storage.getJson<Profile>(PROFILE_KEY)) || emptyProfile;
+      setToken(storedToken);
+      setProfile(storedProfile);
+    };
+    void loadSession();
+  }, []);
+
+  const setAuthSession = async (data: Profile & { token?: string }) => {
+    const nextToken = data.token || '';
+    const nextProfile: Profile = {
+      uid: data.uid,
+      username: data.username,
+      nickname: data.nickname,
+      avatar: data.avatar,
+      signature: data.signature,
+      gender: data.gender,
+      birthday: data.birthday,
+      country: data.country,
+      province: data.province,
+      region: data.region,
+      tokenExpiresAt: data.tokenExpiresAt,
+    };
+    await storage.setString(TOKEN_KEY, nextToken);
+    await storage.setJson(PROFILE_KEY, nextProfile);
+    setToken(nextToken);
+    setProfile(nextProfile);
+  };
+
+  const submit = async () => {
+    setError('');
+    setStatus('');
+
+    if (!canSubmit) {
+      setError('Please enter username and password.');
+      return;
+    }
+
+    setLoading(true);
+    try {
+      const response = await fetch(API_BASE + '/api/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          username: username.trim(),
+          password,
+        }),
+      });
+
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok || !data?.success) {
+        setError(data?.message || 'Login failed. Please try again.');
+        return;
+      }
+
+      await setAuthSession(data);
+      setStatus(data?.message || 'Login successful.');
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      console.warn('Login request failed', { base: API_BASE, error: message });
+      setError('Network error: ' + message);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const goRegister = () => {
+    setRegisterError('');
+    setRegisterStatus('');
+    setRegisterConfirmPassword('');
+    setView('register');
+  };
+
+  const goLogin = () => {
+    setError('');
+    setStatus('');
+    setView('login');
+  };
+
+  const register = async () => {
+    setRegisterError('');
+    setRegisterStatus('');
+
+    if (!canRegister) {
+      if (!registerUsername.trim() || !registerPassword) {
+        setRegisterError('Please enter username and password.');
+      } else if (registerConfirmPassword !== registerPassword) {
+        setRegisterError('Passwords do not match.');
+      } else {
+        setRegisterError('Please confirm password.');
+      }
+      return;
+    }
+
+    setRegisterLoading(true);
+    try {
+      const response = await fetch(API_BASE + '/api/register', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          username: registerUsername.trim(),
+          password: registerPassword,
+        }),
+      });
+
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok || !data?.success) {
+        setRegisterError(data?.message || 'Register failed. Please try again.');
+        return;
+      }
+
+      setRegisterStatus(data?.message || 'Register successful.');
+
+      const loginResponse = await fetch(API_BASE + '/api/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          username: registerUsername.trim(),
+          password: registerPassword,
+        }),
+      });
+
+      const loginData = await loginResponse.json().catch(() => ({}));
+      if (!loginResponse.ok || !loginData?.success) {
+        setRegisterError(loginData?.message || 'Auto login failed. Please login manually.');
+        return;
+      }
+
+      await setAuthSession(loginData);
+      setView('login');
+      setRegisterConfirmPassword('');
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      console.warn('Register request failed', { base: API_BASE, error: message });
+      setRegisterError('Network error: ' + message);
+    } finally {
+      setRegisterLoading(false);
+    }
+  };
+
+  return (
+    <SafeAreaProvider>
+      <StatusBar barStyle={'dark-content'} />
+      {!isAuthed && view === 'login' ? (
+        <Login
+          username={username}
+          password={password}
+          showPassword={showPassword}
+          loading={loading}
+          error={error}
+          status={status}
+          canSubmit={canSubmit}
+          onUsernameChange={setUsername}
+          onPasswordChange={setPassword}
+          onTogglePassword={() => setShowPassword((prev) => !prev)}
+          onSubmit={submit}
+          onGoRegister={goRegister}
+        />
+      ) : null}
+      {!isAuthed && view === 'register' ? (
+        <Register
+          username={registerUsername}
+          password={registerPassword}
+          confirmPassword={registerConfirmPassword}
+          loading={registerLoading}
+          error={registerError}
+          status={registerStatus}
+          canSubmit={canRegister}
+          onUsernameChange={setRegisterUsername}
+          onPasswordChange={setRegisterPassword}
+          onConfirmPasswordChange={setRegisterConfirmPassword}
+          onSubmit={register}
+          onBack={goLogin}
+        />
+      ) : null}
+      {isAuthed ? <Home profile={profile} /> : null}
+    </SafeAreaProvider>
+  );
+}
+
+export default App;
+
