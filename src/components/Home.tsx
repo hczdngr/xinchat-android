@@ -15,6 +15,7 @@ import { API_BASE } from '../config';
 import { storage } from '../storage';
 import FoundFriends from './FoundFriends';
 import Profile from './Profile';
+import EditProfile from './EditProfile';
 
 type Profile = {
   uid?: number;
@@ -86,7 +87,7 @@ export default function Home({ profile }: { profile: Profile }) {
 
   const [activeChatUid, setActiveChatUid] = useState<number | null>(null);
   const [draftMessage, setDraftMessage] = useState('');
-  const [activeView, setActiveView] = useState<'list' | 'found' | 'profile'>('list');
+  const [activeView, setActiveView] = useState<'list' | 'found' | 'profile' | 'editProfile'>('list');
   const [friendsRefreshKey, setFriendsRefreshKey] = useState(0);
   const [homeTab, setHomeTab] = useState<'messages' | 'contacts'>('messages');
 
@@ -909,8 +910,12 @@ export default function Home({ profile }: { profile: Profile }) {
         <Profile
           profile={profileData}
           onBack={closeProfile}
-          onEdit={() => {}}
+          onEdit={() => setActiveView('editProfile')}
         />
+      ) : null}
+
+      {activeView === 'editProfile' && !activeChatUid ? (
+        <EditProfile onBack={() => setActiveView('profile')} />
       ) : null}
 
       {activeChatUid ? (
