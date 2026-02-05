@@ -1,4 +1,4 @@
-﻿import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Dimensions,
   Image,
@@ -10,18 +10,23 @@ import {
   View,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import { useNavigation } from '@react-navigation/native';
 import Svg, { Line, Path } from 'react-native-svg';
-import { API_BASE } from '../config';
+import { API_BASE, normalizeImageUrl } from '../config';
 import { storage } from '../storage';
 import FoundFriends from './FoundFriends';
-import Profile from './Profile';
-import EditProfile from './EditProfile';
 
 type Profile = {
   uid?: number;
   username?: string;
   nickname?: string;
   avatar?: string;
+  signature?: string;
+  gender?: string;
+  birthday?: string;
+  country?: string;
+  province?: string;
+  region?: string;
 };
 
 type Friend = {
@@ -84,13 +89,15 @@ export default function Home({ profile }: { profile: Profile }) {
   const [menuVisible, setMenuVisible] = useState(false);
   const [menuTargetUid, setMenuTargetUid] = useState<number | null>(null);
   const [menuPosition, setMenuPosition] = useState({ x: 0, y: 0 });
+  const [avatarFailed, setAvatarFailed] = useState(false);
 
   const [activeChatUid, setActiveChatUid] = useState<number | null>(null);
   const [draftMessage, setDraftMessage] = useState('');
-  const [activeView, setActiveView] = useState<'list' | 'found' | 'profile' | 'editProfile'>('list');
+  const [activeView, setActiveView] = useState<'list' | 'found'>('list');
   const [friendsRefreshKey, setFriendsRefreshKey] = useState(0);
   const [homeTab, setHomeTab] = useState<'messages' | 'contacts'>('messages');
 
+  const navigation = useNavigation<any>();
   const messageIdSetsRef = useRef<Map<number, Set<number | string>>>(new Map());
   const wsRef = useRef<WebSocket | null>(null);
   const heartbeatTimerRef = useRef<NodeJS.Timeout | null>(null);
@@ -119,6 +126,19 @@ export default function Home({ profile }: { profile: Profile }) {
       setProfileData((prev) => ({ ...prev, ...profile }));
     }
   }, [profile]);
+
+  useEffect(() => {
+    setAvatarFailed(false);
+  }, [avatarUrl]);
+
+  useEffect(() => {
+    if (!avatarSrc || avatarSrc.startsWith('data:')) return;
+    Image.getSize(
+      avatarSrc,
+      () => setAvatarFailed(false),
+      () => setAvatarFailed(true)
+    );
+  }, [avatarSrc]);
 
   useEffect(() => {
     const loadToken = async () => {
@@ -189,7 +209,21 @@ export default function Home({ profile }: { profile: Profile }) {
     () => profileData.nickname || profileData.username || '加载中...',
     [profileData.nickname, profileData.username]
   );
-  const avatarUrl = useMemo(() => profileData.avatar || '', [profileData.avatar]);
+  const avatarUrl = useMemo(
+    () => normalizeImageUrl(profileData.avatar),
+    [profileData.avatar]
+  );
+  const avatarVersion = useMemo(() => {
+    const clean = avatarUrl.split('?')[0].replace(/\/+$/, '');
+    const name = clean.split('/').pop();
+    return name || String(profileData.avatar || '1');
+  }, [avatarUrl, profileData.avatar]);
+  const avatarSrc = useMemo(() => {
+    if (!avatarUrl) return '';
+    if (avatarUrl.startsWith('data:')) return avatarUrl;
+    const joiner = avatarUrl.includes('?') ? '&' : '?';
+    return encodeURI(`${avatarUrl}${joiner}v=${encodeURIComponent(avatarVersion)}`);
+  }, [avatarUrl, avatarVersion]);
   const avatarText = useMemo(() => displayName.slice(0, 2), [displayName]);
   const activeChatFriend = useMemo(() => {
     if (!activeChatUid) return null;
@@ -529,14 +563,6 @@ export default function Home({ profile }: { profile: Profile }) {
   }, []);
 
   const closeFoundFriends = useCallback(() => {
-    setActiveView('list');
-  }, []);
-
-  const openProfile = useCallback(() => {
-    setActiveView('profile');
-  }, []);
-
-  const closeProfile = useCallback(() => {
     setActiveView('list');
   }, []);
 
@@ -906,18 +932,6 @@ export default function Home({ profile }: { profile: Profile }) {
         />
       ) : null}
 
-      {activeView === 'profile' && !activeChatUid ? (
-        <Profile
-          profile={profileData}
-          onBack={closeProfile}
-          onEdit={() => setActiveView('editProfile')}
-        />
-      ) : null}
-
-      {activeView === 'editProfile' && !activeChatUid ? (
-        <EditProfile onBack={() => setActiveView('profile')} />
-      ) : null}
-
       {activeChatUid ? (
         <>
           <View style={styles.chatHeader}>
@@ -1002,13 +1016,24 @@ export default function Home({ profile }: { profile: Profile }) {
         </>
       ) : null}
 
-      {!activeChatUid && activeView !== 'found' && activeView !== 'profile' ? (
+      {!activeChatUid && activeView !== 'found' ? (
         <View style={styles.home}>
           <View style={styles.header}>
             <View style={styles.headerLeft}>
-              <Pressable style={styles.avatarContainer} onPress={openProfile}>
-                {avatarUrl ? (
-                  <Image source={{ uri: avatarUrl }} style={styles.avatarImg} />
+              <Pressable
+                style={styles.avatarContainer}
+                onPress={() => navigation.navigate('Profile')}
+              >
+                {avatarSrc && !avatarFailed ? (
+                  <Image
+                    key={avatarSrc}
+                    source={{
+                      uri: avatarSrc,
+                      headers: { 'Cache-Control': 'no-cache', Pragma: 'no-cache' },
+                    }}
+                    style={styles.avatarImg}
+                    onError={() => setAvatarFailed(true)}
+                  />
                 ) : (
                   <Text style={styles.avatarFallback}>{avatarText}</Text>
                 )}
@@ -1047,8 +1072,8 @@ export default function Home({ profile }: { profile: Profile }) {
                     onLongPress={(event) => openMenu(event, friend.uid)}
                   >
                     <View style={styles.avatarBox}>
-                      {friend.avatar ? (
-                        <Image source={{ uri: friend.avatar }} style={styles.msgAvatar} />
+                      {normalizeImageUrl(friend.avatar) ? (
+                        <Image source={{ uri: normalizeImageUrl(friend.avatar) }} style={styles.msgAvatar} />
                       ) : (
                         <View style={styles.msgAvatarFallback}>
                           <Text style={styles.msgAvatarText}>
@@ -1619,6 +1644,7 @@ function BackIcon() {
     </Svg>
   );
 }
+
 
 
 

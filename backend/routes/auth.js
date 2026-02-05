@@ -1,4 +1,4 @@
-import express from 'express';
+﻿import express from 'express';
 import fs from 'fs/promises';
 import path from 'path';
 import crypto from 'crypto';
@@ -16,7 +16,8 @@ const router = express.Router();
 const LOGIN_WINDOW_MS = 15 * 60 * 1000;
 const MAX_ATTEMPTS = 5;
 const loginAttempts = new Map();
-const DEFAULT_SIGNATURE = '这个人很神秘，暂未填写签名';
+const DEFAULT_SIGNATURE =
+  '\u8fd9\u4e2a\u4eba\u5f88\u795e\u79d8\uff0c\u6682\u672a\u586b\u5199\u7b7e\u540d';
 const MAX_NICKNAME_LEN = 36;
 const MAX_SIGNATURE_LEN = 80;
 const MAX_AVATAR_BYTES = 20 * 1024 * 1024;
@@ -37,11 +38,20 @@ const estimateBase64Bytes = (value) => {
   return Math.floor(base64.length * 0.75) - padding;
 };
 
-const normalizeAvatar = (value) => {
+const normalizeAvatar = (value, baseUrl = '') => {
   if (typeof value !== 'string') return null;
   const trimmed = value.trim();
   if (!trimmed) return '';
   if (!/^data:image\/(png|jpe?g|gif|webp);base64,/i.test(trimmed)) {
+    if (/^https?:\/\//i.test(trimmed)) {
+      return trimmed;
+    }
+    if (trimmed.startsWith('/uploads/images/')) {
+      return trimmed;
+    }
+    if (baseUrl && trimmed.startsWith(`${baseUrl}/uploads/images/`)) {
+      return trimmed;
+    }
     return null;
   }
   const size = estimateBase64Bytes(trimmed);
@@ -415,25 +425,20 @@ router.post('/register', async (req, res) => {
   try {
     const { username, password } = req.body || {};
     if (typeof username !== 'string' || typeof password !== 'string') {
-      res.status(400).json({ success: false, message: '请输入用户名和密码。' });
+      res.status(400).json({ success: false, message: '璇疯緭鍏ョ敤鎴峰悕鍜屽瘑鐮併€? });
       return;
     }
 
     const trimmedUsername = username.trim();
     if (trimmedUsername.length < 3 || trimmedUsername.length > 32) {
-      res.status(400).json({ success: false, message: '用户名长度需为 3-32 位。' });
-      return;
-    }
-
-    if (password.length < 8 || password.length > 64) {
-      res.status(400).json({ success: false, message: '密码长度需为 8-64 位。' });
+      res.status(400).json({ success: false, message: '\u4e2a\u7b7e\u957f\u5ea6\u8fc7\u957f\u3002'瀵嗙爜闀垮害闇€涓?8-64 浣嶃€? });
       return;
     }
 
   const users = await readUsers();
     const normalized = normalizeUsername(trimmedUsername);
     if (users.some((user) => user.username === normalized)) {
-      res.status(409).json({ success: false, message: '用户名已存在。' });
+      res.status(409).json({ success: false, message: '鐢ㄦ埛鍚嶅凡瀛樺湪銆? });
       return;
     }
 
@@ -455,10 +460,10 @@ router.post('/register', async (req, res) => {
       region: '',
     });
     await writeUsers(users);
-    res.json({ success: true, message: '注册成功，请登录。' });
+    res.json({ success: true, message: '娉ㄥ唽鎴愬姛锛岃鐧诲綍銆? });
   } catch (error) {
     console.error('Register error:', error);
-    res.status(500).json({ success: false, message: '注册失败，请稍后重试。' });
+    res.status(500).json({ success: false, message: '娉ㄥ唽澶辫触锛岃绋嶅悗閲嶈瘯銆? });
   }
 });
 
@@ -466,13 +471,13 @@ router.post('/login', async (req, res) => {
   try {
     const { username, password } = req.body || {};
     if (typeof username !== 'string' || typeof password !== 'string') {
-      res.status(400).json({ success: false, message: '请输入用户名和密码。' });
+      res.status(400).json({ success: false, message: '璇疯緭鍏ョ敤鎴峰悕鍜屽瘑鐮併€? });
       return;
     }
 
     const trimmedUsername = username.trim();
     if (!trimmedUsername || !password) {
-      res.status(400).json({ success: false, message: '请输入用户名和密码。' });
+      res.status(400).json({ success: false, message: '璇疯緭鍏ョ敤鎴峰悕鍜屽瘑鐮併€? });
       return;
     }
 
@@ -481,7 +486,7 @@ router.post('/login', async (req, res) => {
     if (isLockedOut(lockKey)) {
       res.status(429).json({
         success: false,
-        message: '尝试次数过多，请稍后再试。',
+        message: '灏濊瘯娆℃暟杩囧锛岃绋嶅悗鍐嶈瘯銆?,
       });
       return;
     }
@@ -498,7 +503,7 @@ router.post('/login', async (req, res) => {
 
     if (!isMatch) {
       recordLoginAttempt(lockKey);
-      res.status(401).json({ success: false, message: '用户名或密码错误。' });
+      res.status(401).json({ success: false, message: '鐢ㄦ埛鍚嶆垨瀵嗙爜閿欒銆? });
       return;
     }
 
@@ -557,7 +562,7 @@ router.post('/login', async (req, res) => {
     });
   } catch (error) {
     console.error('Login error:', error);
-    res.status(500).json({ success: false, message: '登录失败，请稍后重试。' });
+    res.status(500).json({ success: false, message: '鐧诲綍澶辫触锛岃绋嶅悗閲嶈瘯銆? });
   }
 });
 
@@ -605,7 +610,8 @@ router.post('/profile', authenticate, async (req, res) => {
   const region = typeof payload.region === 'string' ? payload.region.trim() : '';
   let avatar = null;
   if (Object.prototype.hasOwnProperty.call(payload, 'avatar')) {
-    avatar = normalizeAvatar(payload.avatar);
+    const baseUrl = `${req.protocol}://${req.get('host')}`;
+    avatar = normalizeAvatar(payload.avatar, baseUrl);
     if (avatar === null) {
       res.status(400).json({ success: false, message: 'Invalid avatar.' });
       return;
@@ -613,11 +619,17 @@ router.post('/profile', authenticate, async (req, res) => {
   }
 
   if (nickname.length > MAX_NICKNAME_LEN) {
-    res.status(400).json({ success: false, message: '昵称长度过长。' });
+    res.status(400).json({
+      success: false,
+      message: '\u6635\u79f0\u957f\u5ea6\u8fc7\u957f\u3002',
+    });
     return;
   }
   if (signature.length > MAX_SIGNATURE_LEN) {
-    res.status(400).json({ success: false, message: '个签长度过长。' });
+    res.status(400).json({
+      success: false,
+      message: '\u4e2a\u7b7e\u957f\u5ea6\u8fc7\u957f\u3002',
+    });
     return;
   }
 
@@ -656,3 +668,11 @@ router.post('/profile', authenticate, async (req, res) => {
 
 export { ensureStorage, readUsers, writeUsers, findUserByToken, hasValidToken };
 export default router;
+
+
+
+
+
+
+
+

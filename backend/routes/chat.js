@@ -278,6 +278,25 @@ const readStreamToFile = (req, tempPath, maxBytes) =>
     req.pipe(out);
   });
 
+const readStreamToBuffer = (req, maxBytes) =>
+  new Promise((resolve, reject) => {
+    let size = 0;
+    const chunks = [];
+    req.on('data', (chunk) => {
+      size += chunk.length;
+      if (size > maxBytes) {
+        req.destroy();
+        reject(new Error('File too large.'));
+        return;
+      }
+      chunks.push(chunk);
+    });
+    req.on('error', reject);
+    req.on('end', () => {
+      resolve(Buffer.concat(chunks));
+    });
+  });
+
 const findImageUrlByHash = async (hash, baseUrl) => {
   if (!hash) return '';
   for (const ext of IMAGE_EXTS) {
@@ -763,9 +782,53 @@ router.post('/send', authenticate, async (req, res) => {
 router.post('/upload/image', authenticate, async (req, res) => {
   try {
     await fs.mkdir(IMAGE_DIR, { recursive: true });
+    const encoding = String(req.headers['x-file-encoding'] || '').toLowerCase();
     const headerExt = String(req.headers['x-file-ext'] || '').toLowerCase();
     const mime = String(req.headers['content-type'] || '').toLowerCase();
+    const isTextBody = mime.startsWith('text/');
     let ext = headerExt || getImageExtFromMime(mime);
+
+    if (encoding === 'base64' || isTextBody) {
+      const raw = await readStreamToBuffer(req, MAX_FILE_BYTES * 2);
+      let bodyText = raw.toString('utf-8').trim();
+      if (
+        (bodyText.startsWith('"') && bodyText.endsWith('"')) ||
+        (bodyText.startsWith("'") && bodyText.endsWith("'"))
+      ) {
+        bodyText = bodyText.slice(1, -1);
+      }
+      const parsed = parseImageDataUrl(bodyText);
+      let buffer = null;
+      if (parsed) {
+        buffer = parsed.buffer;
+        ext = parsed.ext;
+      } else if (bodyText) {
+        buffer = Buffer.from(bodyText, 'base64');
+      }
+      if (!buffer || !buffer.length) {
+        res.status(400).json({ success: false, message: 'Invalid image data.' });
+        return;
+      }
+      if (buffer.length > MAX_FILE_BYTES) {
+        res.status(400).json({ success: false, message: 'File too large.' });
+        return;
+      }
+      if (!IMAGE_EXTS.includes(ext)) {
+        ext = getImageExtFromMime(mime) || 'png';
+      }
+      const stored = await storeImageBuffer(buffer, ext);
+      const baseUrl = `${req.protocol}://${req.get('host')}`;
+      res.json({
+        success: true,
+        data: {
+          url: `${baseUrl}/uploads/images/${stored.filename}`,
+          hash: stored.hash,
+          size: buffer.length,
+        },
+      });
+      return;
+    }
+
     if (!IMAGE_EXTS.includes(ext)) {
       ext = 'png';
     }

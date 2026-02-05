@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useRef } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Animated,
   BackHandler,
@@ -10,24 +10,58 @@ import {
   Text,
   View,
 } from "react-native";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
 import Svg, { Path } from "react-native-svg";
+import { API_BASE, normalizeImageUrl } from "../config";
 
 type ProfileData = {
   uid?: number;
   username?: string;
   nickname?: string;
   avatar?: string;
+  signature?: string;
+  gender?: string;
+  birthday?: string;
+  country?: string;
+  province?: string;
+  region?: string;
 };
 
 type Props = {
   profile: ProfileData;
   onBack: () => void;
   onEdit: () => void;
+  onRefresh?: () => void;
 };
 
-export default function Profile({ profile, onBack, onEdit }: Props) {
-  const displayName = profile.nickname || profile.username || "加载中...";
+export default function Profile({ profile, onBack, onEdit, onRefresh }: Props) {
+  const insets = useSafeAreaInsets();
+  const displayValue = useCallback((value?: string | number) => {
+    if (value === undefined || value === null) return "--";
+    const text = String(value).trim();
+    return text ? text : "--";
+  }, []);
+  const regionText =
+    profile.country || profile.province || profile.region
+      ? [profile.country, profile.province, profile.region]
+          .filter((item) => item && String(item).trim())
+          .join(" / ")
+      : "--";
+  const displayName = profile.nickname || profile.username || '\u52a0\u8f7d\u4e2d...';
   const uidText = profile.uid ? String(profile.uid) : "...";
+  const avatarUrl = useMemo(() => normalizeImageUrl(profile.avatar), [profile.avatar]);
+  const avatarVersion = useMemo(() => {
+    const clean = avatarUrl.split("?")[0].replace(/\/+$/, "");
+    const name = clean.split("/").pop();
+    return name || String(profile.avatar || "1");
+  }, [avatarUrl, profile.avatar]);
+  const avatarSrc = useMemo(() => {
+    if (!avatarUrl) return "";
+    if (avatarUrl.startsWith("data:")) return avatarUrl;
+    const joiner = avatarUrl.includes("?") ? "&" : "?";
+    return encodeURI(`${avatarUrl}${joiner}v=${encodeURIComponent(avatarVersion)}`);
+  }, [avatarUrl, avatarVersion]);
+  const [avatarFailed, setAvatarFailed] = useState(false);
   const appear = useRef(new Animated.Value(0)).current;
   const isLeaving = useRef(false);
 
@@ -77,11 +111,29 @@ export default function Profile({ profile, onBack, onEdit }: Props) {
     }).start();
   }, [appear]);
 
+  useEffect(() => {
+    setAvatarFailed(false);
+  }, [avatarUrl]);
+
+  useEffect(() => {
+    if (!avatarSrc || avatarSrc.startsWith("data:")) return;
+    Image.getSize(
+      avatarSrc,
+      () => setAvatarFailed(false),
+      () => setAvatarFailed(true)
+    );
+  }, [avatarSrc]);
+
+  useEffect(() => {
+    onRefresh?.();
+  }, [onRefresh]);
+
   return (
     <Animated.View
       style={[
         styles.page,
         {
+          paddingTop: insets.top,
           opacity: appear,
           transform: [
             {
@@ -102,30 +154,77 @@ export default function Profile({ profile, onBack, onEdit }: Props) {
         <Pressable style={styles.backBtn} onPress={runExit} hitSlop={10}>
           <BackIcon />
         </Pressable>
-        <Text style={styles.title}>我的资料</Text>
+        <Text style={styles.title}>{'\u6211\u7684\u8d44\u6599'}</Text>
       </View>
 
       <View style={styles.profileContainer}>
         <View style={styles.avatarBox}>
-          {profile.avatar ? (
-            <Image source={{ uri: profile.avatar }} style={styles.avatarImg} />
+          {avatarSrc && !avatarFailed ? (
+            <Image
+              key={avatarSrc}
+              source={{
+                uri: avatarSrc,
+                headers: { "Cache-Control": "no-cache", Pragma: "no-cache" },
+              }}
+              style={styles.avatarImg}
+              onError={() => setAvatarFailed(true)}
+            />
           ) : (
-            <Text style={styles.avatarFallback}>U</Text>
+            <View style={styles.avatarFallbackWrap}>
+              <Text style={styles.avatarFallback}>U</Text>
+            </View>
           )}
         </View>
 
         <View style={styles.infoBox}>
           <Text style={styles.nickname}>{displayName}</Text>
           <View style={styles.userIdRow}>
-            <Text style={styles.userIdLabel}>账号：</Text>
+            <Text style={styles.userIdLabel}>{'\u8d26\u53f7\uff1a'}</Text>
             <Text style={styles.userIdValue}>{uidText}</Text>
           </View>
         </View>
       </View>
 
+
+      <View style={styles.detailSection}>
+        <Text style={styles.sectionTitle}>{'\u8d44\u6599'}</Text>
+        <View style={styles.detailRow}>
+          <Text style={styles.detailLabel}>{'\u7528\u6237\u540d'}</Text>
+          <Text style={styles.detailValue}>{displayValue(profile.username)}</Text>
+        </View>
+        <View style={styles.detailRow}>
+          <Text style={styles.detailLabel}>{'\u6635\u79f0'}</Text>
+          <Text style={styles.detailValue}>{displayValue(profile.nickname)}</Text>
+        </View>
+        <View style={styles.detailRow}>
+          <Text style={styles.detailLabel}>UID</Text>
+          <Text style={styles.detailValue}>{displayValue(profile.uid)}</Text>
+        </View>
+        <View style={styles.detailRow}>
+          <Text style={styles.detailLabel}>{'\u7b7e\u540d'}</Text>
+          <Text style={styles.detailValue}>{displayValue(profile.signature)}</Text>
+        </View>
+        <View style={styles.detailRow}>
+          <Text style={styles.detailLabel}>{'\u6027\u522b'}</Text>
+          <Text style={styles.detailValue}>{displayValue(profile.gender)}</Text>
+        </View>
+        <View style={styles.detailRow}>
+          <Text style={styles.detailLabel}>{'\u751f\u65e5'}</Text>
+          <Text style={styles.detailValue}>{displayValue(profile.birthday)}</Text>
+        </View>
+        <View style={styles.detailRow}>
+          <Text style={styles.detailLabel}>{'\u5730\u533a'}</Text>
+          <Text style={styles.detailValue}>{regionText}</Text>
+        </View>
+        <View style={styles.detailRow}>
+          <Text style={styles.detailLabel}>{'\u5934\u50cf'}</Text>
+          <Text style={styles.detailValue}>{profile.avatar ? '\u5df2\u8bbe\u7f6e' : '--'}</Text>
+        </View>
+      </View>
+
       <View style={styles.bottomBar}>
         <Pressable style={styles.editBtn} onPress={onEdit}>
-          <Text style={styles.editText}>编辑资料</Text>
+          <Text style={styles.editText}>{'\u7f16\u8f91\u8d44\u6599'}</Text>
         </Pressable>
       </View>
     </Animated.View>
@@ -174,6 +273,11 @@ const styles = StyleSheet.create({
     justifyContent: "center",
     backgroundColor: "#fff",
   },
+  avatarFallbackWrap: {
+    alignItems: "center",
+    justifyContent: "center",
+    paddingHorizontal: 6,
+  },
   avatarImg: {
     width: "100%",
     height: "100%",
@@ -204,6 +308,35 @@ const styles = StyleSheet.create({
   userIdValue: {
     fontSize: 14,
     color: "#999",
+  },
+  detailSection: {
+    marginHorizontal: 20,
+    padding: 16,
+    backgroundColor: "#fff",
+    borderRadius: 12,
+    gap: 10,
+  },
+  sectionTitle: {
+    fontSize: 14,
+    fontWeight: "600",
+    color: "#333",
+    marginBottom: 4,
+  },
+  detailRow: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+    gap: 12,
+  },
+  detailLabel: {
+    fontSize: 13,
+    color: "#666",
+  },
+  detailValue: {
+    flex: 1,
+    textAlign: "right",
+    fontSize: 13,
+    color: "#222",
   },
   bottomBar: {
     marginTop: "auto",
@@ -261,3 +394,5 @@ function BackIcon() {
     </Svg>
   );
 }
+
+

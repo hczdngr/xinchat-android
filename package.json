@@ -4,6 +4,9 @@
   "private": true,
   "scripts": {
     "android": "react-native run-android",
+    "android:assemble": "cd android && gradlew.bat assembleDebug",
+    "android:install": "adb connect 192.168.0.2:5555 && adb -s 192.168.0.2:5555 install -r android\\app\\build\\outputs\\apk\\debug\\app-debug.apk",
+    "android:auto-install": "node scripts/android-auto-install.js",
     "backend": "npm --prefix backend install && npm --prefix backend run start",
     "ios": "react-native run-ios",
     "lint": "eslint .",
@@ -12,9 +15,15 @@
   },
   "dependencies": {
     "@react-native-async-storage/async-storage": "^2.2.0",
+    "@react-navigation/native": "^7.1.28",
+    "@react-navigation/native-stack": "^7.12.0",
+    "i18n-iso-countries": "^7.14.0",
     "react": "19.2.0",
     "react-native": "0.83.1",
+    "react-native-gesture-handler": "^2.30.0",
+    "react-native-image-crop-picker": "^0.51.1",
     "react-native-safe-area-context": "^5.5.2",
+    "react-native-screens": "^4.22.0",
     "react-native-svg": "^15.12.0"
   },
   "devDependencies": {

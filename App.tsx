@@ -1,9 +1,13 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { StatusBar } from 'react-native';
+import { NavigationContainer } from '@react-navigation/native';
+import { createNativeStackNavigator } from '@react-navigation/native-stack';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 import Home from './src/components/Home';
 import Login from './src/components/Login';
 import Register from './src/components/Register';
+import Profile from './src/components/Profile';
+import EditProfile from './src/components/EditProfile';
 import { API_BASE } from './src/config';
 import { storage } from './src/storage';
 
@@ -25,6 +29,7 @@ type Profile = {
 };
 
 const emptyProfile: Profile = {};
+const Stack = createNativeStackNavigator();
 
 function App() {
   const [username, setUsername] = useState('');
@@ -67,6 +72,32 @@ function App() {
     };
     void loadSession();
   }, []);
+
+  const refreshProfile = useCallback(async () => {
+    const authToken = token || (await storage.getString(TOKEN_KEY)) || '';
+    if (!authToken) return;
+    try {
+      const response = await fetch(`${API_BASE}/api/profile`, {
+        headers: { Authorization: `Bearer ${authToken}` },
+      });
+      const data = await response.json().catch(() => ({}));
+      if (response.ok && data?.success && data?.user) {
+        setProfile((prev) => ({ ...prev, ...data.user }));
+        await storage.setJson(PROFILE_KEY, {
+          uid: data.user.uid,
+          username: data.user.username,
+          nickname: data.user.nickname,
+          avatar: data.user.avatar,
+          signature: data.user.signature,
+          gender: data.user.gender,
+          birthday: data.user.birthday,
+          country: data.user.country,
+          province: data.user.province,
+          region: data.user.region,
+        });
+      }
+    } catch {}
+  }, [token]);
 
   const setAuthSession = async (data: Profile & { token?: string }) => {
     const nextToken = data.token || '';
@@ -235,7 +266,42 @@ function App() {
           onBack={goLogin}
         />
       ) : null}
-      {isAuthed ? <Home profile={profile} /> : null}
+      {isAuthed ? (
+        <NavigationContainer>
+          <Stack.Navigator
+            screenOptions={{
+              headerShown: false,
+              presentation: 'card',
+              contentStyle: { backgroundColor: '#f2f2f7' },
+            }}
+          >
+            <Stack.Screen name="Home">
+              {() => <Home profile={profile} />}
+            </Stack.Screen>
+            <Stack.Screen name="Profile">
+              {({ navigation }) => (
+                <Profile
+                  profile={profile}
+                  onBack={() => navigation.goBack()}
+                  onEdit={() => navigation.navigate('EditProfile')}
+                  onRefresh={refreshProfile}
+                />
+              )}
+            </Stack.Screen>
+            <Stack.Screen name="EditProfile">
+              {({ navigation }) => (
+                <EditProfile
+                  initialProfile={profile}
+                  onBack={() => navigation.goBack()}
+                  onSaved={(next) => {
+                    setProfile((prev) => ({ ...prev, ...next }));
+                  }}
+                />
+              )}
+            </Stack.Screen>
+          </Stack.Navigator>
+        </NavigationContainer>
+      ) : null}
     </SafeAreaProvider>
   );
 }
