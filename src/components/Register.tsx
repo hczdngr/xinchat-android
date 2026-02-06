@@ -124,6 +124,8 @@ export default function Register({
 const styles = StyleSheet.create({
   page: {
     flex: 1,
+    flexGrow: 1,
+    minHeight: '100%',
     backgroundColor: '#f0f2f5',
     paddingHorizontal: 24,
   },
@@ -196,6 +198,7 @@ const styles = StyleSheet.create({
   },
   footer: {
     marginTop: 'auto',
+    flexShrink: 0,
     textAlign: 'center',
     fontSize: 11,
     color: '#999',

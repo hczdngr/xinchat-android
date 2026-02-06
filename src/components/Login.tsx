@@ -120,6 +120,8 @@ export default function Login({
 const styles = StyleSheet.create({
   page: {
     flex: 1,
+    flexGrow: 1,
+    minHeight: '100%',
     backgroundColor: '#f2f3f5',
     paddingHorizontal: 24,
   },
@@ -189,6 +191,7 @@ const styles = StyleSheet.create({
   },
   footer: {
     marginTop: 'auto',
+    flexShrink: 0,
     alignItems: 'center',
     gap: 12,
   },

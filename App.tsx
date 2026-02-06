@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
-import { StatusBar } from 'react-native';
+import { StatusBar, StyleSheet, View } from 'react-native';
 import { NavigationContainer } from '@react-navigation/native';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
@@ -232,78 +232,89 @@ function App() {
   };
 
   return (
-    <SafeAreaProvider>
-      <StatusBar barStyle={'dark-content'} />
-      {!isAuthed && view === 'login' ? (
-        <Login
-          username={username}
-          password={password}
-          showPassword={showPassword}
-          loading={loading}
-          error={error}
-          status={status}
-          canSubmit={canSubmit}
-          onUsernameChange={setUsername}
-          onPasswordChange={setPassword}
-          onTogglePassword={() => setShowPassword((prev) => !prev)}
-          onSubmit={submit}
-          onGoRegister={goRegister}
-        />
-      ) : null}
-      {!isAuthed && view === 'register' ? (
-        <Register
-          username={registerUsername}
-          password={registerPassword}
-          confirmPassword={registerConfirmPassword}
-          loading={registerLoading}
-          error={registerError}
-          status={registerStatus}
-          canSubmit={canRegister}
-          onUsernameChange={setRegisterUsername}
-          onPasswordChange={setRegisterPassword}
-          onConfirmPasswordChange={setRegisterConfirmPassword}
-          onSubmit={register}
-          onBack={goLogin}
-        />
-      ) : null}
-      {isAuthed ? (
-        <NavigationContainer>
-          <Stack.Navigator
-            screenOptions={{
-              headerShown: false,
-              contentStyle: { backgroundColor: '#f2f2f7' },
-            }}
-          >
-            <Stack.Screen name="Home">
-              {() => <Home profile={profile} />}
-            </Stack.Screen>
-            <Stack.Screen name="Profile">
-              {({ navigation }) => (
-                <Profile
-                  profile={profile}
-                  onBack={() => navigation.goBack()}
-                  onEdit={() => navigation.navigate('EditProfile')}
-                  onRefresh={refreshProfile}
-                />
-              )}
-            </Stack.Screen>
-            <Stack.Screen name="EditProfile">
-              {({ navigation }) => (
-                <EditProfile
-                  initialProfile={profile}
-                  onBack={() => navigation.goBack()}
-                  onSaved={(next) => {
-                    setProfile((prev) => ({ ...prev, ...next }));
-                  }}
-                />
-              )}
-            </Stack.Screen>
-          </Stack.Navigator>
-        </NavigationContainer>
-      ) : null}
+    <SafeAreaProvider style={styles.appRoot}>
+      <View style={styles.appRoot}>
+        <StatusBar barStyle={'dark-content'} />
+        {!isAuthed && view === 'login' ? (
+          <Login
+            username={username}
+            password={password}
+            showPassword={showPassword}
+            loading={loading}
+            error={error}
+            status={status}
+            canSubmit={canSubmit}
+            onUsernameChange={setUsername}
+            onPasswordChange={setPassword}
+            onTogglePassword={() => setShowPassword((prev) => !prev)}
+            onSubmit={submit}
+            onGoRegister={goRegister}
+          />
+        ) : null}
+        {!isAuthed && view === 'register' ? (
+          <Register
+            username={registerUsername}
+            password={registerPassword}
+            confirmPassword={registerConfirmPassword}
+            loading={registerLoading}
+            error={registerError}
+            status={registerStatus}
+            canSubmit={canRegister}
+            onUsernameChange={setRegisterUsername}
+            onPasswordChange={setRegisterPassword}
+            onConfirmPasswordChange={setRegisterConfirmPassword}
+            onSubmit={register}
+            onBack={goLogin}
+          />
+        ) : null}
+        {isAuthed ? (
+          <View style={styles.appRoot}>
+            <NavigationContainer style={styles.appRoot}>
+              <Stack.Navigator
+                screenOptions={{
+                  headerShown: false,
+                  contentStyle: { backgroundColor: '#f2f2f7' },
+                }}
+              >
+                <Stack.Screen name="Home">
+                  {() => <Home profile={profile} />}
+                </Stack.Screen>
+                <Stack.Screen name="Profile">
+                  {({ navigation }) => (
+                    <Profile
+                      profile={profile}
+                      onBack={() => navigation.goBack()}
+                      onEdit={() => navigation.navigate('EditProfile')}
+                      onRefresh={refreshProfile}
+                    />
+                  )}
+                </Stack.Screen>
+                <Stack.Screen name="EditProfile">
+                  {({ navigation }) => (
+                    <EditProfile
+                      initialProfile={profile}
+                      onBack={() => navigation.goBack()}
+                      onSaved={(next) => {
+                        setProfile((prev) => ({ ...prev, ...next }));
+                      }}
+                    />
+                  )}
+                </Stack.Screen>
+              </Stack.Navigator>
+            </NavigationContainer>
+          </View>
+        ) : null}
+      </View>
     </SafeAreaProvider>
   );
 }
+
+const styles = StyleSheet.create({
+  appRoot: {
+    flex: 1,
+    minHeight: '100%',
+  },
+});
 
 export default App;
 

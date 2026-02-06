@@ -1225,10 +1225,13 @@ export default function Home({ profile }: { profile: Profile }) {
 const styles = StyleSheet.create({
   page: {
     flex: 1,
+    flexGrow: 1,
+    minHeight: '100%',
     backgroundColor: '#f5f6fa',
   },
   home: {
     flex: 1,
+    minHeight: 0,
   },
   header: {
     paddingHorizontal: 15,
@@ -1299,6 +1302,7 @@ const styles = StyleSheet.create({
   },
   content: {
     flex: 1,
+    minHeight: 0,
   },
   contentInner: {
     paddingHorizontal: 16,
@@ -1306,6 +1310,7 @@ const styles = StyleSheet.create({
   },
   msgList: {
     flex: 1,
+    minHeight: 0,
     backgroundColor: '#f5f6fa',
   },
   msgListInner: {
@@ -1396,6 +1401,8 @@ const styles = StyleSheet.create({
   },
   bottomNav: {
     minHeight: 55,
+    marginTop: 'auto',
+    flexShrink: 0,
     backgroundColor: '#f9f9f9',
     borderTopWidth: 1,
     borderTopColor: 'rgba(0,0,0,0.05)',
