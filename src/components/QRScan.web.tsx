@@ -1,24 +1,19 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+﻿import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useIsFocused, useNavigation } from '@react-navigation/native';
+import type { RootNavigation } from '../navigation/types';
 import jsQR from 'jsqr';
 import { pickQrImageForPlatform } from '../utils/pickQrImage';
 import { normalizeScannedUrl } from './qrUtils';
+import { QR_SCAN_MODE_ITEMS, QR_SCAN_TEXT, type ScanMode } from './qrScanShared';
 
 type RotationAngle = 0 | 90 | -90 | 180;
 type InversionMode = 'dontInvert' | 'attemptBoth';
-type ScanMode = 'ar' | 'scan' | 'text';
 type DecodeStep = {
   maxSide: number;
   scales: readonly number[];
   angles: readonly RotationAngle[];
   inversion: InversionMode;
 };
-
-const MODE_ITEMS: ReadonlyArray<{ key: ScanMode; label: string }> = [
-  { key: 'ar', label: 'AR' },
-  { key: 'scan', label: '\u626b\u4e00\u626b' },
-  { key: 'text', label: '\u8f6c\u6587\u5b57' },
-];
 
 const DECODE_INTERVAL_MS = 68;
 const REALTIME_STEPS: readonly DecodeStep[] = [
@@ -51,7 +46,7 @@ const ALBUM_STEPS: readonly DecodeStep[] = [
 ];
 
 export default function QRScanWeb() {
-  const navigation = useNavigation<any>();
+  const navigation = useNavigation<RootNavigation>();
   const isFocused = useIsFocused();
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -105,11 +100,11 @@ export default function QRScanWeb() {
       const targetUrl = normalizeScannedUrl(value);
       if (!targetUrl) {
         scannedRef.current = false;
-        setStatusText('\u8bc6\u522b\u7ed3\u679c\u4e0d\u662f\u6709\u6548\u94fe\u63a5');
+        setStatusText(QR_SCAN_TEXT.invalidScannedValue);
         return;
       }
       navigation.navigate('InAppBrowser', {
-        title: '\u626b\u7801\u7ed3\u679c',
+        title: QR_SCAN_TEXT.scanResultTitle,
         url: targetUrl,
       });
     },
@@ -256,12 +251,12 @@ export default function QRScanWeb() {
         }
         rafRef.current = requestAnimationFrame(decodeLoop);
       } catch (error) {
-        const message = error instanceof Error ? error.message : '\u65e0\u6cd5\u8bbf\u95ee\u6444\u50cf\u5934';
-        setStatusText(message || '\u65e0\u6cd5\u8bbf\u95ee\u6444\u50cf\u5934');
+        const message = error instanceof Error ? error.message : QR_SCAN_TEXT.cameraAccessFailed;
+        setStatusText(message || QR_SCAN_TEXT.cameraAccessFailed);
       }
     };
 
-    void start();
+    start().catch(() => undefined);
     return () => {
       cancelled = true;
       stopCamera();
@@ -293,12 +288,12 @@ export default function QRScanWeb() {
       const dataUrl = `data:${picked.mime || 'image/jpeg'};base64,${picked.data}`;
       const value = await decodeAlbumImage(dataUrl);
       if (!value) {
-        setStatusText('\u76f8\u518c\u56fe\u7247\u672a\u8bc6\u522b\u5230\u4e8c\u7ef4\u7801');
+        setStatusText(QR_SCAN_TEXT.albumNoQrDetected);
         return;
       }
       onScanValue(value);
     } catch (error) {
-      const message = error instanceof Error ? error.message : '\u6253\u5f00\u76f8\u518c\u5931\u8d25';
+      const message = error instanceof Error ? error.message : QR_SCAN_TEXT.albumOpenFailed;
       setStatusText(message);
     } finally {
       setAlbumDecoding(false);
@@ -322,8 +317,8 @@ export default function QRScanWeb() {
         <div style={styles.scanArea}>
           <div style={styles.scanLine} />
         </div>
-        <div style={styles.tipText}>{'\u8bf7\u5bf9\u51c6\u9700\u8981\u8bc6\u522b\u7684\u4e8c\u7ef4\u7801'}</div>
-        <div style={styles.zoomText}>{`${zoomLevel}x (\u53cc\u51fb\u5207\u6362 1x/2x)`}</div>
+        <div style={styles.tipText}>{QR_SCAN_TEXT.tipAlignCode}</div>
+        <div style={styles.zoomText}>{`${zoomLevel}x (${QR_SCAN_TEXT.zoomHintDoubleTap})`}</div>
         {statusText ? <div style={styles.errorText}>{statusText}</div> : null}
       </div>
 
@@ -332,11 +327,11 @@ export default function QRScanWeb() {
           <div style={styles.edgeIconWrap}>
             <MyQrIcon />
           </div>
-          <div style={styles.edgeText}>{'\u6211\u7684\u4e8c\u7ef4\u7801'}</div>
+          <div style={styles.edgeText}>{QR_SCAN_TEXT.myQrCode}</div>
         </button>
 
         <div style={styles.centerTabs}>
-          {MODE_ITEMS.map((item) => {
+          {QR_SCAN_MODE_ITEMS.map((item) => {
             const active = scanMode === item.key;
             return (
               <button
@@ -359,7 +354,7 @@ export default function QRScanWeb() {
             <AlbumIcon />
           </div>
           <div style={styles.edgeText}>
-            {albumDecoding ? '\u8bc6\u522b\u4e2d...' : '\u76f8\u518c'}
+            {albumDecoding ? QR_SCAN_TEXT.decoding : QR_SCAN_TEXT.album}
           </div>
         </button>
       </div>
@@ -573,3 +568,4 @@ if (typeof document !== 'undefined') {
     document.head.appendChild(style);
   }
 }
+

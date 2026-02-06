@@ -1,4 +1,4 @@
-import { NativeModules, Platform } from 'react-native';
+﻿import { NativeModules, Platform } from 'react-native';
 
 const DEFAULT_API_PORT = 3001;
 const isDevRuntime =
@@ -70,17 +70,22 @@ const resolveApiBase = () => {
 
 export const API_BASE = resolveApiBase();
 if (!API_BASE) {
-  console.warn(
-    'API_BASE 未配置。请设置 XINCHAT_API_BASE / REACT_APP_API_BASE / VITE_API_BASE。'
-  );
+  console.warn('API_BASE 未配置，请设置 XINCHAT_API_BASE / REACT_APP_API_BASE / VITE_API_BASE。');
 }
 
+const stripUnsafeChars = (value: string) => {
+  let normalized = '';
+  for (const char of value) {
+    const code = char.charCodeAt(0);
+    if (code <= 31 || code === 127) continue;
+    if (code === 0x200b || code === 0x200c || code === 0x200d || code === 0xfeff) continue;
+    normalized += char;
+  }
+  return normalized;
+};
 export const normalizeImageUrl = (value?: string) => {
   if (!value) return '';
-  const trimmed = String(value)
-    .replace(/[\u0000-\u001F\u007F]/g, '')
-    .replace(/[\u200B-\u200D\uFEFF]/g, '')
-    .trim();
+  const trimmed = stripUnsafeChars(String(value)).trim();
   if (!trimmed) return '';
   if (trimmed.startsWith('data:image/')) return trimmed;
   if (trimmed.startsWith('/uploads/')) {
@@ -101,3 +106,5 @@ export const normalizeImageUrl = (value?: string) => {
   } catch {}
   return trimmed.replace(/\/+$/, '');
 };
+
+

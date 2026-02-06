@@ -18,6 +18,7 @@ import {
 import Svg, { Path } from 'react-native-svg';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { API_BASE, normalizeImageUrl } from '../config';
+import { STORAGE_KEYS } from '../constants/storageKeys';
 import { storage } from '../storage';
 import { pickImageForPlatform, type PickedImage } from '../utils/pickImage';
 import { cropImageForPlatform } from '../utils/cropImage';
@@ -43,8 +44,6 @@ type Props = {
   initialProfile?: ProfileData;
 };
 
-const PROFILE_KEY = 'xinchat.profile';
-const TOKEN_KEY = 'xinchat.token';
 const CHINA = '\u4e2d\u56fd';
 const GENDER_OPTIONS = ['\u7537', '\u5973', '\u5176\u4ed6'];
 const MONTH_OPTIONS = Array.from({ length: 12 }, (_, i) => String(i + 1).padStart(2, '0'));
@@ -421,7 +420,7 @@ export default function EditProfile({ onBack, onSaved, initialProfile }: Props) 
       setLoading(true);
       setError('');
       try {
-        const token = await storage.getString(TOKEN_KEY);
+        const token = await storage.getString(STORAGE_KEYS.token);
         const response = await fetch(`${API_BASE}/api/profile`, {
           headers: token ? { Authorization: `Bearer ${token}` } : {},
         });
@@ -438,7 +437,7 @@ export default function EditProfile({ onBack, onSaved, initialProfile }: Props) 
         setLoading(false);
       }
     };
-    void loadProfile();
+    loadProfile().catch(() => undefined);
   }, []);
 
   const updateField = useCallback((key: keyof ProfileData, value: string) => {
@@ -475,7 +474,7 @@ export default function EditProfile({ onBack, onSaved, initialProfile }: Props) 
       setError('');
       setStatus('\u4fdd\u5b58\u4e2d...');
       try {
-        const token = await storage.getString(TOKEN_KEY);
+    const token = await storage.getString(STORAGE_KEYS.token);
         const payload = {
           nickname: override?.nickname ?? profile.nickname ?? '',
           signature: override?.signature ?? profile.signature ?? '',
@@ -502,7 +501,7 @@ export default function EditProfile({ onBack, onSaved, initialProfile }: Props) 
         }
         if (data?.user) {
           setProfile(data.user);
-          await storage.setJson(PROFILE_KEY, data.user);
+          await storage.setJson(STORAGE_KEYS.profile, data.user);
           onSaved?.(data.user);
         }
         setStatus('\u4fdd\u5b58\u6210\u529f\u3002');
@@ -632,7 +631,7 @@ export default function EditProfile({ onBack, onSaved, initialProfile }: Props) 
 
   const uploadAvatarPayload = useCallback(async (mime: string, base64: string) => {
     const ext = (mime || '').split('/')[1] || 'jpg';
-    const token = await storage.getString(TOKEN_KEY);
+      const token = await storage.getString(STORAGE_KEYS.token);
     const response = await fetch(`${API_BASE}/api/chat/upload/image`, {
       method: 'POST',
       headers: {

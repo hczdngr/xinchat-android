@@ -1,16 +1,17 @@
-import React, { useMemo } from 'react';
+﻿import React, { useMemo } from 'react';
 import { Pressable, StyleSheet, Text, View } from 'react-native';
 import { useNavigation, useRoute } from '@react-navigation/native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { WebView } from 'react-native-webview';
 import Svg, { Path } from 'react-native-svg';
+import type { InAppBrowserRoute, RootNavigation } from '../navigation/types';
 
 export default function InAppBrowser() {
-  const navigation = useNavigation<any>();
-  const route = useRoute<any>();
+  const navigation = useNavigation<RootNavigation>();
+  const route = useRoute<InAppBrowserRoute>();
   const insets = useSafeAreaInsets();
-  const url = String(route?.params?.url || '').trim();
-  const title = String(route?.params?.title || '网页');
+  const url = String(route.params?.url || '').trim();
+  const title = String(route.params?.title || '网页');
 
   const safeUrl = useMemo(() => {
     if (!url) return '';
@@ -97,4 +98,7 @@ function BackIcon() {
     </Svg>
   );
 }
+
+
+
 

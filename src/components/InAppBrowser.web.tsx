@@ -1,11 +1,12 @@
-import React, { useMemo } from 'react';
+﻿import React, { useMemo } from 'react';
 import { useNavigation, useRoute } from '@react-navigation/native';
+import type { InAppBrowserRoute, RootNavigation } from '../navigation/types';
 
 export default function InAppBrowserWeb() {
-  const navigation = useNavigation<any>();
-  const route = useRoute<any>();
-  const url = String(route?.params?.url || '').trim();
-  const title = String(route?.params?.title || '网页');
+  const navigation = useNavigation<RootNavigation>();
+  const route = useRoute<InAppBrowserRoute>();
+  const url = String(route.params?.url || '').trim();
+  const title = String(route.params?.title || '网页');
 
   const safeUrl = useMemo(() => {
     if (!url) return '';
@@ -80,4 +81,7 @@ const styles: Record<string, React.CSSProperties> = {
     fontSize: 14,
   },
 };
+
+
+
 

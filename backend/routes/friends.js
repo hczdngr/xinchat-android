@@ -258,7 +258,7 @@ router.get('/list', authenticate, async (req, res) => {
 });
 
 router.get('/requests', authenticate, async (req, res) => {
-  const { users, user, userIndex } = req.auth;
+  const { users, userIndex } = req.auth;
   const updatedUser = users[userIndex];
   ensureFriendRequests(updatedUser);
 
@@ -315,7 +315,7 @@ router.get('/requests', authenticate, async (req, res) => {
 });
 
 router.post('/respond', authenticate, async (req, res) => {
-  const { users, user, userIndex } = req.auth;
+  const { users, userIndex } = req.auth;
   const { requesterUid, action } = req.body || {};
   const requesterId = Number(requesterUid);
   if (!Number.isInteger(requesterId)) {

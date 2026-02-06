@@ -411,17 +411,17 @@ const buildRouteResponse = (target) => {
   const autoRoutes = collectRoutes(target);
   const used = new Set();
 
-  const toKey = (method, path) => `${method} ${path}`;
-  const matchMeta = (method, path) => {
+  const toKey = (method, routePath) => `${method} ${routePath}`;
+  const matchMeta = (method, routePath) => {
     const direct = routeMeta.find(
-      (meta) => meta.method === method && meta.path === path
+      (meta) => meta.method === method && meta.path === routePath
     );
     if (direct) return direct;
     const wildcard = routeMeta.find(
       (meta) =>
         meta.method === method &&
         meta.path.endsWith('/*') &&
-        path === meta.path.slice(0, -2)
+        routePath === meta.path.slice(0, -2)
     );
     return wildcard;
   };
@@ -587,7 +587,7 @@ export function startServer(port = PORT) {
   };
 
   setStatusChangeHandler((uid, online) => {
-    void updateUserOnlineState(uid, online);
+    updateUserOnlineState(uid, online).catch(() => undefined);
   });
   setTimeoutHandler((uid) => {
     const set = connections.get(uid);
@@ -629,7 +629,7 @@ export function startServer(port = PORT) {
       addConnection(user.uid, socket);
       const statusChanged = touchHeartbeat(user.uid);
       if (!statusChanged) {
-        void updateUserOnlineState(user.uid, true);
+        updateUserOnlineState(user.uid, true).catch(() => undefined);
       }
       socket.send(JSON.stringify({ type: 'ready', uid: user.uid }));
       await sendPresenceSnapshot(socket, user);
@@ -642,7 +642,7 @@ export function startServer(port = PORT) {
             return;
           }
           if (message?.type === 'presence_request') {
-            void sendPresenceSnapshot(socket, user);
+            sendPresenceSnapshot(socket, user).catch(() => undefined);
             return;
           }
           if (message?.type === 'voice_signal') {

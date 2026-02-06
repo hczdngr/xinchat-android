@@ -1,6 +1,7 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+﻿import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Animated, Dimensions, Pressable, StyleSheet, Text, View } from 'react-native';
 import { useFocusEffect, useIsFocused, useNavigation } from '@react-navigation/native';
+import type { RootNavigation } from '../navigation/types';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import Svg, { Circle, Path, Rect } from 'react-native-svg';
 import {
@@ -13,17 +14,11 @@ import {
 import { decodeQrFromBase64 } from '../utils/decodeQrFromBase64';
 import { pickQrImageForPlatform } from '../utils/pickQrImage';
 import { normalizeScannedUrl } from './qrUtils';
+import { QR_SCAN_MODE_ITEMS, QR_SCAN_TEXT, type ScanMode } from './qrScanShared';
 
-type ScanMode = 'ar' | 'scan' | 'text';
-
-const MODE_ITEMS: ReadonlyArray<{ key: ScanMode; label: string }> = [
-  { key: 'ar', label: 'AR' },
-  { key: 'scan', label: '\u626b\u4e00\u626b' },
-  { key: 'text', label: '\u8f6c\u6587\u5b57' },
-];
 
 export default function QRScan() {
-  const navigation = useNavigation<any>();
+  const navigation = useNavigation<RootNavigation>();
   const isFocused = useIsFocused();
   const insets = useSafeAreaInsets();
   const { hasPermission, requestPermission } = useCameraPermission();
@@ -97,11 +92,11 @@ export default function QRScan() {
       const targetUrl = normalizeScannedUrl(value);
       if (!targetUrl) {
         scannedRef.current = false;
-        setStatusText('\u8bc6\u522b\u7ed3\u679c\u4e0d\u662f\u6709\u6548\u94fe\u63a5');
+        setStatusText(QR_SCAN_TEXT.invalidScannedValue);
         return;
       }
       navigation.navigate('InAppBrowser', {
-        title: '\u626b\u7801\u7ed3\u679c',
+        title: QR_SCAN_TEXT.scanResultTitle,
         url: targetUrl,
       });
     },
@@ -142,12 +137,12 @@ export default function QRScan() {
       if (!picked?.data) return;
       const value = decodeQrFromBase64(picked.data, picked.mime, 'album');
       if (!value) {
-        setStatusText('\u76f8\u518c\u56fe\u7247\u672a\u8bc6\u522b\u5230\u4e8c\u7ef4\u7801');
+        setStatusText(QR_SCAN_TEXT.albumNoQrDetected);
         return;
       }
       onScanValue(value);
     } catch {
-      setStatusText('\u6253\u5f00\u76f8\u518c\u5931\u8d25');
+      setStatusText(QR_SCAN_TEXT.albumOpenFailed);
     } finally {
       setAlbumDecoding(false);
     }
@@ -156,14 +151,14 @@ export default function QRScan() {
   if (!hasPermission) {
     return (
       <View style={[styles.page, styles.center]}>
-        <Text style={styles.infoText}>{'\u9700\u8981\u76f8\u673a\u6743\u9650\u624d\u80fd\u626b\u7801'}</Text>
+        <Text style={styles.infoText}>{QR_SCAN_TEXT.cameraPermissionRequired}</Text>
         <Pressable
           style={styles.permissionBtn}
           onPress={() => {
             requestPermission().catch(() => {});
           }}
         >
-          <Text style={styles.permissionBtnText}>{'\u6388\u6743\u76f8\u673a'}</Text>
+          <Text style={styles.permissionBtnText}>{QR_SCAN_TEXT.grantCameraPermission}</Text>
         </Pressable>
       </View>
     );
@@ -172,7 +167,7 @@ export default function QRScan() {
   if (!device) {
     return (
       <View style={[styles.page, styles.center]}>
-        <Text style={styles.infoText}>{'\u672a\u627e\u5230\u540e\u7f6e\u6444\u50cf\u5934'}</Text>
+        <Text style={styles.infoText}>{QR_SCAN_TEXT.noRearCamera}</Text>
       </View>
     );
   }
@@ -207,8 +202,8 @@ export default function QRScan() {
         >
           <Animated.View style={[styles.scanLine, { transform: [{ translateY: lineTranslateY }] }]} />
         </View>
-        <Text style={styles.tipText}>{'\u8bf7\u5bf9\u51c6\u9700\u8981\u8bc6\u522b\u7684\u4e8c\u7ef4\u7801'}</Text>
-        <Text style={styles.zoomText}>{`${zoomLevel}x (\u53cc\u51fb\u5207\u6362 1x/2x)`}</Text>
+        <Text style={styles.tipText}>{QR_SCAN_TEXT.tipAlignCode}</Text>
+        <Text style={styles.zoomText}>{`${zoomLevel}x (${QR_SCAN_TEXT.zoomHintDoubleTap})`}</Text>
         {statusText ? <Text style={styles.statusText}>{statusText}</Text> : null}
       </View>
 
@@ -217,11 +212,11 @@ export default function QRScan() {
           <View style={styles.edgeIconWrap}>
             <MyQrIcon />
           </View>
-          <Text style={styles.edgeText}>{'\u6211\u7684\u4e8c\u7ef4\u7801'}</Text>
+          <Text style={styles.edgeText}>{QR_SCAN_TEXT.myQrCode}</Text>
         </Pressable>
 
         <View style={styles.centerTabs}>
-          {MODE_ITEMS.map((item) => {
+          {QR_SCAN_MODE_ITEMS.map((item) => {
             const active = scanMode === item.key;
             return (
               <Pressable
@@ -247,7 +242,7 @@ export default function QRScan() {
             <AlbumIcon />
           </View>
           <Text style={styles.edgeText}>
-            {albumDecoding ? '\u8bc6\u522b\u4e2d...' : '\u76f8\u518c'}
+            {albumDecoding ? QR_SCAN_TEXT.decoding : QR_SCAN_TEXT.album}
           </Text>
         </Pressable>
       </View>
@@ -437,3 +432,4 @@ function AlbumIcon() {
     </Svg>
   );
 }
+

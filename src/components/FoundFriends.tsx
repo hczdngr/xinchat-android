@@ -13,6 +13,7 @@ import {
 } from 'react-native';
 import Svg, { Path } from 'react-native-svg';
 import { API_BASE } from '../config';
+import { STORAGE_KEYS } from '../constants/storageKeys';
 import { storage } from '../storage';
 
 type Friend = {
@@ -117,7 +118,7 @@ export default function FoundFriends({
   }, [friendUidSet, incomingPendingSet, outgoingPendingSet, searchResult]);
 
   const authHeaders = useCallback(async () => {
-    const token = await storage.getString('xinchat.token');
+    const token = await storage.getString(STORAGE_KEYS.token);
     return token ? { Authorization: `Bearer ${token}` } : {};
   }, []);
 
@@ -244,7 +245,7 @@ export default function FoundFriends({
 
 
   useEffect(() => {
-    void loadRequests();
+    loadRequests().catch(() => undefined);
   }, [loadRequests, refreshKey]);
 
   useEffect(() => {

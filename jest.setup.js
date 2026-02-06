@@ -42,3 +42,7 @@ jest.mock('react-native-vision-camera', () => ({
 jest.mock('react-native-webview', () => ({
   WebView: () => null,
 }));
+
+jest.mock('fast-png', () => ({
+  decode: jest.fn(() => ({ data: new Uint8Array(0), width: 0, height: 0 })),
+}));

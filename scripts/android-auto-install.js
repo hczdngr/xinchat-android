@@ -79,7 +79,7 @@ const scheduleBuild = () => {
   }
   timer = setTimeout(() => {
     timer = null;
-    void buildAndInstall();
+    buildAndInstall().catch(() => undefined);
   }, DEBOUNCE_MS);
 };
 

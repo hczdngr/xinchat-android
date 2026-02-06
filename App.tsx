@@ -11,10 +11,9 @@ import EditProfile from './src/components/EditProfile';
 import QRScan from './src/components/QRScan';
 import InAppBrowser from './src/components/InAppBrowser';
 import { API_BASE } from './src/config';
+import { STORAGE_KEYS } from './src/constants/storageKeys';
+import type { RootStackParamList } from './src/navigation/types';
 import { storage } from './src/storage';
-
-const TOKEN_KEY = 'xinchat.token';
-const PROFILE_KEY = 'xinchat.profile';
 
 type Profile = {
   uid?: number;
@@ -31,7 +30,7 @@ type Profile = {
 };
 
 const emptyProfile: Profile = {};
-const Stack = createNativeStackNavigator();
+const Stack = createNativeStackNavigator<RootStackParamList>();
 
 function App() {
   const [username, setUsername] = useState('');
@@ -67,16 +66,17 @@ function App() {
 
   useEffect(() => {
     const loadSession = async () => {
-      const storedToken = (await storage.getString(TOKEN_KEY)) || '';
-      const storedProfile = (await storage.getJson<Profile>(PROFILE_KEY)) || emptyProfile;
+      const storedToken = (await storage.getString(STORAGE_KEYS.token)) || '';
+      const storedProfile =
+        (await storage.getJson<Profile>(STORAGE_KEYS.profile)) || emptyProfile;
       setToken(storedToken);
       setProfile(storedProfile);
     };
-    void loadSession();
+    loadSession().catch(() => undefined);
   }, []);
 
   const refreshProfile = useCallback(async () => {
-    const authToken = token || (await storage.getString(TOKEN_KEY)) || '';
+    const authToken = token || (await storage.getString(STORAGE_KEYS.token)) || '';
     if (!authToken) return;
     try {
       const response = await fetch(`${API_BASE}/api/profile`, {
@@ -85,7 +85,7 @@ function App() {
       const data = await response.json().catch(() => ({}));
       if (response.ok && data?.success && data?.user) {
         setProfile((prev) => ({ ...prev, ...data.user }));
-        await storage.setJson(PROFILE_KEY, {
+        await storage.setJson(STORAGE_KEYS.profile, {
           uid: data.user.uid,
           username: data.user.username,
           nickname: data.user.nickname,
@@ -116,8 +116,8 @@ function App() {
       region: data.region,
       tokenExpiresAt: data.tokenExpiresAt,
     };
-    await storage.setString(TOKEN_KEY, nextToken);
-    await storage.setJson(PROFILE_KEY, nextProfile);
+    await storage.setString(STORAGE_KEYS.token, nextToken);
+    await storage.setJson(STORAGE_KEYS.profile, nextProfile);
     setToken(nextToken);
     setProfile(nextProfile);
   };
