@@ -2,6 +2,9 @@ apply plugin: "com.android.application"
 apply plugin: "org.jetbrains.kotlin.android"
 apply plugin: "com.facebook.react"
 
+import java.io.FileInputStream
+import java.util.Properties
+
 /**
  * This is the configuration block to customize your React Native Android app.
  * By default you don't need to apply any configuration, just uncomment the lines you need.
@@ -58,6 +61,22 @@ react {
  * Set this to true to Run Proguard on Release builds to minify the Java bytecode.
  */
 def enableProguardInReleaseBuilds = false
+def keystoreProperties = new Properties()
+def keystorePropertiesFile = rootProject.file("keystore.properties")
+if (keystorePropertiesFile.exists()) {
+    keystoreProperties.load(new FileInputStream(keystorePropertiesFile))
+}
+def resolveConfigValue = { propKey, envKey ->
+    def propValue = keystoreProperties.getProperty(propKey)
+    if (propValue != null && propValue.trim()) {
+        return propValue.trim()
+    }
+    def envValue = System.getenv(envKey)
+    if (envValue != null && envValue.trim()) {
+        return envValue.trim()
+    }
+    return null
+}
 
 /**
  * The preferred build flavor of JavaScriptCore (JSC)
@@ -84,7 +103,6 @@ android {
         targetSdkVersion rootProject.ext.targetSdkVersion
         versionCode 1
         versionName "1.0"
-        manifestPlaceholders = [usesCleartextTraffic: "true"]
     }
     signingConfigs {
         debug {
@@ -93,15 +111,29 @@ android {
             keyAlias 'androiddebugkey'
             keyPassword 'android'
         }
+        release {
+            def storeFilePath = resolveConfigValue('storeFile', 'ANDROID_KEYSTORE_FILE')
+            def storePasswordValue = resolveConfigValue('storePassword', 'ANDROID_KEYSTORE_PASSWORD')
+            def keyAliasValue = resolveConfigValue('keyAlias', 'ANDROID_KEY_ALIAS')
+            def keyPasswordValue = resolveConfigValue('keyPassword', 'ANDROID_KEY_PASSWORD')
+            if (storeFilePath && storePasswordValue && keyAliasValue && keyPasswordValue) {
+                storeFile file(storeFilePath)
+                storePassword storePasswordValue
+                keyAlias keyAliasValue
+                keyPassword keyPasswordValue
+            }
+        }
     }
     buildTypes {
         debug {
             signingConfig signingConfigs.debug
+            manifestPlaceholders = [usesCleartextTraffic: "true"]
         }
         release {
-            // Caution! In production, you need to generate your own keystore file.
-            // see https://reactnative.dev/docs/signed-apk-android.
-            signingConfig signingConfigs.debug
+            if (signingConfigs.release.storeFile != null) {
+                signingConfig signingConfigs.release
+            }
+            manifestPlaceholders = [usesCleartextTraffic: "false"]
             minifyEnabled enableProguardInReleaseBuilds
             proguardFiles getDefaultProguardFile("proguard-android.txt"), "proguard-rules.pro"
         }

@@ -87,7 +87,8 @@ ANDROID_SERIAL=<device> npm run android:install
 1. `XINCHAT_API_BASE` / `REACT_APP_API_BASE` / `VITE_API_BASE`
 2. Web：当前浏览器 host + `:3001`
 3. Native 调试：从 Metro 地址自动推断 host + `:3001`
-4. 回退：`http://127.0.0.1:3001`
+4. Native 调试兜底：Android `http://10.0.2.2:3001`，iOS `http://127.0.0.1:3001`
+5. 生产环境：必须通过环境变量显式配置 API（否则会告警）
 
 可复制模板：
 
@@ -106,6 +107,19 @@ XINCHAT_API_BASE=http://127.0.0.1:3001
 - 不再在项目中硬编码 JDK 本机路径（如 `org.gradle.java.home`）
 - `android/local.properties` 属于本地文件，不进 Git
 - API 地址不硬编码某台机器 IP，统一用动态解析/环境变量
+- Android `release` 不再默认使用 `debug.keystore`，签名从 `keystore.properties` 或环境变量读取
+- 网络明文流量仅在 Android `debug` 放开，`release` 默认关闭
+
+`release` 签名可用环境变量：
+
+```bash
+ANDROID_KEYSTORE_FILE=...
+ANDROID_KEYSTORE_PASSWORD=...
+ANDROID_KEY_ALIAS=...
+ANDROID_KEY_PASSWORD=...
+```
+
+也可在 `android/keystore.properties`（本地文件，不提交）中配置同名字段。
 
 ## 8. Git 提交规范
 
@@ -138,3 +152,11 @@ npm run web:build
 - 后端是否已启动（3001）
 - `XINCHAT_API_BASE` 是否正确
 - 手机/模拟器与后端机器网络是否互通
+
+### Q3: 前端跨域被拒绝怎么办？
+
+后端在生产环境会按 `CORS_ORIGINS` 白名单放行浏览器来源，示例：
+
+```bash
+CORS_ORIGINS=https://chat.example.com,https://admin.example.com npm run backend
+```

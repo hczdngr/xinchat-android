@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
+  BackHandler,
   Dimensions,
   Image,
   Platform,
@@ -59,7 +60,6 @@ const READ_AT_KEY = 'xinchat.readAt';
 const PINNED_KEY = 'xinchat.pinned';
 const HIDDEN_KEY = 'xinchat.hiddenChats';
 const PAGE_LIMIT = 30;
-const UNREAD_LIMIT = 200;
 const HEARTBEAT_MS = 20000;
 const RECONNECT_BASE_MS = 1500;
 const RECONNECT_MAX_MS = 10000;
@@ -82,6 +82,16 @@ const menuShadowStyle =
         shadowOffset: { width: 0, height: 8 },
         shadowRadius: 24,
         elevation: 6,
+      };
+const quickMenuShadowStyle =
+  Platform.OS === 'web'
+    ? { boxShadow: '0px 14px 30px rgba(0, 0, 0, 0.35)' }
+    : {
+        shadowColor: '#000',
+        shadowOpacity: 0.35,
+        shadowOffset: { width: 0, height: 10 },
+        shadowRadius: 30,
+        elevation: 10,
       };
 
 export default function Home({ profile }: { profile: Profile }) {
@@ -107,9 +117,10 @@ export default function Home({ profile }: { profile: Profile }) {
   const [readAtMap, setReadAtMap] = useState<ReadAtMap>({});
   const [pinnedMap, setPinnedMap] = useState<PinnedMap>({});
   const [hiddenMap, setHiddenMap] = useState<HiddenMap>({});
-  const [menuVisible, setMenuVisible] = useState(false);
-  const [menuTargetUid, setMenuTargetUid] = useState<number | null>(null);
-  const [menuPosition, setMenuPosition] = useState({ x: 0, y: 0 });
+  const [chatMenuVisible, setChatMenuVisible] = useState(false);
+  const [chatMenuTargetUid, setChatMenuTargetUid] = useState<number | null>(null);
+  const [chatMenuPosition, setChatMenuPosition] = useState({ x: 0, y: 0 });
+  const [quickMenuVisible, setQuickMenuVisible] = useState(false);
   const [avatarFailed, setAvatarFailed] = useState(false);
 
   const [activeChatUid, setActiveChatUid] = useState<number | null>(null);
@@ -129,6 +140,7 @@ export default function Home({ profile }: { profile: Profile }) {
   const activeChatUidRef = useRef<number | null>(null);
   const contentHeightRef = useRef(0);
   const messageListRef = useRef<ScrollView | null>(null);
+  const connectWsRef = useRef<() => void>(() => {});
 
   useEffect(() => {
     activeChatUidRef.current = activeChatUid;
@@ -437,55 +449,41 @@ export default function Home({ profile }: { profile: Profile }) {
     [ensureMessageBucket, normalizeMessage, recalcUnread, selfUid, unhideChat, updateLatest]
   );
 
-  const loadLatestForFriend = useCallback(
-    async (uid: number) => {
-      try {
-        const params = new URLSearchParams({
-          targetType: 'private',
-          targetUid: String(uid),
-          type: 'text',
-          limit: '1',
-        });
-        const response = await fetch(`${API_BASE}/api/chat/get?${params.toString()}`, {
-          headers: { ...authHeaders() },
-        });
-        const data = await response.json().catch(() => ({}));
-        if (response.ok && data?.success && Array.isArray(data?.data)) {
-          const last = data.data[data.data.length - 1];
-          if (last) {
-            updateLatest(uid, normalizeMessage(last));
-          }
+  const loadOverview = useCallback(async () => {
+    if (!tokenRef.current) return;
+    try {
+      const response = await fetch(`${API_BASE}/api/chat/overview`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...authHeaders() },
+        body: JSON.stringify({ readAt: readAtMapRef.current }),
+      });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok || !data?.success || !Array.isArray(data?.data)) {
+        return;
+      }
+      const latestPatch: LatestMap = {};
+      const unreadPatch: Record<number, number> = {};
+      data.data.forEach((entry: any) => {
+        const uid = Number(entry?.uid);
+        if (!Number.isInteger(uid)) return;
+        unreadPatch[uid] = Number.isFinite(Number(entry?.unread))
+          ? Math.min(Math.max(Number(entry.unread), 0), 99)
+          : 0;
+        if (entry?.latest) {
+          const normalized = normalizeMessage(entry.latest);
+          latestPatch[uid] = {
+            text: normalized.content || formatMessage(normalized.raw || normalized) || '暂无消息',
+            time: formatTime(normalized.createdAt, normalized.createdAtMs),
+            ts: normalized.createdAtMs,
+          };
         }
-      } catch {}
-    },
-    [authHeaders, normalizeMessage, updateLatest]
-  );
-
-  const loadUnreadCount = useCallback(
-    async (uid: number) => {
-      const sinceTs = getReadAt(uid);
-      try {
-        const params = new URLSearchParams({
-          targetType: 'private',
-          targetUid: String(uid),
-          type: 'text',
-          limit: String(UNREAD_LIMIT),
-        });
-        if (sinceTs > 0) {
-          params.set('sinceTs', String(sinceTs));
-        }
-        const response = await fetch(`${API_BASE}/api/chat/get?${params.toString()}`, {
-          headers: { ...authHeaders() },
-        });
-        const data = await response.json().catch(() => ({}));
-        if (response.ok && data?.success && Array.isArray(data?.data)) {
-          const count = data.data.filter((item: any) => item.senderUid !== selfUid).length;
-          setUnreadMap((prev) => ({ ...prev, [uid]: Math.min(count, 99) }));
-        }
-      } catch {}
-    },
-    [authHeaders, getReadAt, selfUid]
-  );
+      });
+      setUnreadMap((prev) => ({ ...prev, ...unreadPatch }));
+      if (Object.keys(latestPatch).length > 0) {
+        setLatestMap((prev) => ({ ...prev, ...latestPatch }));
+      }
+    } catch {}
+  }, [authHeaders, formatMessage, formatTime, normalizeMessage]);
 
   const loadFriends = useCallback(async () => {
     if (!tokenRef.current) return;
@@ -497,17 +495,14 @@ export default function Home({ profile }: { profile: Profile }) {
       const data = await response.json().catch(() => ({}));
       if (response.ok && data?.success && Array.isArray(data?.friends)) {
         setFriends(data.friends);
-        await Promise.all(
-          data.friends.map(async (friend: Friend) => {
-            ensureMessageBucket(friend.uid);
-            await loadLatestForFriend(friend.uid);
-            await loadUnreadCount(friend.uid);
-          })
-        );
+        data.friends.forEach((friend: Friend) => {
+          ensureMessageBucket(friend.uid);
+        });
+        await loadOverview();
       }
     } catch {}
     setLoadingFriends(false);
-  }, [authHeaders, ensureMessageBucket, loadLatestForFriend, loadUnreadCount]);
+  }, [authHeaders, ensureMessageBucket, loadOverview]);
 
   const loadHistory = useCallback(
     async (uid: number, { beforeId }: { beforeId?: number | string } = {}) => {
@@ -562,6 +557,7 @@ export default function Home({ profile }: { profile: Profile }) {
   const openChat = useCallback(
     async (friend: Friend) => {
       if (!friend) return;
+      setQuickMenuVisible(false);
       setActiveChatUid(friend.uid);
       ensureMessageBucket(friend.uid);
       if ((messagesByUidRef.current[friend.uid] || []).length === 0) {
@@ -581,12 +577,46 @@ export default function Home({ profile }: { profile: Profile }) {
   }, [markChatRead]);
 
   const openFoundFriends = useCallback(() => {
+    setQuickMenuVisible(false);
     setActiveView('found');
   }, []);
 
   const closeFoundFriends = useCallback(() => {
     setActiveView('list');
   }, []);
+
+  const closeQuickMenu = useCallback(() => {
+    setQuickMenuVisible(false);
+  }, []);
+
+  const toggleQuickMenu = useCallback(() => {
+    if (activeChatUid || activeView === 'found') return;
+    setQuickMenuVisible((prev) => !prev);
+  }, [activeChatUid, activeView]);
+
+  const onQuickCreateGroup = useCallback(() => {
+    closeQuickMenu();
+  }, [closeQuickMenu]);
+
+  const onQuickAdd = useCallback(() => {
+    closeQuickMenu();
+    openFoundFriends();
+  }, [closeQuickMenu, openFoundFriends]);
+
+  const onQuickScan = useCallback(() => {
+    closeQuickMenu();
+    navigation.navigate('QRScan');
+  }, [closeQuickMenu, navigation]);
+
+  useEffect(() => {
+    if (Platform.OS !== 'android') return;
+    const sub = BackHandler.addEventListener('hardwareBackPress', () => {
+      if (!quickMenuVisible) return false;
+      setQuickMenuVisible(false);
+      return true;
+    });
+    return () => sub.remove();
+  }, [quickMenuVisible]);
 
   const onChatScroll = useCallback(
     async (event: any) => {
@@ -766,7 +796,7 @@ export default function Home({ profile }: { profile: Profile }) {
     reconnectAttemptsRef.current += 1;
     reconnectTimerRef.current = setTimeout(() => {
       reconnectTimerRef.current = null;
-      connectWs();
+      connectWsRef.current();
     }, delay);
   }, []);
 
@@ -807,6 +837,10 @@ export default function Home({ profile }: { profile: Profile }) {
       scheduleReconnect();
     };
   }, [buildWsUrl, handleWsMessage, scheduleReconnect, startHeartbeat, stopHeartbeat]);
+
+  useEffect(() => {
+    connectWsRef.current = connectWs;
+  }, [connectWs]);
 
   const teardownWs = useCallback(() => {
     stopHeartbeat();
@@ -851,39 +885,39 @@ export default function Home({ profile }: { profile: Profile }) {
       });
   }, [friends, hiddenMap, latestMap, pinnedMap, unreadMap]);
 
-  const closeMenu = useCallback(() => {
-    setMenuVisible(false);
-    setMenuTargetUid(null);
+  const closeChatMenu = useCallback(() => {
+    setChatMenuVisible(false);
+    setChatMenuTargetUid(null);
   }, []);
 
-  const openMenu = useCallback((event: any, uid: number) => {
+  const openChatMenu = useCallback((event: any, uid: number) => {
     const { width, height } = Dimensions.get('window');
     const menuWidth = 160;
     const menuHeight = 96;
     const x = Math.min(event.nativeEvent.pageX, width - menuWidth - 10);
     const y = Math.min(event.nativeEvent.pageY, height - menuHeight - 10);
-    setMenuPosition({ x, y });
-    setMenuTargetUid(uid);
-    setMenuVisible(true);
+    setChatMenuPosition({ x, y });
+    setChatMenuTargetUid(uid);
+    setChatMenuVisible(true);
   }, []);
 
-  const togglePin = useCallback(() => {
-    if (!menuTargetUid) return;
+  const toggleChatPin = useCallback(() => {
+    if (!chatMenuTargetUid) return;
     setPinnedMap((prev) => {
-      const next = { ...prev, [menuTargetUid]: !prev[menuTargetUid] };
-      if (!next[menuTargetUid]) {
-        delete next[menuTargetUid];
+      const next = { ...prev, [chatMenuTargetUid]: !prev[chatMenuTargetUid] };
+      if (!next[chatMenuTargetUid]) {
+        delete next[chatMenuTargetUid];
       }
       void persistPinnedMap(next);
       return next;
     });
-    closeMenu();
-  }, [closeMenu, menuTargetUid, persistPinnedMap]);
+    closeChatMenu();
+  }, [chatMenuTargetUid, closeChatMenu, persistPinnedMap]);
 
   const deleteChat = useCallback(async () => {
-    if (!menuTargetUid) return;
-    const uid = menuTargetUid;
-    closeMenu();
+    if (!chatMenuTargetUid) return;
+    const uid = chatMenuTargetUid;
+    closeChatMenu();
 
     const deleteBatch = async (beforeId?: number | string) => {
       const params = new URLSearchParams({
@@ -940,7 +974,7 @@ export default function Home({ profile }: { profile: Profile }) {
       return next;
     });
     setUnreadMap((prev) => ({ ...prev, [uid]: 0 }));
-  }, [authHeaders, closeMenu, menuTargetUid, persistHiddenMap]);
+  }, [authHeaders, chatMenuTargetUid, closeChatMenu, persistHiddenMap]);
 
   return (
     <View style={[styles.page, { paddingTop: insets.top }]}>
@@ -1062,7 +1096,7 @@ export default function Home({ profile }: { profile: Profile }) {
               </Pressable>
               <Text style={styles.username}>{displayName}</Text>
             </View>
-            <Pressable style={styles.headerRight} onPress={openFoundFriends}>
+            <Pressable style={styles.headerRight} onPress={toggleQuickMenu}>
               <Svg viewBox="0 0 24 24" width={26} height={26} fill="none" stroke="#1a1a1a" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
                 <Line x1="12" y1="5" x2="12" y2="19" />
                 <Line x1="5" y1="12" x2="19" y2="12" />
@@ -1091,7 +1125,7 @@ export default function Home({ profile }: { profile: Profile }) {
                     key={friend.uid}
                     style={[styles.msgItem, pinned && styles.msgItemPinned]}
                     onPress={() => openChat(friend)}
-                    onLongPress={(event) => openMenu(event, friend.uid)}
+                    onLongPress={(event) => openChatMenu(event, friend.uid)}
                   >
                     <View style={styles.avatarBox}>
                       {normalizeImageUrl(friend.avatar) ? (
@@ -1202,13 +1236,41 @@ export default function Home({ profile }: { profile: Profile }) {
         </View>
       ) : null}
 
-      {menuVisible && menuTargetUid ? (
+      {quickMenuVisible && !activeChatUid && activeView !== 'found' ? (
+        <View style={styles.quickMenuOverlay}>
+          <Pressable style={styles.quickMenuBackdrop} onPress={closeQuickMenu} />
+          <View style={[styles.quickMenuPanel, styles.quickMenuPanelPosition]}>
+            <Pressable style={styles.quickMenuItem} onPress={onQuickCreateGroup}>
+              <View style={styles.quickMenuIcon}>
+                <QuickGroupIcon />
+              </View>
+              <Text style={styles.quickMenuText}>创建群聊</Text>
+            </Pressable>
+            <View style={styles.quickMenuDivider} />
+            <Pressable style={styles.quickMenuItem} onPress={onQuickAdd}>
+              <View style={styles.quickMenuIcon}>
+                <QuickAddIcon />
+              </View>
+              <Text style={styles.quickMenuText}>加好友/群</Text>
+            </Pressable>
+            <View style={styles.quickMenuDivider} />
+            <Pressable style={styles.quickMenuItem} onPress={onQuickScan}>
+              <View style={styles.quickMenuIcon}>
+                <QuickScanIcon />
+              </View>
+              <Text style={styles.quickMenuText}>扫一扫</Text>
+            </Pressable>
+          </View>
+        </View>
+      ) : null}
+
+      {chatMenuVisible && chatMenuTargetUid ? (
         <View style={styles.menuOverlay}>
-          <Pressable style={styles.menuBackdrop} onPress={closeMenu} />
-          <View style={[styles.menuPanel, { left: menuPosition.x, top: menuPosition.y }]}>
-            <Pressable style={styles.menuItem} onPress={togglePin}>
+          <Pressable style={styles.menuBackdrop} onPress={closeChatMenu} />
+          <View style={[styles.menuPanel, { left: chatMenuPosition.x, top: chatMenuPosition.y }]}>
+            <Pressable style={styles.menuItem} onPress={toggleChatPin}>
               <Text style={styles.menuText}>
-                {pinnedMap[menuTargetUid] ? '取消置顶' : '置顶该聊天'}
+                {pinnedMap[chatMenuTargetUid] ? '取消置顶' : '置顶该聊天'}
               </Text>
             </Pressable>
             <View style={styles.menuDivider} />
@@ -1497,6 +1559,48 @@ const styles = StyleSheet.create({
     fontSize: 12,
     paddingVertical: 12,
   },
+  quickMenuOverlay: {
+    ...StyleSheet.absoluteFillObject,
+    zIndex: 130,
+  },
+  quickMenuBackdrop: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: 'transparent',
+  },
+  quickMenuPanel: {
+    position: 'absolute',
+    width: 188,
+    backgroundColor: '#2f333a',
+    borderRadius: 14,
+    overflow: 'hidden',
+    ...quickMenuShadowStyle,
+  },
+  quickMenuPanelPosition: {
+    top: 44,
+    right: 12,
+  },
+  quickMenuItem: {
+    height: 52,
+    paddingHorizontal: 14,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+  },
+  quickMenuIcon: {
+    width: 22,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  quickMenuText: {
+    color: '#ffffff',
+    fontSize: 15,
+    fontWeight: '500',
+  },
+  quickMenuDivider: {
+    height: 1,
+    backgroundColor: 'rgba(255,255,255,0.1)',
+    marginHorizontal: 14,
+  },
   menuOverlay: {
     ...StyleSheet.absoluteFillObject,
     zIndex: 100,
@@ -1662,6 +1766,43 @@ function BackIcon() {
         strokeLinecap="round"
         strokeLinejoin="round"
       />
+    </Svg>
+  );
+}
+
+function QuickGroupIcon() {
+  return (
+    <Svg width={18} height={18} viewBox="0 0 24 24" fill="none">
+      <Path
+        d="M4 7.5A2.5 2.5 0 0 1 6.5 5h8A2.5 2.5 0 0 1 17 7.5V12a2.5 2.5 0 0 1-2.5 2.5h-4l-3 3v-3A2.5 2.5 0 0 1 5 12V7.5Z"
+        stroke="#fff"
+        strokeWidth={2}
+        strokeLinejoin="round"
+      />
+      <Path d="M19 7v4M17 9h4" stroke="#fff" strokeWidth={2} strokeLinecap="round" />
+    </Svg>
+  );
+}
+
+function QuickAddIcon() {
+  return (
+    <Svg width={18} height={18} viewBox="0 0 24 24" fill="none">
+      <Path
+        d="M8.5 12a4 4 0 1 0 0-8 4 4 0 0 0 0 8ZM2.5 19a6 6 0 0 1 12 0"
+        stroke="#fff"
+        strokeWidth={2}
+        strokeLinecap="round"
+      />
+      <Path d="M18 11v6M15 14h6" stroke="#fff" strokeWidth={2} strokeLinecap="round" />
+    </Svg>
+  );
+}
+
+function QuickScanIcon() {
+  return (
+    <Svg width={18} height={18} viewBox="0 0 24 24" fill="none">
+      <Path d="M7 4H4v3M17 4h3v3M4 17v3h3M20 17v3h-3" stroke="#fff" strokeWidth={2} strokeLinecap="round" />
+      <Path d="M7 12h10" stroke="#fff" strokeWidth={2} strokeLinecap="round" />
     </Svg>
   );
 }

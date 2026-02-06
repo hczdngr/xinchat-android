@@ -13,7 +13,7 @@ import {
 } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import Svg, { Path } from "react-native-svg";
-import { API_BASE, normalizeImageUrl } from "../config";
+import { normalizeImageUrl } from "../config";
 
 type ProfileData = {
   uid?: number;

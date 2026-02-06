@@ -24,13 +24,37 @@ import {
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const PORT = process.env.PORT || 3001;
+const NODE_ENV = process.env.NODE_ENV || 'development';
+const ROUTE_INSPECTOR_ENABLED =
+  NODE_ENV !== 'production' || process.env.ENABLE_ROUTE_INSPECTOR === 'true';
+const CORS_ALLOWED_ORIGINS = String(process.env.CORS_ORIGINS || '')
+  .split(',')
+  .map((item) => item.trim())
+  .filter(Boolean);
+const CORS_ALLOW_ALL = NODE_ENV !== 'production' && CORS_ALLOWED_ORIGINS.length === 0;
 
 export const app = express();
 
 app.use(express.json({ limit: '200mb' }));
 app.use(express.urlencoded({ extended: true, limit: '200mb' }));
 app.use((req, res, next) => {
-  res.setHeader('Access-Control-Allow-Origin', '*');
+  const origin = typeof req.headers.origin === 'string' ? req.headers.origin : '';
+  const originAllowed =
+    !origin || CORS_ALLOW_ALL || CORS_ALLOWED_ORIGINS.includes(origin);
+  if (!originAllowed) {
+    res.status(403).json({ success: false, message: '跨域来源不被允许。' });
+    return;
+  }
+  if (origin) {
+    if (CORS_ALLOW_ALL) {
+      res.setHeader('Access-Control-Allow-Origin', '*');
+    } else if (CORS_ALLOWED_ORIGINS.length > 0) {
+      res.setHeader('Access-Control-Allow-Origin', origin);
+      res.setHeader('Vary', 'Origin');
+    }
+  } else if (CORS_ALLOW_ALL) {
+    res.setHeader('Access-Control-Allow-Origin', '*');
+  }
   res.setHeader('Access-Control-Allow-Methods', 'GET,POST,DELETE,OPTIONS');
   const requestHeaders = req.headers['access-control-request-headers'];
   if (requestHeaders) {
@@ -177,6 +201,19 @@ const routeMeta = [
         name: 'Private text messages',
         body: { targetType: 'private', targetUid: 100000001, type: 'text' },
         hint: 'Or use query params',
+      },
+    ],
+  },
+  {
+    method: 'POST',
+    path: '/api/chat/overview',
+    label: 'Chat overview',
+    note: 'Fetch latest message and unread count for all private chats.',
+    templates: [
+      {
+        name: 'Overview with read map',
+        body: { readAt: { 100000001: 1736458200000 } },
+        hint: 'Authorization: Bearer <token>',
       },
     ],
   },
@@ -425,6 +462,10 @@ const buildRouteResponse = (target) => {
 };
 
 app.get('/api/routes', (req, res) => {
+  if (!ROUTE_INSPECTOR_ENABLED) {
+    res.status(404).json({ success: false, message: '接口不存在。' });
+    return;
+  }
   res.json({ success: true, data: buildRouteResponse(app) });
 });
 
@@ -458,11 +499,11 @@ app.use((err, req, res, next) => {
     return;
   }
   if (err.type === 'entity.too.large') {
-    res.status(413).json({ success: false, message: 'Payload too large.' });
+    res.status(413).json({ success: false, message: '请求体过大。' });
     return;
   }
   console.error('Unhandled server error:', err);
-  res.status(500).json({ success: false, message: 'Server error.' });
+  res.status(500).json({ success: false, message: '服务器错误。' });
 });
 
 export function startServer(port = PORT) {

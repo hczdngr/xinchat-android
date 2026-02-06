@@ -537,6 +537,19 @@ const toMessage = (row) => {
   };
 };
 
+const parseReadAtMap = (value) => {
+  const source = value && typeof value === 'object' ? value : {};
+  const result = {};
+  Object.entries(source).forEach(([uid, ts]) => {
+    const parsedUid = Number(uid);
+    const parsedTs = Number(ts);
+    if (Number.isInteger(parsedUid) && Number.isFinite(parsedTs) && parsedTs > 0) {
+      result[parsedUid] = parsedTs;
+    }
+  });
+  return result;
+};
+
 router.post('/send', authenticate, async (req, res) => {
   try {
     await ensureChatStorage();
@@ -1071,7 +1084,80 @@ router.get('/get', authenticate, async (req, res) => {
   }
 });
 
-router.delete('/del', async (req, res) => {
+router.post('/overview', authenticate, async (req, res) => {
+  try {
+    await ensureChatStorage();
+    const { user, users } = req.auth;
+    const friendIds = (Array.isArray(user.friends) ? user.friends : []).filter((uid) => {
+      if (!Number.isInteger(uid)) return false;
+      const target = users.find((item) => item.uid === uid);
+      return (
+        Boolean(target) &&
+        Array.isArray(target.friends) &&
+        target.friends.includes(user.uid)
+      );
+    });
+    if (!friendIds.length) {
+      res.json({ success: true, data: [] });
+      return;
+    }
+
+    const readAtRaw = req.body?.readAt;
+    let readAtSource = readAtRaw;
+    if (typeof readAtRaw === 'string') {
+      try {
+        readAtSource = JSON.parse(readAtRaw || '{}');
+      } catch {
+        readAtSource = {};
+      }
+    }
+    const readAt = parseReadAtMap(readAtSource);
+    const friendSet = new Set(friendIds);
+    const latestMap = {};
+    const unreadMap = {};
+
+    const database = await openDb();
+    const stmt = database.prepare(`
+      SELECT id, type, senderUid, targetUid, targetType, data, createdAt, createdAtMs
+      FROM messages
+      WHERE targetType = 'private' AND (senderUid = ? OR targetUid = ?)
+      ORDER BY createdAtMs DESC
+    `);
+    stmt.bind([user.uid, user.uid]);
+    while (stmt.step()) {
+      const row = stmt.getAsObject();
+      const senderUid = Number(row.senderUid);
+      const targetUid = Number(row.targetUid);
+      const createdAtMs = Number(row.createdAtMs) || 0;
+      const friendUid = senderUid === user.uid ? targetUid : senderUid;
+      if (!friendSet.has(friendUid)) {
+        continue;
+      }
+      if (!latestMap[friendUid]) {
+        latestMap[friendUid] = toMessage(row);
+      }
+      if (row.type === 'text' && senderUid !== user.uid) {
+        const seenAt = Number(readAt[friendUid]) || 0;
+        if (createdAtMs > seenAt) {
+          unreadMap[friendUid] = (unreadMap[friendUid] || 0) + 1;
+        }
+      }
+    }
+    stmt.free();
+
+    const data = friendIds.map((uid) => ({
+      uid,
+      latest: latestMap[uid] || null,
+      unread: Math.min(unreadMap[uid] || 0, 99),
+    }));
+    res.json({ success: true, data });
+  } catch (error) {
+    console.error('Chat overview error:', error);
+    res.status(500).json({ success: false, message: '获取会话概览失败。' });
+  }
+});
+
+router.delete('/del', authenticate, async (req, res) => {
   try {
     await ensureChatStorage();
     const { id } = req.body || {};
@@ -1092,6 +1178,20 @@ router.delete('/del', async (req, res) => {
     }
     const existing = selectStmt.getAsObject();
     selectStmt.free();
+
+    const { user } = req.auth;
+    const senderUid = Number(existing.senderUid);
+    const targetUid = Number(existing.targetUid);
+    const targetType = String(existing.targetType || '');
+    const isSender = Number.isInteger(senderUid) && senderUid === user.uid;
+    const isPrivateRecipient =
+      targetType === 'private' &&
+      Number.isInteger(targetUid) &&
+      targetUid === user.uid;
+    if (!isSender && !isPrivateRecipient) {
+      res.status(403).json({ success: false, message: '无权删除该消息。' });
+      return;
+    }
 
     const delStmt = database.prepare('DELETE FROM messages WHERE id = ?');
     delStmt.run([id]);

@@ -398,7 +398,7 @@ export default function EditProfile({ onBack, onSaved, initialProfile }: Props) 
       setPickerActive(false);
       setAvatarUploading(false);
     }
-  }, [avatarUploading, updateField]);
+  }, [avatarUploading, persistProfile, updateField]);
 
   return (
     <Animated.View

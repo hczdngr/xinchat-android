@@ -8,6 +8,8 @@ import Login from './src/components/Login';
 import Register from './src/components/Register';
 import Profile from './src/components/Profile';
 import EditProfile from './src/components/EditProfile';
+import QRScan from './src/components/QRScan';
+import InAppBrowser from './src/components/InAppBrowser';
 import { API_BASE } from './src/config';
 import { storage } from './src/storage';
 
@@ -300,6 +302,8 @@ function App() {
                     />
                   )}
                 </Stack.Screen>
+                <Stack.Screen name="QRScan" component={QRScan} />
+                <Stack.Screen name="InAppBrowser" component={InAppBrowser} />
               </Stack.Navigator>
             </NavigationContainer>
           </View>

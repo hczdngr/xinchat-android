@@ -2,6 +2,46 @@
 import { findUserByToken, readUsers, writeUsers } from './auth.js';
 
 const router = express.Router();
+const MAX_DOMAIN_LEN = 253;
+
+const isMutualFriend = (user, target) =>
+  Boolean(
+    user &&
+      target &&
+      Array.isArray(user.friends) &&
+      Array.isArray(target.friends) &&
+      user.friends.includes(target.uid) &&
+      target.friends.includes(user.uid)
+  );
+
+const isValidDomain = (value) => {
+  if (!value) return true;
+  if (value.length > MAX_DOMAIN_LEN) return false;
+  const match = value.match(/^(?<host>[a-zA-Z0-9.-]+)(?::(?<port>\d{1,5}))?$/);
+  if (!match || !match.groups) return false;
+  const host = match.groups.host;
+  if (!host || host.startsWith('.') || host.endsWith('.')) return false;
+  const labels = host.split('.');
+  if (
+    labels.some(
+      (label) =>
+        !label ||
+        label.length > 63 ||
+        !/^[a-zA-Z0-9-]+$/.test(label) ||
+        label.startsWith('-') ||
+        label.endsWith('-')
+    )
+  ) {
+    return false;
+  }
+  if (match.groups.port) {
+    const port = Number(match.groups.port);
+    if (!Number.isInteger(port) || port < 1 || port > 65535) {
+      return false;
+    }
+  }
+  return true;
+};
 
 const extractToken = (req) => {
   const header = req.headers.authorization || '';
@@ -44,8 +84,10 @@ const toDirectoryEntry = (user) => ({
 
 router.get('/directory', authenticate, async (req, res) => {
   try {
-    const { users } = req.auth;
-    const data = users.map(toDirectoryEntry);
+    const { users, user } = req.auth;
+    const data = users
+      .filter((item) => item.uid === user.uid || isMutualFriend(user, item))
+      .map(toDirectoryEntry);
     res.json({ success: true, data });
   } catch (error) {
     console.error('Voice directory error:', error);
@@ -60,10 +102,14 @@ router.get('/contact', authenticate, async (req, res) => {
       res.status(400).json({ success: false, message: '用户编号无效。' });
       return;
     }
-    const { users } = req.auth;
+    const { users, user } = req.auth;
     const target = users.find((item) => item.uid === uid);
     if (!target) {
       res.status(404).json({ success: false, message: '目标用户不存在。' });
+      return;
+    }
+    if (target.uid !== user.uid && !isMutualFriend(user, target)) {
+      res.status(403).json({ success: false, message: '无权访问该联系人。' });
       return;
     }
     res.json({ success: true, data: toDirectoryEntry(target) });
@@ -76,6 +122,10 @@ router.get('/contact', authenticate, async (req, res) => {
 router.post('/domain', authenticate, async (req, res) => {
   try {
     const domain = typeof req.body?.domain === 'string' ? req.body.domain.trim() : '';
+    if (!isValidDomain(domain)) {
+      res.status(400).json({ success: false, message: '语音域名格式无效。' });
+      return;
+    }
     const { users, userIndex, user } = req.auth;
     if (userIndex == null || !users[userIndex]) {
       res.status(404).json({ success: false, message: '用户不存在。' });

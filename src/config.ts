@@ -1,6 +1,10 @@
 import { NativeModules, Platform } from 'react-native';
 
 const DEFAULT_API_PORT = 3001;
+const isDevRuntime =
+  typeof __DEV__ !== 'undefined'
+    ? Boolean(__DEV__)
+    : String((globalThis as any)?.process?.env?.NODE_ENV || 'development') !== 'production';
 
 const trimTrailingSlash = (value: string) => value.replace(/\/+$/, '');
 
@@ -50,12 +54,26 @@ const detectNativeDevBase = () => {
 };
 
 const resolveApiBase = () => {
-  return (
-    readEnvBase() || detectWebBase() || detectNativeDevBase() || `http://127.0.0.1:${DEFAULT_API_PORT}`
-  );
+  const fromEnv = readEnvBase();
+  if (fromEnv) return fromEnv;
+  const webBase = detectWebBase();
+  if (webBase) return webBase;
+  const nativeDevBase = detectNativeDevBase();
+  if (nativeDevBase) return nativeDevBase;
+  if (Platform.OS !== 'web' && isDevRuntime) {
+    return Platform.OS === 'android'
+      ? `http://10.0.2.2:${DEFAULT_API_PORT}`
+      : `http://127.0.0.1:${DEFAULT_API_PORT}`;
+  }
+  return '';
 };
 
 export const API_BASE = resolveApiBase();
+if (!API_BASE) {
+  console.warn(
+    'API_BASE 未配置。请设置 XINCHAT_API_BASE / REACT_APP_API_BASE / VITE_API_BASE。'
+  );
+}
 
 export const normalizeImageUrl = (value?: string) => {
   if (!value) return '';
@@ -80,6 +98,6 @@ export const normalizeImageUrl = (value?: string) => {
       return `${API_BASE}${pathname}${url.search || ''}`;
     }
     return `${url.origin}${pathname}${url.search || ''}`;
-  } catch (_) {}
+  } catch {}
   return trimmed.replace(/\/+$/, '');
 };
