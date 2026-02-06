@@ -36,6 +36,8 @@ const inputShadowStyle =
         shadowRadius: 8,
         elevation: 1,
       };
+const webInputNoOutline =
+  Platform.OS === 'web' ? ({ outlineStyle: 'none', boxShadow: 'none' } as any) : null;
 
 export default function Login({
   username,
@@ -71,7 +73,7 @@ export default function Login({
             placeholder="输入昵称"
             placeholderTextColor="#c0c4cc"
             onChangeText={onUsernameChange}
-            style={styles.input}
+            style={[styles.input, webInputNoOutline]}
             autoCapitalize="none"
           />
         </View>
@@ -82,7 +84,7 @@ export default function Login({
             placeholder="输入信聊密码"
             placeholderTextColor="#c0c4cc"
             onChangeText={onPasswordChange}
-            style={styles.input}
+            style={[styles.input, webInputNoOutline]}
             autoCapitalize="none"
             secureTextEntry={!showPassword}
           />

@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import {
   ActivityIndicator,
+  Platform,
   Pressable,
   StyleSheet,
   Text,
@@ -9,6 +10,9 @@ import {
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import Svg, { Circle, Line, Path } from 'react-native-svg';
+
+const webInputNoOutline =
+  Platform.OS === 'web' ? ({ outlineStyle: 'none', boxShadow: 'none' } as any) : null;
 
 type Props = {
   username: string;
@@ -61,7 +65,7 @@ export default function Register({
             placeholder="输入昵称"
             placeholderTextColor="#c0c4cc"
             onChangeText={onUsernameChange}
-            style={styles.input}
+            style={[styles.input, webInputNoOutline]}
             autoCapitalize="none"
           />
         </View>
@@ -72,7 +76,7 @@ export default function Register({
             placeholder="输入信聊密码"
             placeholderTextColor="#c0c4cc"
             onChangeText={onPasswordChange}
-            style={styles.input}
+            style={[styles.input, webInputNoOutline]}
             autoCapitalize="none"
             secureTextEntry={!showPassword}
           />
@@ -87,7 +91,7 @@ export default function Register({
             placeholder="确认信聊密码"
             placeholderTextColor="#c0c4cc"
             onChangeText={onConfirmPasswordChange}
-            style={styles.input}
+            style={[styles.input, webInputNoOutline]}
             autoCapitalize="none"
             secureTextEntry={!showConfirm}
           />

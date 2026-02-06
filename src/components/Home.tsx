@@ -110,6 +110,32 @@ const tourCardShadowStyle =
         shadowRadius: 18,
         elevation: 7,
       };
+const webInputNoOutline =
+  Platform.OS === 'web' ? ({ outlineStyle: 'none', boxShadow: 'none' } as any) : null;
+
+const normalizeFriend = (input: any): Friend | null => {
+  const uid = Number(input?.uid);
+  if (!Number.isInteger(uid) || uid <= 0) return null;
+  return {
+    uid,
+    username: typeof input?.username === 'string' ? input.username : '',
+    nickname: typeof input?.nickname === 'string' ? input.nickname : '',
+    avatar: typeof input?.avatar === 'string' ? input.avatar : '',
+    online: Boolean(input?.online),
+  };
+};
+
+const sanitizeFriends = (list: any[]): Friend[] => {
+  const seen = new Set<number>();
+  const next: Friend[] = [];
+  for (const item of list) {
+    const friend = normalizeFriend(item);
+    if (!friend || seen.has(friend.uid)) continue;
+    seen.add(friend.uid);
+    next.push(friend);
+  }
+  return next;
+};
 
 export default function Home({ profile }: { profile: Profile }) {
   const insets = useSafeAreaInsets();
@@ -249,6 +275,7 @@ export default function Home({ profile }: { profile: Profile }) {
   const activeChatUidRef = useRef<number | null>(null);
   const contentHeightRef = useRef(0);
   const messageListRef = useRef<ScrollView | null>(null);
+  const chatInputRef = useRef<TextInput | null>(null);
   const connectWsRef = useRef<() => void>(() => {});
 
   useEffect(() => {
@@ -344,7 +371,7 @@ export default function Home({ profile }: { profile: Profile }) {
   }, []);
 
   const displayName = useMemo(
-    () => profileData.nickname || profileData.username || '鍔犺浇涓?..',
+    () => profileData.nickname || profileData.username || '加载中...',
     [profileData.nickname, profileData.username]
   );
   const avatarUrl = useMemo(
@@ -394,7 +421,7 @@ export default function Home({ profile }: { profile: Profile }) {
 
   const activeChatFriend = useMemo(() => {
     if (!activeChatUid) return null;
-    return friends.find((item) => item.uid === activeChatUid) || null;
+    return friends.find((item) => Number(item?.uid) === activeChatUid) || null;
   }, [activeChatUid, friends]);
   const activeChatMessages = useMemo(() => {
     if (!activeChatUid) return [];
@@ -413,19 +440,6 @@ export default function Home({ profile }: { profile: Profile }) {
     const token = tokenRef.current;
     return token ? { Authorization: `Bearer ${token}` } : {};
   }, []);
-
-  const loadProfile = useCallback(async () => {
-    if (!tokenRef.current) return;
-    try {
-      const response = await fetch(`${API_BASE}/api/profile`, {
-        headers: { ...authHeaders() },
-      });
-      const data = await response.json().catch(() => ({}));
-      if (response.ok && data?.success && data?.user) {
-        setProfileData((prev) => ({ ...prev, ...data.user }));
-      }
-    } catch {}
-  }, [authHeaders]);
 
   const normalizeMessage = useCallback((entry: any): Message => {
     const createdAt = entry?.createdAt || '';
@@ -450,10 +464,10 @@ export default function Home({ profile }: { profile: Profile }) {
   const formatMessage = useCallback((msg: any) => {
     if (!msg) return '';
     if (msg.type === 'text') return msg.data?.content || msg.data?.text || '';
-    if (msg.type === 'image') return '[鍥剧墖]';
-    if (msg.type === 'file') return '[鏂囦欢]';
-    if (msg.type === 'voice') return '[璇煶]';
-    return '[娑堟伅]';
+    if (msg.type === 'image') return '[图片]';
+    if (msg.type === 'file') return '[文件]';
+    if (msg.type === 'voice') return '[语音]';
+    return '[消息]';
   }, []);
 
   const formatTime = useCallback((value?: string, fallbackMs?: number) => {
@@ -526,7 +540,7 @@ export default function Home({ profile }: { profile: Profile }) {
       setLatestMap((prev) => ({
         ...prev,
         [uid]: {
-          text: messageText || '鏆傛棤娑堟伅',
+          text: messageText || '暂无消息',
           time: formatTime(entry?.createdAt || entry?.raw?.createdAt, entry?.createdAtMs),
           ts: Number.isFinite(entry?.createdAtMs)
             ? entry.createdAtMs
@@ -605,7 +619,7 @@ export default function Home({ profile }: { profile: Profile }) {
         if (entry?.latest) {
           const normalized = normalizeMessage(entry.latest);
           latestPatch[uid] = {
-            text: normalized.content || formatMessage(normalized.raw || normalized) || '鏆傛棤娑堟伅',
+            text: normalized.content || formatMessage(normalized.raw || normalized) || '暂无消息',
             time: formatTime(normalized.createdAt, normalized.createdAtMs),
             ts: normalized.createdAtMs,
           };
@@ -627,8 +641,9 @@ export default function Home({ profile }: { profile: Profile }) {
       });
       const data = await response.json().catch(() => ({}));
       if (response.ok && data?.success && Array.isArray(data?.friends)) {
-        setFriends(data.friends);
-        data.friends.forEach((friend: Friend) => {
+        const nextFriends = sanitizeFriends(data.friends);
+        setFriends(nextFriends);
+        nextFriends.forEach((friend) => {
           ensureMessageBucket(friend.uid);
         });
         await loadOverview();
@@ -687,6 +702,12 @@ export default function Home({ profile }: { profile: Profile }) {
     messageListRef.current.scrollToEnd({ animated: false });
   }, []);
 
+  const focusChatInput = useCallback(() => {
+    setTimeout(() => {
+      chatInputRef.current?.focus();
+    }, 0);
+  }, []);
+
   const openChat = useCallback(
     async (friend: Friend) => {
       if (!friend) return;
@@ -697,9 +718,10 @@ export default function Home({ profile }: { profile: Profile }) {
         await loadHistory(friend.uid);
       }
       setTimeout(scrollToBottom, 0);
+      focusChatInput();
       markChatRead(friend.uid);
     },
-    [ensureMessageBucket, loadHistory, markChatRead, scrollToBottom]
+    [ensureMessageBucket, focusChatInput, loadHistory, markChatRead, scrollToBottom]
   );
 
   const closeChat = useCallback(() => {
@@ -805,6 +827,7 @@ export default function Home({ profile }: { profile: Profile }) {
     if (!canSend || !activeChatUidRef.current || !selfUid) return;
     const content = draftMessage.trim();
     if (!content) return;
+    focusChatInput();
     const payload = {
       senderUid: selfUid,
       targetUid: activeChatUidRef.current,
@@ -823,9 +846,10 @@ export default function Home({ profile }: { profile: Profile }) {
         insertMessages(activeChatUidRef.current, [data.data]);
         setDraftMessage('');
         setTimeout(scrollToBottom, 0);
+        focusChatInput();
       }
     } catch {}
-  }, [authHeaders, canSend, draftMessage, insertMessages, scrollToBottom, selfUid]);
+  }, [authHeaders, canSend, draftMessage, focusChatInput, insertMessages, scrollToBottom, selfUid]);
 
   const deleteMessage = useCallback(
     async (uid: number, message: Message) => {
@@ -883,7 +907,7 @@ export default function Home({ profile }: { profile: Profile }) {
 
   const updatePresence = useCallback((uid: number, online: boolean) => {
     setFriends((prev) => {
-      const idx = prev.findIndex((item) => item.uid === uid);
+      const idx = prev.findIndex((item) => Number(item?.uid) === uid);
       if (idx === -1) return prev;
       const next = [...prev];
       next[idx] = { ...next[idx], online: Boolean(online) };
@@ -1019,24 +1043,27 @@ export default function Home({ profile }: { profile: Profile }) {
   }, [stopHeartbeat]);
 
   useEffect(() => {
-    loadProfile().catch(() => undefined);
+    if (!tokenReady || !tokenRef.current) return;
     loadFriends().catch(() => undefined);
     connectWs();
     return () => {
       teardownWs();
     };
-  }, [connectWs, loadFriends, loadProfile, teardownWs]);
+  }, [connectWs, loadFriends, teardownWs, tokenReady]);
 
   const messageItems = useMemo(() => {
-    const filtered = friends.filter((friend) => !hiddenMap[friend.uid]);
+    const filtered = friends.filter(
+      (friend) => Number.isInteger(Number(friend?.uid)) && !hiddenMap[Number(friend.uid)]
+    );
     return filtered
       .map((friend) => {
-        const latest = latestMap[friend.uid];
+        const uid = Number(friend.uid);
+        const latest = latestMap[uid];
         return {
           friend,
           latest,
-          pinned: Boolean(pinnedMap[friend.uid]),
-          unread: unreadMap[friend.uid] || 0,
+          pinned: Boolean(pinnedMap[uid]),
+          unread: unreadMap[uid] || 0,
         };
       })
       .sort((a, b) => {
@@ -1158,10 +1185,10 @@ export default function Home({ profile }: { profile: Profile }) {
             </Pressable>
             <View>
               <Text style={styles.chatName}>
-                {activeChatFriend?.nickname || activeChatFriend?.username || '鑱婂ぉ'}
+                {activeChatFriend?.nickname || activeChatFriend?.username || '聊天'}
               </Text>
               <Text style={[styles.chatStatus, activeChatFriend?.online && styles.chatOnline]}>
-                {activeChatFriend?.online ? '鍦ㄧ嚎' : '绂荤嚎'}
+                {activeChatFriend?.online ? '在线' : '离线'}
               </Text>
             </View>
           </View>
@@ -1176,14 +1203,14 @@ export default function Home({ profile }: { profile: Profile }) {
             }}
           >
             {historyLoading[activeChatUid] && activeChatMessages.length === 0 ? (
-              <Text style={styles.empty}>姝ｅ湪鍔犺浇娑堟伅...</Text>
+              <Text style={styles.empty}>正在加载消息...</Text>
             ) : null}
             {!historyLoading[activeChatUid] && activeChatMessages.length === 0 ? (
               <Text style={styles.empty}>还没有消息，先聊几句吧。</Text>
             ) : null}
             {historyHasMore[activeChatUid] ? (
               <Text style={styles.loadMore}>
-                {historyLoading[activeChatUid] ? '鍔犺浇鏇村...' : '涓婃媺鍔犺浇鏇村'}
+                {historyLoading[activeChatUid] ? '加载更多...' : '上拉加载更多'}
               </Text>
             ) : null}
             {activeChatMessages.map((item) => {
@@ -1200,13 +1227,13 @@ export default function Home({ profile }: { profile: Profile }) {
                       </Text>
                       {!isSelf ? (
                         <Text style={styles.readState}>
-                          {item.createdAtMs <= getReadAt(activeChatUid) ? '宸茶' : '鏈'}
+                          {item.createdAtMs <= getReadAt(activeChatUid) ? '已读' : '未读'}
                         </Text>
                       ) : null}
                     </View>
                   </View>
                   <Pressable onPress={() => deleteMessage(activeChatUid, item)}>
-                    <Text style={[styles.deleteBtn, isSelf && styles.selfDelete]}>鍒犻櫎</Text>
+                    <Text style={[styles.deleteBtn, isSelf && styles.selfDelete]}>删除</Text>
                   </Pressable>
                 </View>
               );
@@ -1215,12 +1242,14 @@ export default function Home({ profile }: { profile: Profile }) {
 
           <View style={[styles.chatInput, { paddingBottom: 12 + insets.bottom }]}>
             <TextInput
+              ref={chatInputRef}
               value={draftMessage}
-              placeholder="杈撳叆娑堟伅..."
+              placeholder="输入消息..."
               placeholderTextColor="#b0b0b0"
               onChangeText={setDraftMessage}
-              style={styles.chatInputField}
+              style={[styles.chatInputField, webInputNoOutline]}
               onSubmitEditing={sendText}
+              blurOnSubmit={false}
               returnKeyType="send"
             />
             <Pressable
@@ -1271,15 +1300,15 @@ export default function Home({ profile }: { profile: Profile }) {
               <Svg viewBox="0 0 24 24" width={16} height={16}>
                 <Path d="M15.5 14h-.79l-.28-.27C15.41 12.59 16 11.11 16 9.5 16 5.91 13.09 3 9.5 3S3 5.91 3 9.5 5.91 16 9.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19l-4.99-5zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14z" fill="#a0a0a0" />
               </Svg>
-              <Text style={styles.searchText}>鎼滅储</Text>
+              <Text style={styles.searchText}>搜索</Text>
             </View>
           </View>
 
           {homeTab === 'messages' ? (
             <ScrollView style={styles.msgList} contentContainerStyle={styles.msgListInner}>
-              {loadingFriends ? <Text style={styles.empty}>姝ｅ湪鍔犺浇娑堟伅...</Text> : null}
+              {loadingFriends ? <Text style={styles.empty}>正在加载消息...</Text> : null}
               {!loadingFriends && messageItems.length === 0 ? (
-                <Text style={styles.empty}>鏆傛棤娑堟伅</Text>
+                <Text style={styles.empty}>暂无消息</Text>
               ) : null}
               {!loadingFriends &&
                 messageItems.map(({ friend, latest, pinned, unread }) => (
@@ -1315,7 +1344,7 @@ export default function Home({ profile }: { profile: Profile }) {
                         <Text style={styles.msgTime}>{latest?.time || ''}</Text>
                       </View>
                       <Text style={styles.msgPreview} numberOfLines={1}>
-                        {latest?.text || '鏆傛棤娑堟伅'}
+                        {latest?.text || '暂无消息'}
                       </Text>
                     </View>
                   </Pressable>
@@ -1323,7 +1352,7 @@ export default function Home({ profile }: { profile: Profile }) {
             </ScrollView>
           ) : (
             <ScrollView style={styles.content} contentContainerStyle={styles.contentInner}>
-              {loadingFriends ? <Text style={styles.empty}>姝ｅ湪鍔犺浇鑱旂郴浜?..</Text> : null}
+              {loadingFriends ? <Text style={styles.empty}>正在加载联系人...</Text> : null}
               {!loadingFriends && friends.length === 0 ? (
                 <Text style={styles.empty}>暂无联系人</Text>
               ) : null}
@@ -1345,7 +1374,7 @@ export default function Home({ profile }: { profile: Profile }) {
                           {friend.nickname || friend.username || '联系人'}
                         </Text>
                         <Text style={styles.contactSub}>
-                          {latestMap[friend.uid]?.text || '鏆傛棤娑堟伅'}
+                          {latestMap[friend.uid]?.text || '暂无消息'}
                         </Text>
                       </View>
                       <View style={styles.contactMeta}>
@@ -1380,7 +1409,7 @@ export default function Home({ profile }: { profile: Profile }) {
               <Svg viewBox="0 0 24 24" width={28} height={28} fill={homeTab === 'messages' ? '#0099ff' : '#7d7d7d'}>
                 <Path d="M20 2H4c-1.1 0-2 .9-2 2v18l4-4h14c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2z" />
               </Svg>
-              <Text style={[styles.navText, homeTab === 'messages' && styles.navTextActive]}>娑堟伅</Text>
+              <Text style={[styles.navText, homeTab === 'messages' && styles.navTextActive]}>消息</Text>
             </Pressable>
             <Pressable
               style={[
@@ -1438,7 +1467,7 @@ export default function Home({ profile }: { profile: Profile }) {
               <View style={styles.quickMenuIcon}>
                 <QuickGroupIcon />
               </View>
-              <Text style={styles.quickMenuText}>鍒涘缓缇よ亰</Text>
+              <Text style={styles.quickMenuText}>创建群聊</Text>
             </Pressable>
             <View style={styles.quickMenuDivider} />
             <Pressable style={styles.quickMenuItem} onPress={onQuickAdd}>
@@ -1469,7 +1498,7 @@ export default function Home({ profile }: { profile: Profile }) {
             </Pressable>
             <View style={styles.menuDivider} />
             <Pressable style={styles.menuItem} onPress={deleteChat}>
-              <Text style={[styles.menuText, styles.menuDanger]}>鍒犻櫎鑱婂ぉ</Text>
+              <Text style={[styles.menuText, styles.menuDanger]}>删除聊天</Text>
             </Pressable>
           </View>
         </View>

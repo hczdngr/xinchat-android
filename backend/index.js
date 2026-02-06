@@ -12,6 +12,7 @@ import authRouter, {
 import chatRouter, { ensureChatStorage, setChatNotifier } from './routes/chat.js';
 import friendsRouter, { setFriendsNotifier } from './routes/friends.js';
 import voiceRouter from './routes/voice.js';
+import { startInsightWorker } from './routes/insight.js';
 import {
   markDisconnected,
   isUserOnline,
@@ -69,6 +70,13 @@ app.use((req, res, next) => {
     res.status(204).end();
     return;
   }
+  next();
+});
+
+app.use((req, res, next) => {
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('X-Frame-Options', 'SAMEORIGIN');
+  res.setHeader('Referrer-Policy', 'no-referrer');
   next();
 });
 
@@ -509,6 +517,10 @@ app.use((err, req, res, next) => {
 export function startServer(port = PORT) {
   const server = http.createServer(app);
   const wss = new WebSocketServer({ server, path: '/ws' });
+  const insightWorker = startInsightWorker({ logger: console });
+  server.on('close', () => {
+    insightWorker.stop();
+  });
   const connections = new Map();
   const presencePayload = (uid, online) => ({
     type: 'presence',

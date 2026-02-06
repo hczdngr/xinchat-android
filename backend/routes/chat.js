@@ -1,11 +1,11 @@
-﻿import express from 'express';
+import express from 'express';
 import fs from 'fs/promises';
 import { createWriteStream } from 'fs';
 import path from 'path';
 import crypto from 'crypto';
 import { fileURLToPath } from 'url';
 import initSqlJs from 'sql.js';
-import { findUserByToken, readUsers, writeUsers } from './auth.js';
+import { createAuthenticateMiddleware } from './session.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -133,6 +133,15 @@ const guessExtension = (name, mime) => {
     'text/plain': 'txt',
   };
   return map[mime] || 'bin';
+};
+
+const resolvePathWithinRoot = (rootDir, relativePath) => {
+  if (typeof relativePath !== 'string' || !relativePath.trim()) return '';
+  if (relativePath.includes('\0')) return '';
+  const root = path.resolve(rootDir);
+  const resolved = path.resolve(root, relativePath);
+  if (resolved === root) return '';
+  return resolved.startsWith(`${root}${path.sep}`) ? resolved : '';
 };
 
 const cleanupUserFiles = async () => {
@@ -485,39 +494,7 @@ const ensureChatStorage = async () => {
   }
 };
 
-const extractToken = (req) => {
-  const header = req.headers.authorization || '';
-  if (header.toLowerCase().startsWith('bearer ')) {
-    return header.slice(7).trim();
-  }
-  return req.body?.token || req.query?.token || '';
-};
-
-const authenticate = async (req, res, next) => {
-  try {
-    const token = extractToken(req);
-    if (!token) {
-      res.status(401).json({ success: false, message: '缺少登录令牌。' });
-      return;
-    }
-
-    const users = await readUsers();
-    const found = findUserByToken(users, token);
-    if (found.touched) {
-      await writeUsers(users);
-    }
-    if (!found.user) {
-      res.status(401).json({ success: false, message: '登录令牌无效。' });
-      return;
-    }
-
-    req.auth = { user: found.user, userIndex: found.userIndex, users };
-    next();
-  } catch (error) {
-    console.error('Chat authenticate error:', error);
-    res.status(500).json({ success: false, message: '服务器错误。' });
-  }
-};
+const authenticate = createAuthenticateMiddleware({ scope: 'Chat' });
 
 const toMessage = (row) => {
   let data = {};
@@ -720,7 +697,11 @@ router.post('/send', authenticate, async (req, res) => {
         const relativePath = decodeURIComponent(
           parsedUrl.pathname.replace('/uploads/userfile/', '')
         );
-        const sourcePath = path.join(USERFILE_DIR, relativePath);
+        const sourcePath = resolvePathWithinRoot(USERFILE_DIR, relativePath);
+        if (!sourcePath) {
+          res.status(400).json({ success: false, message: '文件地址无效。' });
+          return;
+        }
         if (!(await fileExists(sourcePath))) {
           res.status(404).json({ success: false, message: '源文件不存在。' });
           return;
@@ -1206,5 +1187,3 @@ router.delete('/del', authenticate, async (req, res) => {
 
 export { ensureChatStorage, setChatNotifier };
 export default router;
-
-

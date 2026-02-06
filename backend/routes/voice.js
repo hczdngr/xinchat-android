@@ -1,5 +1,6 @@
-﻿import express from 'express';
-import { findUserByToken, readUsers, writeUsers } from './auth.js';
+import express from 'express';
+import { writeUsers } from './auth.js';
+import { createAuthenticateMiddleware } from './session.js';
 
 const router = express.Router();
 const MAX_DOMAIN_LEN = 253;
@@ -43,37 +44,7 @@ const isValidDomain = (value) => {
   return true;
 };
 
-const extractToken = (req) => {
-  const header = req.headers.authorization || '';
-  if (header.toLowerCase().startsWith('bearer ')) {
-    return header.slice(7).trim();
-  }
-  return req.body?.token || req.query?.token || '';
-};
-
-const authenticate = async (req, res, next) => {
-  try {
-    const token = extractToken(req);
-    if (!token) {
-      res.status(401).json({ success: false, message: '缺少登录令牌。' });
-      return;
-    }
-    const users = await readUsers();
-    const found = findUserByToken(users, token);
-    if (found.touched) {
-      await writeUsers(users);
-    }
-    if (!found.user) {
-      res.status(401).json({ success: false, message: '登录令牌无效。' });
-      return;
-    }
-    req.auth = { user: found.user, userIndex: found.userIndex, users };
-    next();
-  } catch (error) {
-    console.error('Voice authenticate error:', error);
-    res.status(500).json({ success: false, message: '服务器错误。' });
-  }
-};
+const authenticate = createAuthenticateMiddleware({ scope: 'Voice' });
 
 const toDirectoryEntry = (user) => ({
   uid: user.uid,
@@ -144,5 +115,3 @@ router.post('/domain', authenticate, async (req, res) => {
 });
 
 export default router;
-
-

@@ -1,6 +1,7 @@
-﻿import express from 'express';
-import { findUserByToken, hasValidToken, readUsers, writeUsers } from './auth.js';
+import express from 'express';
+import { hasValidToken, writeUsers } from './auth.js';
 import { isUserOnline as isOnline } from '../online.js';
+import { createAuthenticateMiddleware } from './session.js';
 
 const router = express.Router();
 
@@ -9,39 +10,7 @@ const REQUEST_STATUS_PENDING = 'pending';
 const REQUEST_STATUS_REJECTED = 'rejected';
 let friendsNotifier = null;
 
-const extractToken = (req) => {
-  const header = req.headers.authorization || '';
-  if (header.toLowerCase().startsWith('bearer ')) {
-    return header.slice(7).trim();
-  }
-  return req.body?.token || req.query?.token || '';
-};
-
-const authenticate = async (req, res, next) => {
-  try {
-    const token = extractToken(req);
-    if (!token) {
-      res.status(401).json({ success: false, message: '缺少登录令牌。' });
-      return;
-    }
-
-    const users = await readUsers();
-    const found = findUserByToken(users, token);
-    if (found.touched) {
-      await writeUsers(users);
-    }
-    if (!found.user) {
-      res.status(401).json({ success: false, message: '登录令牌无效。' });
-      return;
-    }
-
-    req.auth = { user: found.user, userIndex: found.userIndex, users };
-    next();
-  } catch (error) {
-    console.error('Friends authenticate error:', error);
-    res.status(500).json({ success: false, message: '服务器错误。' });
-  }
-};
+const authenticate = createAuthenticateMiddleware({ scope: 'Friends' });
 
 const resolveFriend = (users, payload = {}) => {
   const uidValue = Number(payload.friendUid);
@@ -458,5 +427,3 @@ router.get('/profile', authenticate, async (req, res) => {
 
 export { setFriendsNotifier };
 export default router;
-
-
