@@ -39,7 +39,7 @@ npm run backend
 npm run web
 ```
 
-默认地址：`http://localhost:8080`
+默认会自动选择可用端口（优先 8080）。启动日志会显示实际地址。
 
 可通过环境变量改端口：
 

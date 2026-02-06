@@ -3,7 +3,8 @@ const HtmlWebpackPlugin = require('html-webpack-plugin');
 const webpack = require('webpack');
 
 const appDirectory = __dirname;
-const webPort = Number(process.env.WEB_PORT || 8080);
+const parsedWebPort = Number(process.env.WEB_PORT);
+const webPort = Number.isInteger(parsedWebPort) && parsedWebPort > 0 ? parsedWebPort : 'auto';
 
 const babelLoader = {
   test: /\.[jt]sx?$/,
