@@ -16,10 +16,10 @@ import {
   View,
 } from 'react-native';
 import Svg, { Path } from 'react-native-svg';
-import ImagePicker from 'react-native-image-crop-picker';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { API_BASE, normalizeImageUrl } from '../config';
 import { storage } from '../storage';
+import { pickImageForPlatform } from '../utils/pickImage';
 import * as isoCountries from 'i18n-iso-countries';
 import zhLocale from 'i18n-iso-countries/langs/zh.json';
 
@@ -360,15 +360,7 @@ export default function EditProfile({ onBack, onSaved, initialProfile }: Props) 
     setStatus('');
     setPickerActive(true);
     try {
-      const picked = await ImagePicker.openPicker({
-        width: 512,
-        height: 512,
-        cropping: true,
-        cropperToolbarTitle: '\u88c1\u526a\u5934\u50cf',
-        compressImageQuality: 0.9,
-        mediaType: 'photo',
-        includeBase64: true,
-      });
+      const picked = await pickImageForPlatform();
       if (!picked?.path) return;
       setAvatarUploading(true);
       const ext = (picked.mime || '').split('/')[1] || 'jpg';

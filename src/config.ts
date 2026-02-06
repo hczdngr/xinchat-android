@@ -1,4 +1,62 @@
-﻿export const API_BASE = 'http://192.168.0.7:3001';
+import { NativeModules, Platform } from 'react-native';
+
+const DEFAULT_API_PORT = 3001;
+
+const trimTrailingSlash = (value: string) => value.replace(/\/+$/, '');
+
+const readEnvBase = () => {
+  const proc = (globalThis as any)?.process;
+  const env = proc?.env || {};
+  const candidates = [
+    (globalThis as any)?.__XINCHAT_API_BASE__,
+    env.XINCHAT_API_BASE,
+    env.REACT_APP_API_BASE,
+    env.VITE_API_BASE,
+  ];
+  for (const raw of candidates) {
+    const value = String(raw || '').trim();
+    if (value) return trimTrailingSlash(value);
+  }
+  return '';
+};
+
+const buildBaseFromHost = (host: string, port = DEFAULT_API_PORT) => {
+  if (!host) return '';
+  return `http://${host}:${port}`;
+};
+
+const detectWebBase = () => {
+  if (Platform.OS !== 'web') return '';
+  const location = (globalThis as any)?.location;
+  const host = String(location?.hostname || '').trim();
+  if (!host) return '';
+  return buildBaseFromHost(host);
+};
+
+const detectNativeDevBase = () => {
+  if (Platform.OS === 'web') return '';
+  const scriptURL = String(NativeModules?.SourceCode?.scriptURL || '');
+  if (!scriptURL.startsWith('http')) return '';
+  try {
+    const parsed = new URL(scriptURL);
+    let host = parsed.hostname;
+    if (Platform.OS === 'android' && host === 'localhost') {
+      host = '10.0.2.2';
+    }
+    return buildBaseFromHost(host);
+  } catch {
+    return '';
+  }
+};
+
+const resolveApiBase = () => {
+  return (
+    readEnvBase() || detectWebBase() || detectNativeDevBase() || `http://127.0.0.1:${DEFAULT_API_PORT}`
+  );
+};
+
+export const API_BASE = resolveApiBase();
+
 export const normalizeImageUrl = (value?: string) => {
   if (!value) return '';
   const trimmed = String(value)
@@ -15,7 +73,7 @@ export const normalizeImageUrl = (value?: string) => {
   }
   try {
     const url = new URL(trimmed);
-    let pathname = url.pathname
+    const pathname = url.pathname
       .replace(/\/uploads\/images\/(uploads\/images\/)+/g, '/uploads/images/')
       .replace(/\/+$/, '');
     if (pathname.startsWith('/uploads/')) {

@@ -1,97 +1,140 @@
-This is a new [**React Native**](https://reactnative.dev) project, bootstrapped using [`@react-native-community/cli`](https://github.com/react-native-community/cli).\n# Backend API\n\nThe app talks to the existing backend. Update the API base URL in src/config.ts.\n
-# Getting Started
+﻿# XinChat (React Native + Web)
 
-> **Note**: Make sure you have completed the [Set Up Your Environment](https://reactnative.dev/docs/set-up-your-environment) guide before proceeding.
+一个支持 Android 与 Web 调试的聊天项目，前端基于 React Native，后端为本地 Node.js 服务。
 
-## Step 1: Start Metro
+## 1. 环境要求
 
-First, you will need to run **Metro**, the JavaScript build tool for React Native.
+- Node.js >= 20
+- npm >= 10
+- Android 开发（可选）
+  - JDK 17+
+  - Android SDK
+  - `adb` 可用
 
-To start the Metro dev server, run the following command from the root of your React Native project:
+## 2. 安装依赖
 
-```sh
-# Using npm
+在仓库根目录执行：
+
+```bash
+npm install
+```
+
+后端依赖可单独安装：
+
+```bash
+npm --prefix backend install
+```
+
+## 3. 启动后端
+
+```bash
+npm run backend
+```
+
+默认端口：`3001`
+
+## 4. 启动 Web（推荐先开发功能）
+
+```bash
+npm run web
+```
+
+默认地址：`http://localhost:8080`
+
+可通过环境变量改端口：
+
+```bash
+WEB_PORT=8090 npm run web
+```
+
+## 5. 启动 Android
+
+先开 Metro：
+
+```bash
 npm start
-
-# OR using Yarn
-yarn start
 ```
 
-## Step 2: Build and run your app
+再开 Android：
 
-With Metro running, open a new terminal window/pane from the root of your React Native project, and use one of the following commands to build and run your Android or iOS app:
-
-### Android
-
-```sh
-# Using npm
+```bash
 npm run android
-
-# OR using Yarn
-yarn android
 ```
 
-### iOS
+也可以拆分构建安装：
 
-For iOS, remember to install CocoaPods dependencies (this only needs to be run on first clone or after updating native deps).
-
-The first time you create a new project, run the Ruby bundler to install CocoaPods itself:
-
-```sh
-bundle install
+```bash
+npm run android:assemble
+npm run android:install
 ```
 
-Then, and every time you update your native dependencies, run:
+可指定设备（USB 序列号或 `ip:port`）：
 
-```sh
-bundle exec pod install
+```bash
+ADB_DEVICE=<device> npm run android:install
 ```
 
-For more information, please visit [CocoaPods Getting Started guide](https://guides.cocoapods.org/using/getting-started.html).
+或：
 
-```sh
-# Using npm
-npm run ios
-
-# OR using Yarn
-yarn ios
+```bash
+ANDROID_SERIAL=<device> npm run android:install
 ```
 
-If everything is set up correctly, you should see your new app running in the Android Emulator, iOS Simulator, or your connected device.
+## 6. API 配置（已做动态化）
 
-This is one way to run your app �?you can also build it directly from Android Studio or Xcode.
+`src/config.ts` 中 `API_BASE` 按以下优先级自动解析：
 
-## Step 3: Modify your app
+1. `XINCHAT_API_BASE` / `REACT_APP_API_BASE` / `VITE_API_BASE`
+2. Web：当前浏览器 host + `:3001`
+3. Native 调试：从 Metro 地址自动推断 host + `:3001`
+4. 回退：`http://127.0.0.1:3001`
 
-Now that you have successfully run the app, let's make changes!
+可复制模板：
 
-Open `App.tsx` in your text editor of choice and make some changes. When you save, your app will automatically update and reflect these changes — this is powered by [Fast Refresh](https://reactnative.dev/docs/fast-refresh).
+```bash
+cp .env.example .env
+```
 
-When you want to forcefully reload, for example to reset the state of your app, you can perform a full reload:
+然后修改：
 
-- **Android**: Press the <kbd>R</kbd> key twice or select **"Reload"** from the **Dev Menu**, accessed via <kbd>Ctrl</kbd> + <kbd>M</kbd> (Windows/Linux) or <kbd>Cmd �?/kbd> + <kbd>M</kbd> (macOS).
-- **iOS**: Press <kbd>R</kbd> in iOS Simulator.
+```env
+XINCHAT_API_BASE=http://127.0.0.1:3001
+```
 
-## Congratulations! :tada:
+## 7. 可移植性约定
 
-You've successfully run and modified your React Native App. :partying_face:
+- 不再在项目中硬编码 JDK 本机路径（如 `org.gradle.java.home`）
+- `android/local.properties` 属于本地文件，不进 Git
+- API 地址不硬编码某台机器 IP，统一用动态解析/环境变量
 
-### Now what?
+## 8. Git 提交规范
 
-- If you want to add this new React Native code to an existing application, check out the [Integration guide](https://reactnative.dev/docs/integration-with-existing-apps).
-- If you're curious to learn more about React Native, check out the [docs](https://reactnative.dev/docs/getting-started).
+以下内容禁止提交到仓库：
 
-# Troubleshooting
+- 依赖与构建产物：`node_modules/`, `dist/`, `build/`
+- 临时与缓存：`.gradle/`, `.kotlin/`, `.cache/`, `tmp/`, `.metro-health-check*`
+- 本地环境变量：`.env`, `.env.*`（保留 `.env.example`）
+- 后端运行时数据：`backend/data/*`（仅保留 `backend/data/.gitkeep`）
+- 本地数据库与后端私有环境：`backend/**/*.sqlite`, `backend/.env*`
 
-If you're having issues getting the above steps to work, see the [Troubleshooting](https://reactnative.dev/docs/troubleshooting) page.
+## 9. 常用命令
 
-# Learn More
+```bash
+npm run lint
+npm test
+npm run web:build
+```
 
-To learn more about React Native, take a look at the following resources:
+## 10. 常见问题
 
-- [React Native Website](https://reactnative.dev) - learn more about React Native.
-- [Getting Started](https://reactnative.dev/docs/environment-setup) - an **overview** of React Native and how setup your environment.
-- [Learn the Basics](https://reactnative.dev/docs/getting-started) - a **guided tour** of the React Native **basics**.
-- [Blog](https://reactnative.dev/blog) - read the latest official React Native **Blog** posts.
-- [`@facebook/react-native`](https://github.com/facebook/react-native) - the Open Source; GitHub **repository** for React Native.
+### Q1: Android 模拟器崩溃怎么办？
 
+优先用 Web 模式开发业务功能（`npm run web`），并将 Android 真机/模拟器问题与业务开发解耦。
+
+### Q2: 为什么我本机 API 连不上？
+
+检查：
+
+- 后端是否已启动（3001）
+- `XINCHAT_API_BASE` 是否正确
+- 手机/模拟器与后端机器网络是否互通
