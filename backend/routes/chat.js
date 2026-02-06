@@ -1,4 +1,4 @@
-import express from 'express';
+﻿import express from 'express';
 import fs from 'fs/promises';
 import { createWriteStream } from 'fs';
 import path from 'path';
@@ -214,7 +214,7 @@ const storeUserFileBuffer = async (buffer, senderUid, name, mime) => {
 const storeUserFileFromPath = async (sourcePath, senderUid, name, mime) => {
   const stat = await fs.stat(sourcePath);
   if (stat.size > MAX_FILE_BYTES) {
-    throw new Error('File too large.');
+    throw new Error('文件过大。');
   }
   const buffer = await fs.readFile(sourcePath);
   return storeUserFileBuffer(buffer, senderUid, name, mime);
@@ -263,7 +263,7 @@ const readStreamToFile = (req, tempPath, maxBytes) =>
       size += chunk.length;
       if (size > maxBytes) {
         req.destroy();
-        cleanup(new Error('File too large.'));
+        cleanup(new Error('文件过大。'));
         return;
       }
       hash.update(chunk);
@@ -286,7 +286,7 @@ const readStreamToBuffer = (req, maxBytes) =>
       size += chunk.length;
       if (size > maxBytes) {
         req.destroy();
-        reject(new Error('File too large.'));
+        reject(new Error('文件过大。'));
         return;
       }
       chunks.push(chunk);
@@ -497,7 +497,7 @@ const authenticate = async (req, res, next) => {
   try {
     const token = extractToken(req);
     if (!token) {
-      res.status(401).json({ success: false, message: 'Missing token.' });
+      res.status(401).json({ success: false, message: '缺少登录令牌。' });
       return;
     }
 
@@ -507,7 +507,7 @@ const authenticate = async (req, res, next) => {
       await writeUsers(users);
     }
     if (!found.user) {
-      res.status(401).json({ success: false, message: 'Invalid token.' });
+      res.status(401).json({ success: false, message: '登录令牌无效。' });
       return;
     }
 
@@ -515,7 +515,7 @@ const authenticate = async (req, res, next) => {
     next();
   } catch (error) {
     console.error('Chat authenticate error:', error);
-    res.status(500).json({ success: false, message: 'Server error.' });
+    res.status(500).json({ success: false, message: '服务器错误。' });
   }
 };
 
@@ -542,30 +542,30 @@ router.post('/send', authenticate, async (req, res) => {
     await ensureChatStorage();
     const body = req.body || {};
     if (!isValidType(body.type)) {
-      res.status(400).json({ success: false, message: 'Invalid message type.' });
+      res.status(400).json({ success: false, message: '无效的消息类型。' });
       return;
     }
     if (!isValidTargetType(body.targetType)) {
-      res.status(400).json({ success: false, message: 'Invalid target type.' });
+      res.status(400).json({ success: false, message: '无效的目标类型。' });
       return;
     }
 
     const senderUid = Number(body.senderUid);
     const targetUid = Number(body.targetUid);
     if (!Number.isInteger(senderUid) || !Number.isInteger(targetUid)) {
-      res.status(400).json({ success: false, message: 'Invalid sender/target uid.' });
+      res.status(400).json({ success: false, message: '发送者或目标用户编号无效。' });
       return;
     }
 
     const { user, users } = req.auth;
     if (user.uid !== senderUid) {
-      res.status(403).json({ success: false, message: 'Sender mismatch.' });
+      res.status(403).json({ success: false, message: '发送者身份不匹配。' });
       return;
     }
 
     const targetUser = users.find((item) => item.uid === targetUid);
     if (!targetUser) {
-      res.status(404).json({ success: false, message: 'Target user not found.' });
+      res.status(404).json({ success: false, message: '目标用户不存在。' });
       return;
     }
 
@@ -575,7 +575,7 @@ router.post('/send', authenticate, async (req, res) => {
       Array.isArray(targetUser.friends) &&
       targetUser.friends.includes(user.uid);
     if (!isMutualFriend) {
-      res.status(403).json({ success: false, message: 'Not mutual friends.' });
+      res.status(403).json({ success: false, message: '对方不是互为好友。' });
       return;
     }
 
@@ -677,11 +677,11 @@ router.post('/send', authenticate, async (req, res) => {
       if (rawDataUrl) {
         const parsed = parseDataUrl(rawDataUrl);
         if (!parsed) {
-          res.status(400).json({ success: false, message: 'Invalid file data.' });
+          res.status(400).json({ success: false, message: '文件数据无效。' });
           return;
         }
         if (parsed.buffer.length > MAX_FILE_BYTES) {
-          res.status(400).json({ success: false, message: 'File too large.' });
+          res.status(400).json({ success: false, message: '文件过大。' });
           return;
         }
         mime = parsed.mime || mime;
@@ -701,7 +701,7 @@ router.post('/send', authenticate, async (req, res) => {
           parsedUrl = null;
         }
         if (!parsedUrl || !parsedUrl.pathname.startsWith('/uploads/userfile/')) {
-          res.status(400).json({ success: false, message: 'Invalid file url.' });
+          res.status(400).json({ success: false, message: '文件地址无效。' });
           return;
         }
         const relativePath = decodeURIComponent(
@@ -709,13 +709,13 @@ router.post('/send', authenticate, async (req, res) => {
         );
         const sourcePath = path.join(USERFILE_DIR, relativePath);
         if (!(await fileExists(sourcePath))) {
-          res.status(404).json({ success: false, message: 'Source file missing.' });
+          res.status(404).json({ success: false, message: '源文件不存在。' });
           return;
         }
         const stat = await fs.stat(sourcePath);
         size = stat.size;
         if (size > MAX_FILE_BYTES) {
-          res.status(400).json({ success: false, message: 'File too large.' });
+          res.status(400).json({ success: false, message: '文件过大。' });
           return;
         }
         const stored = await storeUserFileFromPath(
@@ -726,7 +726,7 @@ router.post('/send', authenticate, async (req, res) => {
         );
         filename = stored.filename;
       } else {
-        res.status(400).json({ success: false, message: 'Missing file data.' });
+        res.status(400).json({ success: false, message: '缺少文件数据。' });
         return;
       }
 
@@ -775,7 +775,7 @@ router.post('/send', authenticate, async (req, res) => {
     res.json({ success: true, data: entry });
   } catch (error) {
     console.error('Chat send error:', error);
-    res.status(500).json({ success: false, message: 'Chat send failed.' });
+    res.status(500).json({ success: false, message: '发送消息失败。' });
   }
 });
 
@@ -806,11 +806,11 @@ router.post('/upload/image', authenticate, async (req, res) => {
         buffer = Buffer.from(bodyText, 'base64');
       }
       if (!buffer || !buffer.length) {
-        res.status(400).json({ success: false, message: 'Invalid image data.' });
+        res.status(400).json({ success: false, message: '图片数据无效。' });
         return;
       }
       if (buffer.length > MAX_FILE_BYTES) {
-        res.status(400).json({ success: false, message: 'File too large.' });
+        res.status(400).json({ success: false, message: '文件过大。' });
         return;
       }
       if (!IMAGE_EXTS.includes(ext)) {
@@ -859,7 +859,7 @@ router.post('/upload/image', authenticate, async (req, res) => {
     });
   } catch (error) {
     console.error('Image upload error:', error);
-    const message = error?.message === 'File too large.' ? 'File too large.' : 'Upload failed.';
+    const message = error?.message === '文件过大。' ? '文件过大。' : '上传失败。';
     res.status(400).json({ success: false, message });
   }
 });
@@ -922,7 +922,7 @@ router.post('/upload/file', authenticate, async (req, res) => {
     });
   } catch (error) {
     console.error('File upload error:', error);
-    const message = error?.message === 'File too large.' ? 'File too large.' : 'Upload failed.';
+    const message = error?.message === '文件过大。' ? '文件过大。' : '上传失败。';
     res.status(400).json({ success: false, message });
   }
 });
@@ -946,15 +946,15 @@ router.get('/get', authenticate, async (req, res) => {
     let beforeMs = 0;
 
     if (!isValidTargetType(targetType)) {
-      res.status(400).json({ success: false, message: 'Invalid target type.' });
+      res.status(400).json({ success: false, message: '无效的目标类型。' });
       return;
     }
     if (!Number.isInteger(targetUid)) {
-      res.status(400).json({ success: false, message: 'Invalid target uid.' });
+      res.status(400).json({ success: false, message: '目标用户编号无效。' });
       return;
     }
     if (type && !isValidType(type)) {
-      res.status(400).json({ success: false, message: 'Invalid message type.' });
+      res.status(400).json({ success: false, message: '无效的消息类型。' });
       return;
     }
 
@@ -984,7 +984,7 @@ router.get('/get', authenticate, async (req, res) => {
     const { user, users } = req.auth;
     const targetUser = users.find((item) => item.uid === targetUid);
     if (!targetUser) {
-      res.status(404).json({ success: false, message: 'Target user not found.' });
+      res.status(404).json({ success: false, message: '目标用户不存在。' });
       return;
     }
     const isMutualFriend =
@@ -993,7 +993,7 @@ router.get('/get', authenticate, async (req, res) => {
       Array.isArray(targetUser.friends) &&
       targetUser.friends.includes(user.uid);
     if (!isMutualFriend) {
-      res.status(403).json({ success: false, message: 'Not mutual friends.' });
+      res.status(403).json({ success: false, message: '对方不是互为好友。' });
       return;
     }
 
@@ -1067,7 +1067,7 @@ router.get('/get', authenticate, async (req, res) => {
     res.json({ success: true, data });
   } catch (error) {
     console.error('Chat get error:', error);
-    res.status(500).json({ success: false, message: 'Chat fetch failed.' });
+    res.status(500).json({ success: false, message: '获取消息失败。' });
   }
 });
 
@@ -1076,7 +1076,7 @@ router.delete('/del', async (req, res) => {
     await ensureChatStorage();
     const { id } = req.body || {};
     if (typeof id !== 'string' || id.trim() === '') {
-      res.status(400).json({ success: false, message: 'Missing message id.' });
+      res.status(400).json({ success: false, message: '缺少消息编号。' });
       return;
     }
 
@@ -1087,7 +1087,7 @@ router.delete('/del', async (req, res) => {
     selectStmt.bind([id]);
     if (!selectStmt.step()) {
       selectStmt.free();
-      res.status(404).json({ success: false, message: 'Message not found.' });
+      res.status(404).json({ success: false, message: '消息不存在。' });
       return;
     }
     const existing = selectStmt.getAsObject();
@@ -1100,9 +1100,11 @@ router.delete('/del', async (req, res) => {
     res.json({ success: true, data: toMessage(existing) });
   } catch (error) {
     console.error('Chat delete error:', error);
-    res.status(500).json({ success: false, message: 'Chat delete failed.' });
+    res.status(500).json({ success: false, message: '删除消息失败。' });
   }
 });
 
 export { ensureChatStorage, setChatNotifier };
 export default router;
+
+

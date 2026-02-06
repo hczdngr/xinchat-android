@@ -1,4 +1,4 @@
-import express from 'express';
+﻿import express from 'express';
 import { findUserByToken, readUsers, writeUsers } from './auth.js';
 
 const router = express.Router();
@@ -15,7 +15,7 @@ const authenticate = async (req, res, next) => {
   try {
     const token = extractToken(req);
     if (!token) {
-      res.status(401).json({ success: false, message: 'Missing token.' });
+      res.status(401).json({ success: false, message: '缺少登录令牌。' });
       return;
     }
     const users = await readUsers();
@@ -24,14 +24,14 @@ const authenticate = async (req, res, next) => {
       await writeUsers(users);
     }
     if (!found.user) {
-      res.status(401).json({ success: false, message: 'Invalid token.' });
+      res.status(401).json({ success: false, message: '登录令牌无效。' });
       return;
     }
     req.auth = { user: found.user, userIndex: found.userIndex, users };
     next();
   } catch (error) {
     console.error('Voice authenticate error:', error);
-    res.status(500).json({ success: false, message: 'Server error.' });
+    res.status(500).json({ success: false, message: '服务器错误。' });
   }
 };
 
@@ -49,7 +49,7 @@ router.get('/directory', authenticate, async (req, res) => {
     res.json({ success: true, data });
   } catch (error) {
     console.error('Voice directory error:', error);
-    res.status(500).json({ success: false, message: 'Voice directory failed.' });
+    res.status(500).json({ success: false, message: '获取语音通讯录失败。' });
   }
 });
 
@@ -57,19 +57,19 @@ router.get('/contact', authenticate, async (req, res) => {
   try {
     const uid = Number(req.query.uid || req.body?.uid);
     if (!Number.isInteger(uid)) {
-      res.status(400).json({ success: false, message: 'Invalid uid.' });
+      res.status(400).json({ success: false, message: '用户编号无效。' });
       return;
     }
     const { users } = req.auth;
     const target = users.find((item) => item.uid === uid);
     if (!target) {
-      res.status(404).json({ success: false, message: 'Target not found.' });
+      res.status(404).json({ success: false, message: '目标用户不存在。' });
       return;
     }
     res.json({ success: true, data: toDirectoryEntry(target) });
   } catch (error) {
     console.error('Voice contact error:', error);
-    res.status(500).json({ success: false, message: 'Voice contact failed.' });
+    res.status(500).json({ success: false, message: '获取语音联系人失败。' });
   }
 });
 
@@ -78,7 +78,7 @@ router.post('/domain', authenticate, async (req, res) => {
     const domain = typeof req.body?.domain === 'string' ? req.body.domain.trim() : '';
     const { users, userIndex, user } = req.auth;
     if (userIndex == null || !users[userIndex]) {
-      res.status(404).json({ success: false, message: 'User not found.' });
+      res.status(404).json({ success: false, message: '用户不存在。' });
       return;
     }
     users[userIndex] = {
@@ -89,8 +89,10 @@ router.post('/domain', authenticate, async (req, res) => {
     res.json({ success: true, data: { uid: user.uid, domain } });
   } catch (error) {
     console.error('Voice domain error:', error);
-    res.status(500).json({ success: false, message: 'Voice domain update failed.' });
+    res.status(500).json({ success: false, message: '更新语音域名失败。' });
   }
 });
 
 export default router;
+
+

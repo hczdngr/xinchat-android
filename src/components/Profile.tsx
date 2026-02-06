@@ -4,6 +4,7 @@ import {
   BackHandler,
   Dimensions,
   Image,
+  Platform,
   PanResponder,
   Pressable,
   StyleSheet,
@@ -33,6 +34,17 @@ type Props = {
   onEdit: () => void;
   onRefresh?: () => void;
 };
+
+const buttonShadowStyle =
+  Platform.OS === 'web'
+    ? { boxShadow: '0px 2px 8px rgba(0, 0, 0, 0.08)' }
+    : {
+        shadowColor: '#000',
+        shadowOpacity: 0.03,
+        shadowOffset: { width: 0, height: 2 },
+        shadowRadius: 8,
+        elevation: 1,
+      };
 
 export default function Profile({ profile, onBack, onEdit, onRefresh }: Props) {
   const insets = useSafeAreaInsets();
@@ -352,11 +364,7 @@ const styles = StyleSheet.create({
     borderColor: "#e0e0e0",
     alignItems: "center",
     justifyContent: "center",
-    shadowColor: "#000",
-    shadowOpacity: 0.03,
-    shadowOffset: { width: 0, height: 2 },
-    shadowRadius: 8,
-    elevation: 1,
+    ...buttonShadowStyle,
   },
   editText: {
     fontSize: 16,

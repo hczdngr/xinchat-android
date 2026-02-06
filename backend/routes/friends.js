@@ -1,4 +1,4 @@
-import express from 'express';
+﻿import express from 'express';
 import { findUserByToken, hasValidToken, readUsers, writeUsers } from './auth.js';
 import { isUserOnline as isOnline } from '../online.js';
 
@@ -21,7 +21,7 @@ const authenticate = async (req, res, next) => {
   try {
     const token = extractToken(req);
     if (!token) {
-      res.status(401).json({ success: false, message: 'Missing token.' });
+      res.status(401).json({ success: false, message: '缺少登录令牌。' });
       return;
     }
 
@@ -31,7 +31,7 @@ const authenticate = async (req, res, next) => {
       await writeUsers(users);
     }
     if (!found.user) {
-      res.status(401).json({ success: false, message: 'Invalid token.' });
+      res.status(401).json({ success: false, message: '登录令牌无效。' });
       return;
     }
 
@@ -39,7 +39,7 @@ const authenticate = async (req, res, next) => {
     next();
   } catch (error) {
     console.error('Friends authenticate error:', error);
-    res.status(500).json({ success: false, message: 'Server error.' });
+    res.status(500).json({ success: false, message: '服务器错误。' });
   }
 };
 
@@ -103,12 +103,12 @@ router.post('/add', authenticate, async (req, res) => {
   const friend = resolveFriend(users, req.body);
 
   if (!friend) {
-    res.status(404).json({ success: false, message: 'Friend not found.' });
+    res.status(404).json({ success: false, message: '好友不存在。' });
     return;
   }
 
   if (friend.uid === user.uid) {
-    res.status(400).json({ success: false, message: 'Cannot add yourself.' });
+    res.status(400).json({ success: false, message: '不能添加自己为好友。' });
     return;
   }
 
@@ -116,7 +116,7 @@ router.post('/add', authenticate, async (req, res) => {
   const friendIndex = users.findIndex((item) => item.uid === friend.uid);
   const friendUser = friendIndex >= 0 ? users[friendIndex] : null;
   if (!friendUser) {
-    res.status(404).json({ success: false, message: 'Friend not found.' });
+    res.status(404).json({ success: false, message: '好友不存在。' });
     return;
   }
 
@@ -205,7 +205,7 @@ router.delete('/remove', authenticate, async (req, res) => {
   const friend = resolveFriend(users, req.body);
 
   if (!friend) {
-    res.status(404).json({ success: false, message: 'Friend not found.' });
+    res.status(404).json({ success: false, message: '好友不存在。' });
     return;
   }
 
@@ -319,11 +319,11 @@ router.post('/respond', authenticate, async (req, res) => {
   const { requesterUid, action } = req.body || {};
   const requesterId = Number(requesterUid);
   if (!Number.isInteger(requesterId)) {
-    res.status(400).json({ success: false, message: 'Invalid requester uid.' });
+    res.status(400).json({ success: false, message: '请求用户编号无效。' });
     return;
   }
   if (action !== 'accept' && action !== 'reject') {
-    res.status(400).json({ success: false, message: 'Invalid action.' });
+    res.status(400).json({ success: false, message: '无效的操作。' });
     return;
   }
 
@@ -331,7 +331,7 @@ router.post('/respond', authenticate, async (req, res) => {
   ensureFriendRequests(updatedUser);
   const incomingEntry = findRequest(updatedUser.friendRequests.incoming, requesterId);
   if (!incomingEntry) {
-    res.status(404).json({ success: false, message: 'Request not found.' });
+    res.status(404).json({ success: false, message: '请求不存在。' });
     return;
   }
 
@@ -393,13 +393,13 @@ router.get('/search', authenticate, async (req, res) => {
   const payload = { ...(req.query || {}), ...(req.body || {}) };
   const uid = Number(payload.uid);
   if (!Number.isInteger(uid)) {
-    res.status(400).json({ success: false, message: 'Invalid uid.' });
+    res.status(400).json({ success: false, message: '用户编号无效。' });
     return;
   }
 
   const target = users.find((item) => item.uid === uid);
   if (!target) {
-    res.status(404).json({ success: false, message: 'User not found.' });
+    res.status(404).json({ success: false, message: '用户不存在。' });
     return;
   }
 
@@ -418,13 +418,13 @@ router.get('/profile', authenticate, async (req, res) => {
   const { users, user } = req.auth;
   const uid = Number(req.query?.uid);
   if (!Number.isInteger(uid)) {
-    res.status(400).json({ success: false, message: 'Invalid uid.' });
+    res.status(400).json({ success: false, message: '用户编号无效。' });
     return;
   }
 
   const target = users.find((item) => item.uid === uid);
   if (!target) {
-    res.status(404).json({ success: false, message: 'User not found.' });
+    res.status(404).json({ success: false, message: '用户不存在。' });
     return;
   }
 
@@ -434,7 +434,7 @@ router.get('/profile', authenticate, async (req, res) => {
     Array.isArray(target.friends) &&
     target.friends.includes(user.uid);
   if (!isMutual) {
-    res.status(403).json({ success: false, message: 'Not mutual friends.' });
+    res.status(403).json({ success: false, message: '对方不是互为好友。' });
     return;
   }
 
@@ -458,3 +458,5 @@ router.get('/profile', authenticate, async (req, res) => {
 
 export { setFriendsNotifier };
 export default router;
+
+

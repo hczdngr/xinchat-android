@@ -1,6 +1,7 @@
 import React from 'react';
 import {
   ActivityIndicator,
+  Platform,
   Pressable,
   StyleSheet,
   Text,
@@ -24,6 +25,17 @@ type Props = {
   onSubmit: () => void;
   onGoRegister: () => void;
 };
+
+const inputShadowStyle =
+  Platform.OS === 'web'
+    ? { boxShadow: '0px 2px 8px rgba(0, 0, 0, 0.08)' }
+    : {
+        shadowColor: '#000',
+        shadowOpacity: 0.04,
+        shadowOffset: { width: 0, height: 2 },
+        shadowRadius: 8,
+        elevation: 1,
+      };
 
 export default function Login({
   username,
@@ -133,11 +145,7 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     gap: 8,
-    shadowColor: '#000',
-    shadowOpacity: 0.04,
-    shadowOffset: { width: 0, height: 2 },
-    shadowRadius: 8,
-    elevation: 1,
+    ...inputShadowStyle,
     position: 'relative',
   },
   input: {

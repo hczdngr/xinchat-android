@@ -25,7 +25,8 @@ const babelLoader = {
     loader: 'babel-loader',
     options: {
       cacheDirectory: true,
-      presets: ['module:@react-native/babel-preset', '@babel/preset-react'],
+      presets: [['module:@react-native/babel-preset', { disableImportExportTransform: true }]],
+      sourceType: 'unambiguous',
     },
   },
 };
@@ -51,6 +52,12 @@ module.exports = {
   },
   module: {
     rules: [
+      {
+        test: /\.m?js$/,
+        resolve: {
+          fullySpecified: false,
+        },
+      },
       babelLoader,
       {
         test: /\.(gif|jpe?g|png|svg|ttf|woff2?)$/,

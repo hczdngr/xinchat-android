@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   Dimensions,
   Image,
+  Platform,
   Pressable,
   ScrollView,
   StyleSheet,
@@ -62,6 +63,26 @@ const UNREAD_LIMIT = 200;
 const HEARTBEAT_MS = 20000;
 const RECONNECT_BASE_MS = 1500;
 const RECONNECT_MAX_MS = 10000;
+const surfaceShadowStyle =
+  Platform.OS === 'web'
+    ? { boxShadow: '0px 1px 2px rgba(0, 0, 0, 0.08)' }
+    : {
+        shadowColor: '#000',
+        shadowOpacity: 0.02,
+        shadowOffset: { width: 0, height: 1 },
+        shadowRadius: 2,
+        elevation: 1,
+      };
+const menuShadowStyle =
+  Platform.OS === 'web'
+    ? { boxShadow: '0px 8px 24px rgba(0, 0, 0, 0.2)' }
+    : {
+        shadowColor: '#000',
+        shadowOpacity: 0.2,
+        shadowOffset: { width: 0, height: 8 },
+        shadowRadius: 24,
+        elevation: 6,
+      };
 
 export default function Home({ profile }: { profile: Profile }) {
   const insets = useSafeAreaInsets();
@@ -126,19 +147,6 @@ export default function Home({ profile }: { profile: Profile }) {
       setProfileData((prev) => ({ ...prev, ...profile }));
     }
   }, [profile]);
-
-  useEffect(() => {
-    setAvatarFailed(false);
-  }, [avatarUrl]);
-
-  useEffect(() => {
-    if (!avatarSrc || avatarSrc.startsWith('data:')) return;
-    Image.getSize(
-      avatarSrc,
-      () => setAvatarFailed(false),
-      () => setAvatarFailed(true)
-    );
-  }, [avatarSrc]);
 
   useEffect(() => {
     const loadToken = async () => {
@@ -225,6 +233,20 @@ export default function Home({ profile }: { profile: Profile }) {
     return encodeURI(`${avatarUrl}${joiner}v=${encodeURIComponent(avatarVersion)}`);
   }, [avatarUrl, avatarVersion]);
   const avatarText = useMemo(() => displayName.slice(0, 2), [displayName]);
+
+  useEffect(() => {
+    setAvatarFailed(false);
+  }, [avatarUrl]);
+
+  useEffect(() => {
+    if (!avatarSrc || avatarSrc.startsWith('data:')) return;
+    Image.getSize(
+      avatarSrc,
+      () => setAvatarFailed(false),
+      () => setAvatarFailed(true)
+    );
+  }, [avatarSrc]);
+
   const activeChatFriend = useMemo(() => {
     if (!activeChatUid) return null;
     return friends.find((item) => item.uid === activeChatUid) || null;
@@ -1269,11 +1291,7 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
     gap: 6,
-    shadowColor: '#000',
-    shadowOpacity: 0.02,
-    shadowOffset: { width: 0, height: 1 },
-    shadowRadius: 2,
-    elevation: 1,
+    ...surfaceShadowStyle,
   },
   searchText: {
     fontSize: 15,
@@ -1485,11 +1503,7 @@ const styles = StyleSheet.create({
     backgroundColor: 'rgba(255,255,255,0.96)',
     borderRadius: 12,
     overflow: 'hidden',
-    shadowColor: '#000',
-    shadowOpacity: 0.2,
-    shadowOffset: { width: 0, height: 8 },
-    shadowRadius: 24,
-    elevation: 6,
+    ...menuShadowStyle,
   },
   menuItem: {
     paddingVertical: 12,

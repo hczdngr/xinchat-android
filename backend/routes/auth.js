@@ -73,7 +73,7 @@ const authenticate = async (req, res, next) => {
   try {
     const token = extractToken(req);
     if (!token) {
-      res.status(401).json({ success: false, message: 'Missing token.' });
+      res.status(401).json({ success: false, message: '缺少登录令牌。' });
       return;
     }
 
@@ -83,7 +83,7 @@ const authenticate = async (req, res, next) => {
       await writeUsers(users);
     }
     if (!found.user) {
-      res.status(401).json({ success: false, message: 'Invalid token.' });
+      res.status(401).json({ success: false, message: '登录令牌无效。' });
       return;
     }
 
@@ -91,7 +91,7 @@ const authenticate = async (req, res, next) => {
     next();
   } catch (error) {
     console.error('Authenticate error:', error);
-    res.status(500).json({ success: false, message: 'Server error.' });
+    res.status(500).json({ success: false, message: '服务器错误。' });
   }
 };
 
@@ -425,20 +425,23 @@ router.post('/register', async (req, res) => {
   try {
     const { username, password } = req.body || {};
     if (typeof username !== 'string' || typeof password !== 'string') {
-      res.status(400).json({ success: false, message: '璇疯緭鍏ョ敤鎴峰悕鍜屽瘑鐮併€? });
+      res.status(400).json({ success: false, message: '请输入用户名和密码。' });
       return;
     }
 
     const trimmedUsername = username.trim();
     if (trimmedUsername.length < 3 || trimmedUsername.length > 32) {
-      res.status(400).json({ success: false, message: '\u4e2a\u7b7e\u957f\u5ea6\u8fc7\u957f\u3002'瀵嗙爜闀垮害闇€涓?8-64 浣嶃€? });
+      res.status(400).json({
+        success: false,
+        message: '用户名长度需在 3-32 个字符之间。',
+      });
       return;
     }
 
-  const users = await readUsers();
+    const users = await readUsers();
     const normalized = normalizeUsername(trimmedUsername);
     if (users.some((user) => user.username === normalized)) {
-      res.status(409).json({ success: false, message: '鐢ㄦ埛鍚嶅凡瀛樺湪銆? });
+      res.status(409).json({ success: false, message: '用户名已存在。' });
       return;
     }
 
@@ -460,10 +463,10 @@ router.post('/register', async (req, res) => {
       region: '',
     });
     await writeUsers(users);
-    res.json({ success: true, message: '娉ㄥ唽鎴愬姛锛岃鐧诲綍銆? });
+    res.json({ success: true, message: '注册成功，请登录。' });
   } catch (error) {
     console.error('Register error:', error);
-    res.status(500).json({ success: false, message: '娉ㄥ唽澶辫触锛岃绋嶅悗閲嶈瘯銆? });
+    res.status(500).json({ success: false, message: '注册失败，请稍后重试。' });
   }
 });
 
@@ -471,13 +474,13 @@ router.post('/login', async (req, res) => {
   try {
     const { username, password } = req.body || {};
     if (typeof username !== 'string' || typeof password !== 'string') {
-      res.status(400).json({ success: false, message: '璇疯緭鍏ョ敤鎴峰悕鍜屽瘑鐮併€? });
+      res.status(400).json({ success: false, message: '请输入用户名和密码。' });
       return;
     }
 
     const trimmedUsername = username.trim();
     if (!trimmedUsername || !password) {
-      res.status(400).json({ success: false, message: '璇疯緭鍏ョ敤鎴峰悕鍜屽瘑鐮併€? });
+      res.status(400).json({ success: false, message: '请输入用户名和密码。' });
       return;
     }
 
@@ -486,7 +489,7 @@ router.post('/login', async (req, res) => {
     if (isLockedOut(lockKey)) {
       res.status(429).json({
         success: false,
-        message: '灏濊瘯娆℃暟杩囧锛岃绋嶅悗鍐嶈瘯銆?,
+        message: '尝试次数过多，请稍后再试。',
       });
       return;
     }
@@ -503,7 +506,7 @@ router.post('/login', async (req, res) => {
 
     if (!isMatch) {
       recordLoginAttempt(lockKey);
-      res.status(401).json({ success: false, message: '鐢ㄦ埛鍚嶆垨瀵嗙爜閿欒銆? });
+      res.status(401).json({ success: false, message: '用户名或密码错误。' });
       return;
     }
 
@@ -546,7 +549,7 @@ router.post('/login', async (req, res) => {
 
     res.json({
       success: true,
-      message: 'Login success.',
+      message: '登录成功。',
       token,
       tokenExpiresAt: expiresAt,
       uid: users[userIndex].uid,
@@ -562,7 +565,7 @@ router.post('/login', async (req, res) => {
     });
   } catch (error) {
     console.error('Login error:', error);
-    res.status(500).json({ success: false, message: '鐧诲綍澶辫触锛岃绋嶅悗閲嶈瘯銆? });
+    res.status(500).json({ success: false, message: '登录失败，请稍后重试。' });
   }
 });
 
@@ -613,7 +616,7 @@ router.post('/profile', authenticate, async (req, res) => {
     const baseUrl = `${req.protocol}://${req.get('host')}`;
     avatar = normalizeAvatar(payload.avatar, baseUrl);
     if (avatar === null) {
-      res.status(400).json({ success: false, message: 'Invalid avatar.' });
+      res.status(400).json({ success: false, message: '头像格式无效。' });
       return;
     }
   }
@@ -668,6 +671,7 @@ router.post('/profile', authenticate, async (req, res) => {
 
 export { ensureStorage, readUsers, writeUsers, findUserByToken, hasValidToken };
 export default router;
+
 
 
 

@@ -1,7 +1,7 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { StatusBar } from 'react-native';
 import { NavigationContainer } from '@react-navigation/native';
-import { createStackNavigator } from '@react-navigation/stack';
+import { createNativeStackNavigator } from '@react-navigation/native-stack';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 import Home from './src/components/Home';
 import Login from './src/components/Login';
@@ -29,7 +29,7 @@ type Profile = {
 };
 
 const emptyProfile: Profile = {};
-const Stack = createStackNavigator();
+const Stack = createNativeStackNavigator();
 
 function App() {
   const [username, setUsername] = useState('');
@@ -271,7 +271,7 @@ function App() {
           <Stack.Navigator
             screenOptions={{
               headerShown: false,
-              cardStyle: { backgroundColor: '#f2f2f7' },
+              contentStyle: { backgroundColor: '#f2f2f7' },
             }}
           >
             <Stack.Screen name="Home">
