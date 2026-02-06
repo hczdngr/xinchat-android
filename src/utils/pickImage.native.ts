@@ -4,14 +4,12 @@ export type PickedImage = {
   path: string;
   mime: string;
   data: string;
+  width: number;
+  height: number;
 };
 
 export async function pickImageForPlatform(): Promise<PickedImage | null> {
   const picked = await ImagePicker.openPicker({
-    width: 512,
-    height: 512,
-    cropping: true,
-    cropperToolbarTitle: '\u88c1\u526a\u5934\u50cf',
     compressImageQuality: 0.9,
     mediaType: 'photo',
     includeBase64: true,
@@ -21,5 +19,7 @@ export async function pickImageForPlatform(): Promise<PickedImage | null> {
     path: picked.path,
     mime: picked.mime || 'image/jpeg',
     data: picked.data || '',
+    width: Number(picked.width) || 0,
+    height: Number(picked.height) || 0,
   };
 }

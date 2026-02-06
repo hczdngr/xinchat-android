@@ -10,6 +10,7 @@ import {
   Text,
   TextInput,
   View,
+  type ViewStyle,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useNavigation } from '@react-navigation/native';
@@ -55,10 +56,18 @@ type ReadAtMap = Record<number, number>;
 type BucketMap = Record<number, Message[]>;
 type PinnedMap = Record<number, boolean>;
 type HiddenMap = Record<number, boolean>;
+type HomeTourStep = {
+  id: string;
+  title: string;
+  description: string;
+  spotlightStyle: ViewStyle;
+  cardStyle: ViewStyle;
+};
 
 const READ_AT_KEY = 'xinchat.readAt';
 const PINNED_KEY = 'xinchat.pinned';
 const HIDDEN_KEY = 'xinchat.hiddenChats';
+const HOME_TOUR_SEEN_KEY = 'xinchat.homeTourSeen';
 const PAGE_LIMIT = 30;
 const HEARTBEAT_MS = 20000;
 const RECONNECT_BASE_MS = 1500;
@@ -92,6 +101,16 @@ const quickMenuShadowStyle =
         shadowOffset: { width: 0, height: 10 },
         shadowRadius: 30,
         elevation: 10,
+      };
+const tourCardShadowStyle =
+  Platform.OS === 'web'
+    ? { boxShadow: '0px 14px 30px rgba(45, 82, 133, 0.2)' }
+    : {
+        shadowColor: '#1f3f66',
+        shadowOpacity: 0.16,
+        shadowOffset: { width: 0, height: 8 },
+        shadowRadius: 18,
+        elevation: 7,
       };
 
 export default function Home({ profile }: { profile: Profile }) {
@@ -128,6 +147,98 @@ export default function Home({ profile }: { profile: Profile }) {
   const [activeView, setActiveView] = useState<'list' | 'found'>('list');
   const [friendsRefreshKey, setFriendsRefreshKey] = useState(0);
   const [homeTab, setHomeTab] = useState<'messages' | 'contacts'>('messages');
+  const [tourStepIndex, setTourStepIndex] = useState(0);
+  const [tourVisible, setTourVisible] = useState(false);
+  const [tourSeenLoaded, setTourSeenLoaded] = useState(false);
+  const [tourSeen, setTourSeen] = useState(false);
+
+  const tourSteps = useMemo<HomeTourStep[]>(() => {
+    const { width: screenWidth, height: screenHeight } = Dimensions.get('window');
+    const navHeight = 55 + navPad * 2;
+    const narrowCardWidth = Math.min(334, Math.max(250, Math.floor(screenWidth * 0.74)));
+    const mediumCardWidth = Math.min(360, Math.max(280, Math.floor(screenWidth * 0.8)));
+    const contentTop = insets.top + 88;
+    const contentBottom = navHeight + 8;
+    const listHeight = Math.max(120, screenHeight - contentTop - contentBottom);
+    return [
+      {
+        id: 'profile',
+        title: '\u4e2a\u4eba\u4e2d\u5fc3',
+        description:
+          '\u70b9\u51fb\u5934\u50cf\u53ef\u8fdb\u5165\u4e2a\u4eba\u4e3b\u9875\uff0c\u4fee\u6539\u5934\u50cf\u3001\u6635\u79f0\u548c\u4e2a\u4eba\u8d44\u6599\u3002',
+        spotlightStyle: {
+          top: insets.top + 2,
+          left: 10,
+          width: 220,
+          height: 44,
+          borderRadius: 22,
+        },
+        cardStyle: {
+          top: insets.top + 64,
+          left: 14,
+          width: narrowCardWidth,
+          minHeight: 126,
+        },
+      },
+      {
+        id: 'quick-menu',
+        title: '\u5feb\u6377\u5165\u53e3',
+        description:
+          '\u53f3\u4e0a\u89d2 + \u53ef\u5feb\u901f\u6253\u5f00\u83dc\u5355\uff0c\u652f\u6301\u52a0\u597d\u53cb/\u7fa4\u3001\u626b\u4e00\u626b\u7b49\u529f\u80fd\u3002',
+        spotlightStyle: {
+          top: insets.top + 3,
+          right: 8,
+          width: 40,
+          height: 40,
+          borderRadius: 20,
+        },
+        cardStyle: {
+          top: insets.top + 64,
+          right: 14,
+          width: narrowCardWidth,
+          minHeight: 126,
+        },
+      },
+      {
+        id: 'list',
+        title: '\u4f1a\u8bdd\u5217\u8868',
+        description:
+          '\u8fd9\u91cc\u662f\u6700\u65b0\u6d88\u606f\uff0c\u70b9\u51fb\u8fdb\u5165\u804a\u5929\uff0c\u957f\u6309\u4f1a\u8bdd\u53ef\u7f6e\u9876\u6216\u5220\u9664\u3002',
+        spotlightStyle: {
+          top: insets.top + 88,
+          left: 8,
+          right: 8,
+          bottom: navHeight + 6,
+          borderRadius: 14,
+        },
+        cardStyle: {
+          top: contentTop + Math.max(8, Math.floor(listHeight * 0.46)),
+          right: 14,
+          width: mediumCardWidth,
+          minHeight: 134,
+        },
+      },
+      {
+        id: 'tabs',
+        title: '\u5e95\u90e8\u5bfc\u822a',
+        description:
+          '\u5e95\u90e8\u53ef\u5207\u6362\u6d88\u606f\u4e0e\u8054\u7cfb\u4eba\uff0c\u7528\u6765\u5feb\u901f\u5728\u4f1a\u8bdd\u89c6\u56fe\u548c\u597d\u53cb\u89c6\u56fe\u4e4b\u95f4\u5207\u6362\u3002',
+        spotlightStyle: {
+          left: 0,
+          right: 0,
+          bottom: 0,
+          height: navHeight + 2,
+          borderRadius: 0,
+        },
+        cardStyle: {
+          bottom: navHeight + 14,
+          left: 14,
+          right: 14,
+          minHeight: 130,
+        },
+      },
+    ];
+  }, [insets.top, navPad]);
 
   const navigation = useNavigation<any>();
   const messageIdSetsRef = useRef<Map<number, Set<number | string>>>(new Map());
@@ -225,6 +336,15 @@ export default function Home({ profile }: { profile: Profile }) {
     void loadHidden();
   }, []);
 
+  useEffect(() => {
+    const loadHomeTourState = async () => {
+      const seen = await storage.getString(HOME_TOUR_SEEN_KEY);
+      setTourSeen(seen === '1');
+      setTourSeenLoaded(true);
+    };
+    loadHomeTourState();
+  }, []);
+
   const displayName = useMemo(
     () => profileData.nickname || profileData.username || '加载中...',
     [profileData.nickname, profileData.username]
@@ -245,6 +365,8 @@ export default function Home({ profile }: { profile: Profile }) {
     return encodeURI(`${avatarUrl}${joiner}v=${encodeURIComponent(avatarVersion)}`);
   }, [avatarUrl, avatarVersion]);
   const avatarText = useMemo(() => displayName.slice(0, 2), [displayName]);
+  const canShowMainHome = !activeChatUid && activeView !== 'found';
+  const currentTourStep = tourSteps[tourStepIndex] || null;
 
   useEffect(() => {
     setAvatarFailed(false);
@@ -258,6 +380,19 @@ export default function Home({ profile }: { profile: Profile }) {
       () => setAvatarFailed(true)
     );
   }, [avatarSrc]);
+
+  useEffect(() => {
+    if (!tourSeenLoaded || tourSeen || tourVisible) return;
+    if (!canShowMainHome) return;
+    setTourStepIndex(0);
+    setTourVisible(true);
+  }, [canShowMainHome, tourSeen, tourSeenLoaded, tourVisible]);
+
+  useEffect(() => {
+    if (!tourVisible) return;
+    setQuickMenuVisible(false);
+    setChatMenuVisible(false);
+  }, [tourVisible]);
 
   const activeChatFriend = useMemo(() => {
     if (!activeChatUid) return null;
@@ -589,10 +724,35 @@ export default function Home({ profile }: { profile: Profile }) {
     setQuickMenuVisible(false);
   }, []);
 
+  const markTourSeen = useCallback(() => {
+    storage.setString(HOME_TOUR_SEEN_KEY, '1');
+    setTourSeen(true);
+  }, []);
+
+  const closeTour = useCallback(
+    (markSeen = true) => {
+      setTourVisible(false);
+      setTourStepIndex(0);
+      setQuickMenuVisible(false);
+      if (markSeen) {
+        markTourSeen();
+      }
+    },
+    [markTourSeen]
+  );
+
+  const nextTourStep = useCallback(() => {
+    if (tourStepIndex >= tourSteps.length - 1) {
+      closeTour(true);
+      return;
+    }
+    setTourStepIndex((prev) => prev + 1);
+  }, [closeTour, tourStepIndex, tourSteps.length]);
+
   const toggleQuickMenu = useCallback(() => {
-    if (activeChatUid || activeView === 'found') return;
+    if (tourVisible || activeChatUid || activeView === 'found') return;
     setQuickMenuVisible((prev) => !prev);
-  }, [activeChatUid, activeView]);
+  }, [activeChatUid, activeView, tourVisible]);
 
   const onQuickCreateGroup = useCallback(() => {
     closeQuickMenu();
@@ -611,12 +771,16 @@ export default function Home({ profile }: { profile: Profile }) {
   useEffect(() => {
     if (Platform.OS !== 'android') return;
     const sub = BackHandler.addEventListener('hardwareBackPress', () => {
+      if (tourVisible) {
+        closeTour(true);
+        return true;
+      }
       if (!quickMenuVisible) return false;
       setQuickMenuVisible(false);
       return true;
     });
     return () => sub.remove();
-  }, [quickMenuVisible]);
+  }, [closeTour, quickMenuVisible, tourVisible]);
 
   const onChatScroll = useCallback(
     async (event: any) => {
@@ -1236,6 +1400,38 @@ export default function Home({ profile }: { profile: Profile }) {
         </View>
       ) : null}
 
+      {tourVisible && canShowMainHome && currentTourStep ? (
+        <View style={styles.tourOverlay}>
+          <View style={styles.tourMask} />
+          <View style={[styles.tourSpotlight, currentTourStep.spotlightStyle]} />
+          <View style={[styles.tourCard, currentTourStep.cardStyle]}>
+            <Text style={styles.tourTitle}>{currentTourStep.title}</Text>
+            <Text style={styles.tourDescription}>{currentTourStep.description}</Text>
+            <View style={styles.tourProgress}>
+              {tourSteps.map((step, idx) => (
+                <View
+                  key={step.id}
+                  style={[styles.tourDot, idx === tourStepIndex && styles.tourDotActive]}
+                />
+              ))}
+            </View>
+            <View style={styles.tourActions}>
+              <Pressable
+                style={[styles.tourBtn, styles.tourSkipBtn]}
+                onPress={() => closeTour(true)}
+              >
+                <Text style={styles.tourSkipText}>{'\u8df3\u8fc7'}</Text>
+              </Pressable>
+              <Pressable style={[styles.tourBtn, styles.tourNextBtn]} onPress={nextTourStep}>
+                <Text style={styles.tourNextText}>
+                  {tourStepIndex >= tourSteps.length - 1 ? '\u5b8c\u6210' : '\u4e0b\u4e00\u6b65'}
+                </Text>
+              </Pressable>
+            </View>
+          </View>
+        </View>
+      ) : null}
+
       {quickMenuVisible && !activeChatUid && activeView !== 'found' ? (
         <View style={styles.quickMenuOverlay}>
           <Pressable style={styles.quickMenuBackdrop} onPress={closeQuickMenu} />
@@ -1558,6 +1754,91 @@ const styles = StyleSheet.create({
     color: '#9a9a9a',
     fontSize: 12,
     paddingVertical: 12,
+  },
+  tourOverlay: {
+    ...StyleSheet.absoluteFillObject,
+    zIndex: 160,
+  },
+  tourMask: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: 'rgba(6, 10, 18, 0.68)',
+  },
+  tourSpotlight: {
+    position: 'absolute',
+    borderWidth: 2,
+    borderColor: '#35a4ff',
+    backgroundColor: 'rgba(53, 164, 255, 0.12)',
+  },
+  tourCard: {
+    position: 'absolute',
+    backgroundColor: '#f8fbff',
+    borderRadius: 16,
+    borderWidth: 1,
+    borderColor: 'rgba(82, 137, 204, 0.24)',
+    paddingHorizontal: 14,
+    paddingTop: 12,
+    paddingBottom: 10,
+    ...tourCardShadowStyle,
+  },
+  tourTitle: {
+    color: '#1f2f46',
+    fontSize: 16,
+    fontWeight: '600',
+  },
+  tourDescription: {
+    marginTop: 6,
+    color: '#4c5f78',
+    fontSize: 13,
+    lineHeight: 18,
+  },
+  tourProgress: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    marginTop: 10,
+  },
+  tourDot: {
+    width: 7,
+    height: 7,
+    borderRadius: 3.5,
+    backgroundColor: 'rgba(103, 156, 219, 0.35)',
+  },
+  tourDotActive: {
+    width: 18,
+    borderRadius: 6,
+    backgroundColor: '#5fb3ff',
+  },
+  tourActions: {
+    flexDirection: 'row',
+    gap: 10,
+    marginTop: 12,
+  },
+  tourBtn: {
+    flex: 1,
+    height: 36,
+    borderRadius: 10,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  tourSkipBtn: {
+    backgroundColor: '#eaf2fb',
+    borderWidth: 1,
+    borderColor: '#d4e4f7',
+  },
+  tourNextBtn: {
+    backgroundColor: '#dff0ff',
+    borderWidth: 1,
+    borderColor: '#b8dbff',
+  },
+  tourSkipText: {
+    color: '#516177',
+    fontSize: 13,
+    fontWeight: '600',
+  },
+  tourNextText: {
+    color: '#1f66aa',
+    fontSize: 13,
+    fontWeight: '600',
   },
   quickMenuOverlay: {
     ...StyleSheet.absoluteFillObject,

@@ -19,7 +19,8 @@ import Svg, { Path } from 'react-native-svg';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { API_BASE, normalizeImageUrl } from '../config';
 import { storage } from '../storage';
-import { pickImageForPlatform } from '../utils/pickImage';
+import { pickImageForPlatform, type PickedImage } from '../utils/pickImage';
+import { cropImageForPlatform } from '../utils/cropImage';
 import * as isoCountries from 'i18n-iso-countries';
 import zhLocale from 'i18n-iso-countries/langs/zh.json';
 
@@ -48,9 +49,77 @@ const CHINA = '\u4e2d\u56fd';
 const GENDER_OPTIONS = ['\u7537', '\u5973', '\u5176\u4ed6'];
 const MONTH_OPTIONS = Array.from({ length: 12 }, (_, i) => String(i + 1).padStart(2, '0'));
 const YEAR_OPTIONS = Array.from({ length: 90 }, (_, i) => String(new Date().getFullYear() - i));
+const AVATAR_OUTPUT_SIZE = 512;
+const AVATAR_SQUARE_TOLERANCE = 1;
+const AVATAR_MIN_ZOOM = 1;
+const AVATAR_MAX_ZOOM = 3;
+const AVATAR_ZOOM_STEP = 0.12;
 const DAY_OPTIONS = (year: number, month: number) => {
   const count = new Date(year, month, 0).getDate();
   return Array.from({ length: count }, (_, i) => String(i + 1).padStart(2, '0'));
+};
+
+type AvatarCropState = {
+  mime: string;
+  data: string;
+  width: number;
+  height: number;
+  frameSize: number;
+  baseDisplayWidth: number;
+  baseDisplayHeight: number;
+  displayWidth: number;
+  displayHeight: number;
+  zoom: number;
+  offsetX: number;
+  offsetY: number;
+};
+
+const isSquareImage = (width: number, height: number) =>
+  width > 0 && height > 0 && Math.abs(width - height) <= AVATAR_SQUARE_TOLERANCE;
+
+const clampAvatarCropOffset = (
+  displayWidth: number,
+  displayHeight: number,
+  frameSize: number,
+  nextX: number,
+  nextY: number
+) => {
+  const maxOffsetX = Math.max(0, (displayWidth - frameSize) / 2);
+  const maxOffsetY = Math.max(0, (displayHeight - frameSize) / 2);
+  return {
+    x: Math.max(-maxOffsetX, Math.min(maxOffsetX, nextX)),
+    y: Math.max(-maxOffsetY, Math.min(maxOffsetY, nextY)),
+  };
+};
+
+const clampAvatarZoom = (value: number) =>
+  Math.max(AVATAR_MIN_ZOOM, Math.min(AVATAR_MAX_ZOOM, value));
+
+const applyAvatarCropZoom = (state: AvatarCropState, nextZoomRaw: number) => {
+  const nextZoom = clampAvatarZoom(nextZoomRaw);
+  const nextDisplayWidth = state.baseDisplayWidth * nextZoom;
+  const nextDisplayHeight = state.baseDisplayHeight * nextZoom;
+  const clamped = clampAvatarCropOffset(
+    nextDisplayWidth,
+    nextDisplayHeight,
+    state.frameSize,
+    state.offsetX,
+    state.offsetY
+  );
+  return {
+    ...state,
+    zoom: nextZoom,
+    displayWidth: nextDisplayWidth,
+    displayHeight: nextDisplayHeight,
+    offsetX: clamped.x,
+    offsetY: clamped.y,
+  };
+};
+
+const getTouchDistance = (touchA: { pageX: number; pageY: number }, touchB: { pageX: number; pageY: number }) => {
+  const dx = touchA.pageX - touchB.pageX;
+  const dy = touchA.pageY - touchB.pageY;
+  return Math.sqrt(dx * dx + dy * dy);
 };
 
 isoCountries.registerLocale(zhLocale as any);
@@ -151,7 +220,14 @@ export default function EditProfile({ onBack, onSaved, initialProfile }: Props) 
   const [avatarUploading, setAvatarUploading] = useState(false);
   const [avatarFailed, setAvatarFailed] = useState(false);
   const [pickerActive, setPickerActive] = useState(false);
+  const [avatarCrop, setAvatarCrop] = useState<AvatarCropState | null>(null);
   const scrollRef = useRef<ScrollView | null>(null);
+  const avatarCropRef = useRef<AvatarCropState | null>(null);
+  const cropResolveRef = useRef<((base64: string | null) => void) | null>(null);
+  const cropPanStartRef = useRef({ x: 0, y: 0 });
+  const cropGestureModeRef = useRef<'none' | 'drag' | 'pinch'>('none');
+  const cropPinchStartDistanceRef = useRef(0);
+  const cropPinchStartZoomRef = useRef(1);
   const avatarUrl = useMemo(() => normalizeImageUrl(profile.avatar), [profile.avatar]);
   const avatarVersion = useMemo(() => {
     const clean = avatarUrl.split('?')[0].replace(/\/+$/, '');
@@ -165,7 +241,7 @@ export default function EditProfile({ onBack, onSaved, initialProfile }: Props) 
     return encodeURI(`${avatarUrl}${joiner}v=${encodeURIComponent(avatarVersion)}`);
   }, [avatarUrl, avatarVersion]);
   const isModalOpen = countryOpen || provinceOpen || cityOpen || genderOpen || birthdayOpen;
-  const allowGestures = !isModalOpen && !pickerActive;
+  const allowGestures = !isModalOpen && !pickerActive && !avatarCrop;
 
   const closeAllModals = useCallback(() => {
     setCountryOpen(false);
@@ -204,6 +280,68 @@ export default function EditProfile({ onBack, onSaved, initialProfile }: Props) 
     })
   ).current;
 
+  const cropPanResponder = useRef(
+    PanResponder.create({
+      onStartShouldSetPanResponder: () => Boolean(avatarCropRef.current),
+      onMoveShouldSetPanResponder: () => Boolean(avatarCropRef.current),
+      onStartShouldSetPanResponderCapture: () => Boolean(avatarCropRef.current),
+      onMoveShouldSetPanResponderCapture: () => Boolean(avatarCropRef.current),
+      onPanResponderGrant: (evt) => {
+        const current = avatarCropRef.current;
+        const touches = (evt?.nativeEvent?.touches || []) as Array<{ pageX: number; pageY: number }>;
+        if (touches.length >= 2 && current) {
+          cropGestureModeRef.current = 'pinch';
+          cropPinchStartDistanceRef.current = getTouchDistance(touches[0], touches[1]);
+          cropPinchStartZoomRef.current = current.zoom;
+          return;
+        }
+        cropGestureModeRef.current = 'drag';
+        cropPanStartRef.current = {
+          x: current?.offsetX || 0,
+          y: current?.offsetY || 0,
+        };
+      },
+      onPanResponderMove: (evt, gestureState) => {
+        if (cropGestureModeRef.current === 'pinch') {
+          const touches = (evt?.nativeEvent?.touches || []) as Array<{ pageX: number; pageY: number }>;
+          if (touches.length >= 2) {
+            const distance = getTouchDistance(touches[0], touches[1]);
+            if (distance > 0 && cropPinchStartDistanceRef.current > 0) {
+              const ratio = distance / cropPinchStartDistanceRef.current;
+              const nextZoom = cropPinchStartZoomRef.current * ratio;
+              setAvatarCrop((prev) => (prev ? applyAvatarCropZoom(prev, nextZoom) : prev));
+            }
+          }
+          return;
+        }
+        if (cropGestureModeRef.current !== 'drag') return;
+        setAvatarCrop((prev) => {
+          if (!prev) return prev;
+          const nextX = cropPanStartRef.current.x + gestureState.dx;
+          const nextY = cropPanStartRef.current.y + gestureState.dy;
+          const clamped = clampAvatarCropOffset(
+            prev.displayWidth,
+            prev.displayHeight,
+            prev.frameSize,
+            nextX,
+            nextY
+          );
+          return {
+            ...prev,
+            offsetX: clamped.x,
+            offsetY: clamped.y,
+          };
+        });
+      },
+      onPanResponderRelease: () => {
+        cropGestureModeRef.current = 'none';
+      },
+      onPanResponderTerminate: () => {
+        cropGestureModeRef.current = 'none';
+      },
+    })
+  ).current;
+
   useEffect(() => {
     Animated.timing(appear, {
       toValue: 1,
@@ -213,7 +351,17 @@ export default function EditProfile({ onBack, onSaved, initialProfile }: Props) 
   }, [appear]);
 
   useEffect(() => {
+    avatarCropRef.current = avatarCrop;
+  }, [avatarCrop]);
+
+  useEffect(() => {
     const handler = () => {
+      if (avatarCrop) {
+        setAvatarCrop(null);
+        cropResolveRef.current?.(null);
+        cropResolveRef.current = null;
+        return true;
+      }
       if (pickerActive) return true;
       if (isModalOpen) {
         closeAllModals();
@@ -224,7 +372,30 @@ export default function EditProfile({ onBack, onSaved, initialProfile }: Props) 
     };
     const sub = BackHandler.addEventListener('hardwareBackPress', handler);
     return () => sub.remove();
-  }, [closeAllModals, isModalOpen, pickerActive, runExit]);
+  }, [avatarCrop, closeAllModals, isModalOpen, pickerActive, runExit]);
+
+  useEffect(
+    () => () => {
+      cropResolveRef.current?.(null);
+      cropResolveRef.current = null;
+    },
+    []
+  );
+
+  useEffect(() => {
+    if (Platform.OS !== 'web') return;
+    const doc = (globalThis as any).document as Document | undefined;
+    const bodyStyle = doc?.body?.style;
+    if (!bodyStyle || !avatarCrop) return;
+    const previousOverflow = bodyStyle.overflow;
+    const previousTouchAction = (bodyStyle as any).touchAction;
+    bodyStyle.overflow = 'hidden';
+    (bodyStyle as any).touchAction = 'none';
+    return () => {
+      bodyStyle.overflow = previousOverflow;
+      (bodyStyle as any).touchAction = previousTouchAction;
+    };
+  }, [avatarCrop]);
 
   useEffect(() => {
     setAvatarFailed(false);
@@ -354,6 +525,133 @@ export default function EditProfile({ onBack, onSaved, initialProfile }: Props) 
     await persistProfile();
   }, [canSave, persistProfile]);
 
+  const closeAvatarCrop = useCallback((base64: string | null) => {
+    setAvatarCrop(null);
+    cropResolveRef.current?.(base64);
+    cropResolveRef.current = null;
+  }, []);
+
+  const resetAvatarCrop = useCallback(() => {
+    setAvatarCrop((prev) => {
+      if (!prev) return prev;
+      return {
+        ...prev,
+        zoom: AVATAR_MIN_ZOOM,
+        displayWidth: prev.baseDisplayWidth,
+        displayHeight: prev.baseDisplayHeight,
+        offsetX: 0,
+        offsetY: 0,
+      };
+    });
+  }, []);
+
+  const zoomAvatarCrop = useCallback((delta: number) => {
+    setAvatarCrop((prev) => {
+      if (!prev) return prev;
+      return applyAvatarCropZoom(prev, prev.zoom + delta);
+    });
+  }, []);
+
+  const handleCropWheel = useCallback((event: any) => {
+    if (Platform.OS !== 'web') return;
+    event?.preventDefault?.();
+    event?.stopPropagation?.();
+    const deltaY = Number(event?.nativeEvent?.deltaY ?? event?.deltaY ?? 0);
+    if (!Number.isFinite(deltaY) || deltaY === 0) return;
+    zoomAvatarCrop(deltaY < 0 ? AVATAR_ZOOM_STEP : -AVATAR_ZOOM_STEP);
+  }, [zoomAvatarCrop]);
+
+  const openAvatarCropOnWeb = useCallback(
+    (picked: PickedImage) =>
+      new Promise<string | null>((resolve) => {
+        const width = Math.max(1, picked.width || 0);
+        const height = Math.max(1, picked.height || 0);
+        const frameSize = Math.max(
+          220,
+          Math.min(Math.floor(Dimensions.get('window').width - 48), 340)
+        );
+        const coverScale = Math.max(frameSize / width, frameSize / height);
+        const baseDisplayWidth = width * coverScale;
+        const baseDisplayHeight = height * coverScale;
+        cropResolveRef.current?.(null);
+        cropResolveRef.current = resolve;
+        setAvatarCrop({
+          mime: picked.mime || 'image/jpeg',
+          data: picked.data || '',
+          width,
+          height,
+          frameSize,
+          baseDisplayWidth,
+          baseDisplayHeight,
+          displayWidth: baseDisplayWidth,
+          displayHeight: baseDisplayHeight,
+          zoom: AVATAR_MIN_ZOOM,
+          offsetX: 0,
+          offsetY: 0,
+        });
+      }),
+    []
+  );
+
+  const exportAvatarCropOnWeb = useCallback(async () => {
+    if (Platform.OS !== 'web' || !avatarCrop) return null;
+    const doc = (globalThis as any).document as Document | undefined;
+    const ImageCtor = (globalThis as any).Image;
+    if (!doc || !ImageCtor) return null;
+
+    const dataUrl = `data:${avatarCrop.mime || 'image/jpeg'};base64,${avatarCrop.data || ''}`;
+    const image = await new Promise<any>((resolve, reject) => {
+      const img = new ImageCtor();
+      img.onload = () => resolve(img);
+      img.onerror = () => reject(new Error('Load crop source failed'));
+      img.src = dataUrl;
+    });
+
+    const canvas = doc.createElement('canvas');
+    canvas.width = AVATAR_OUTPUT_SIZE;
+    canvas.height = AVATAR_OUTPUT_SIZE;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return null;
+
+    const left = (avatarCrop.displayWidth - avatarCrop.frameSize) / 2 - avatarCrop.offsetX;
+    const top = (avatarCrop.displayHeight - avatarCrop.frameSize) / 2 - avatarCrop.offsetY;
+    const scaleX = avatarCrop.width / avatarCrop.displayWidth;
+    const scaleY = avatarCrop.height / avatarCrop.displayHeight;
+
+    const sw = Math.max(1, Math.min(avatarCrop.width, avatarCrop.frameSize * scaleX));
+    const sh = Math.max(1, Math.min(avatarCrop.height, avatarCrop.frameSize * scaleY));
+    const sx = Math.max(0, Math.min(avatarCrop.width - sw, left * scaleX));
+    const sy = Math.max(0, Math.min(avatarCrop.height - sh, top * scaleY));
+
+    ctx.drawImage(image, sx, sy, sw, sh, 0, 0, AVATAR_OUTPUT_SIZE, AVATAR_OUTPUT_SIZE);
+    const out = canvas.toDataURL(avatarCrop.mime || 'image/jpeg', 0.92);
+    const commaIndex = out.indexOf(',');
+    if (commaIndex < 0) return null;
+    return out.slice(commaIndex + 1);
+  }, [avatarCrop]);
+
+  const uploadAvatarPayload = useCallback(async (mime: string, base64: string) => {
+    const ext = (mime || '').split('/')[1] || 'jpg';
+    const token = await storage.getString(TOKEN_KEY);
+    const response = await fetch(`${API_BASE}/api/chat/upload/image`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'text/plain',
+        'x-file-encoding': 'base64',
+        'x-file-ext': ext,
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      },
+      body: `data:${mime || 'image/jpeg'};base64,${base64}`,
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok || !data?.success || !data?.data?.url) {
+      setError(data?.message || '\u5934\u50cf\u4e0a\u4f20\u5931\u8d25');
+      scrollRef.current?.scrollTo({ y: 0, animated: true });
+      return null;
+    }
+    return data.data.url as string;
+  }, []);
+
   const uploadAvatar = useCallback(async () => {
     if (avatarUploading) return;
     setError('');
@@ -363,31 +661,34 @@ export default function EditProfile({ onBack, onSaved, initialProfile }: Props) 
       const picked = await pickImageForPlatform();
       if (!picked?.path) return;
       setAvatarUploading(true);
-      const ext = (picked.mime || '').split('/')[1] || 'jpg';
-      const base64 = picked.data || '';
-      if (!base64) {
+      let finalMime = picked.mime || 'image/jpeg';
+      let finalBase64 = picked.data || '';
+
+      if (!finalBase64) {
         setError('\u5934\u50cf\u6570\u636e\u8bfb\u53d6\u5931\u8d25');
         return;
       }
-      const token = await storage.getString(TOKEN_KEY);
-      const response = await fetch(`${API_BASE}/api/chat/upload/image`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'text/plain',
-          'x-file-encoding': 'base64',
-          'x-file-ext': ext,
-          ...(token ? { Authorization: `Bearer ${token}` } : {}),
-        },
-        body: `data:${picked.mime || 'image/jpeg'};base64,${base64}`,
-      });
-      const data = await response.json().catch(() => ({}));
-      if (!response.ok || !data?.success || !data?.data?.url) {
-        setError(data?.message || '\u5934\u50cf\u4e0a\u4f20\u5931\u8d25');
-        scrollRef.current?.scrollTo({ y: 0, animated: true });
-        return;
+
+      if (!isSquareImage(picked.width, picked.height)) {
+        if (Platform.OS === 'web') {
+          const croppedBase64 = await openAvatarCropOnWeb(picked);
+          if (!croppedBase64) return;
+          finalBase64 = croppedBase64;
+        } else {
+          const cropped = await cropImageForPlatform(picked.path);
+          if (!cropped?.data) {
+            setError('\u5934\u50cf\u88c1\u526a\u5931\u8d25');
+            return;
+          }
+          finalMime = cropped.mime || finalMime;
+          finalBase64 = cropped.data;
+        }
       }
-      updateField('avatar', data.data.url);
-      await persistProfile({ avatar: data.data.url });
+
+      const uploadedAvatar = await uploadAvatarPayload(finalMime, finalBase64);
+      if (!uploadedAvatar) return;
+      updateField('avatar', uploadedAvatar);
+      await persistProfile({ avatar: uploadedAvatar });
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       if (!/cancel/i.test(message)) {
@@ -398,7 +699,13 @@ export default function EditProfile({ onBack, onSaved, initialProfile }: Props) 
       setPickerActive(false);
       setAvatarUploading(false);
     }
-  }, [avatarUploading, persistProfile, updateField]);
+  }, [
+    avatarUploading,
+    openAvatarCropOnWeb,
+    persistProfile,
+    updateField,
+    uploadAvatarPayload,
+  ]);
 
   return (
     <Animated.View
@@ -446,7 +753,11 @@ export default function EditProfile({ onBack, onSaved, initialProfile }: Props) 
         behavior={Platform.OS === 'ios' ? 'padding' : undefined}
         style={styles.body}
       >
-        <ScrollView ref={scrollRef} contentContainerStyle={styles.content}>
+        <ScrollView
+          ref={scrollRef}
+          contentContainerStyle={styles.content}
+          scrollEnabled={!avatarCrop}
+        >
           {error ? <Text style={styles.error}>{error}</Text> : null}
           {status ? <Text style={styles.status}>{status}</Text> : null}
 
@@ -568,6 +879,88 @@ export default function EditProfile({ onBack, onSaved, initialProfile }: Props) 
           </View>
         </ScrollView>
       </KeyboardAvoidingView>
+
+      {avatarCrop ? (
+        <View style={styles.cropMask}>
+          <Pressable
+            style={styles.cropMaskBackdrop}
+            onPress={() => closeAvatarCrop(null)}
+          />
+          <View style={styles.cropPanel}>
+            <Text style={styles.cropTitle}>{'\u8c03\u6574\u5934\u50cf\u88c1\u526a'}</Text>
+            <Text style={styles.cropHint}>
+              {'\u62d6\u52a8\u56fe\u7247\uff0cWeb \u53ef\u7528\u6eda\u8f6e/\u53cc\u6307\u7f29\u653e\uff0c\u4f7f\u4eba\u50cf\u4f4d\u4e8e\u6846\u5185'}
+            </Text>
+            <View style={styles.cropFrameWrap}>
+              <View
+                style={[styles.cropFrame, { width: avatarCrop.frameSize, height: avatarCrop.frameSize }]}
+                onWheel={handleCropWheel}
+                {...cropPanResponder.panHandlers}
+              >
+                <Image
+                  source={{ uri: `data:${avatarCrop.mime || 'image/jpeg'};base64,${avatarCrop.data}` }}
+                  style={[
+                    styles.cropImage,
+                    {
+                      width: avatarCrop.displayWidth,
+                      height: avatarCrop.displayHeight,
+                      transform: [
+                        { translateX: avatarCrop.offsetX },
+                        { translateY: avatarCrop.offsetY },
+                      ],
+                    },
+                  ]}
+                />
+              </View>
+            </View>
+            <View style={styles.cropZoomRow}>
+              <Pressable
+                style={[styles.cropMiniBtn, avatarCrop.zoom <= AVATAR_MIN_ZOOM && styles.cropMiniBtnDisabled]}
+                onPress={() => zoomAvatarCrop(-AVATAR_ZOOM_STEP)}
+                disabled={avatarCrop.zoom <= AVATAR_MIN_ZOOM}
+              >
+                <Text style={styles.cropMiniBtnText}>-</Text>
+              </Pressable>
+              <Text style={styles.cropZoomText}>{`x${avatarCrop.zoom.toFixed(2)}`}</Text>
+              <Pressable
+                style={[styles.cropMiniBtn, avatarCrop.zoom >= AVATAR_MAX_ZOOM && styles.cropMiniBtnDisabled]}
+                onPress={() => zoomAvatarCrop(AVATAR_ZOOM_STEP)}
+                disabled={avatarCrop.zoom >= AVATAR_MAX_ZOOM}
+              >
+                <Text style={styles.cropMiniBtnText}>+</Text>
+              </Pressable>
+            </View>
+            <View style={styles.cropActions}>
+              <Pressable
+                style={[styles.cropBtn, styles.cropBtnGhost]}
+                onPress={() => closeAvatarCrop(null)}
+              >
+                <Text style={styles.cropBtnGhostText}>{'\u53d6\u6d88'}</Text>
+              </Pressable>
+              <Pressable
+                style={[styles.cropBtn, styles.cropBtnGhost]}
+                onPress={resetAvatarCrop}
+              >
+                <Text style={styles.cropBtnGhostText}>{'\u91cd\u7f6e'}</Text>
+              </Pressable>
+              <Pressable
+                style={[styles.cropBtn, styles.cropBtnPrimary]}
+                onPress={async () => {
+                  const croppedBase64 = await exportAvatarCropOnWeb();
+                  if (!croppedBase64) {
+                    setError('\u5934\u50cf\u88c1\u526a\u5931\u8d25');
+                    closeAvatarCrop(null);
+                    return;
+                  }
+                  closeAvatarCrop(croppedBase64);
+                }}
+              >
+                <Text style={styles.cropBtnPrimaryText}>{'\u786e\u8ba4'}</Text>
+              </Pressable>
+            </View>
+          </View>
+        </View>
+      ) : null}
 
       <SelectModal
         visible={countryOpen}
@@ -1098,6 +1491,119 @@ const styles = StyleSheet.create({
   avatarGhostText: {
     color: '#666',
     fontSize: 12,
+  },
+  cropMask: {
+    position: 'absolute',
+    left: 0,
+    right: 0,
+    top: 0,
+    bottom: 0,
+    zIndex: 20,
+    justifyContent: 'flex-end',
+  },
+  cropMaskBackdrop: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: 'rgba(0,0,0,0.62)',
+  },
+  cropPanel: {
+    backgroundColor: '#17191f',
+    borderTopLeftRadius: 18,
+    borderTopRightRadius: 18,
+    paddingHorizontal: 20,
+    paddingTop: 16,
+    paddingBottom: 24,
+  },
+  cropTitle: {
+    color: '#fff',
+    fontSize: 16,
+    fontWeight: '600',
+    textAlign: 'center',
+  },
+  cropHint: {
+    color: 'rgba(255,255,255,0.72)',
+    fontSize: 12,
+    textAlign: 'center',
+    marginTop: 6,
+  },
+  cropFrameWrap: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginTop: 14,
+    marginBottom: 12,
+  },
+  cropFrame: {
+    borderRadius: 14,
+    overflow: 'hidden',
+    backgroundColor: '#000',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.24)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    ...(Platform.OS === 'web' ? ({ touchAction: 'none', userSelect: 'none' } as any) : null),
+  },
+  cropImage: {
+    resizeMode: 'cover',
+  },
+  cropZoomRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 12,
+    marginBottom: 10,
+  },
+  cropMiniBtn: {
+    width: 28,
+    height: 28,
+    borderRadius: 14,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: 'rgba(255,255,255,0.18)',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.25)',
+  },
+  cropMiniBtnDisabled: {
+    opacity: 0.45,
+  },
+  cropMiniBtnText: {
+    color: '#fff',
+    fontSize: 16,
+    fontWeight: '700',
+  },
+  cropZoomText: {
+    color: '#d2e6ff',
+    fontSize: 12,
+    fontWeight: '600',
+    minWidth: 46,
+    textAlign: 'center',
+  },
+  cropActions: {
+    flexDirection: 'row',
+    gap: 10,
+  },
+  cropBtn: {
+    flex: 1,
+    borderRadius: 10,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: 10,
+  },
+  cropBtnGhost: {
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.28)',
+    backgroundColor: 'rgba(255,255,255,0.08)',
+  },
+  cropBtnGhostText: {
+    color: '#fff',
+    fontSize: 13,
+    fontWeight: '500',
+  },
+  cropBtnPrimary: {
+    backgroundColor: '#4a9df8',
+  },
+  cropBtnPrimaryText: {
+    color: '#fff',
+    fontSize: 13,
+    fontWeight: '600',
   },
   modalMask: {
     position: 'absolute',
