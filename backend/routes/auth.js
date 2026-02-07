@@ -8,6 +8,7 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const DATA_DIR = path.join(__dirname, '..', 'data');
 const USERS_PATH = path.join(DATA_DIR, 'users.json');
+const USERS_PATH_TMP = path.join(DATA_DIR, 'users.json.tmp');
 const UID_START = 100000000;
 const TOKEN_TTL_DAYS = 181;
 
@@ -73,7 +74,7 @@ const authenticate = async (req, res, next) => {
   try {
     const token = extractToken(req);
     if (!token) {
-      res.status(401).json({ success: false, message: 'Missing token.' });
+      res.status(401).json({ success: false, message: '缺少登录令牌。' });
       return;
     }
 
@@ -83,7 +84,7 @@ const authenticate = async (req, res, next) => {
       await writeUsers(users);
     }
     if (!found.user) {
-      res.status(401).json({ success: false, message: 'Invalid token.' });
+      res.status(401).json({ success: false, message: '登录令牌无效。' });
       return;
     }
 
@@ -91,7 +92,7 @@ const authenticate = async (req, res, next) => {
     next();
   } catch (error) {
     console.error('Authenticate error:', error);
-    res.status(500).json({ success: false, message: 'Server error.' });
+    res.status(500).json({ success: false, message: '服务器错误。' });
   }
 };
 
@@ -106,6 +107,9 @@ const clearUserSession = async (users, userIndex) => {
 const USERS_CACHE_TTL_MS = 1000;
 let cachedUsers = null;
 let cachedUsersAt = 0;
+let writeUsersQueue = Promise.resolve();
+
+const cloneUsers = (users) => JSON.parse(JSON.stringify(users || []));
 
 const ensureStorage = async () => {
   await fs.mkdir(DATA_DIR, { recursive: true });
@@ -120,14 +124,14 @@ const readUsers = async () => {
   await ensureStorage();
   const now = Date.now();
   if (cachedUsers && now - cachedUsersAt < USERS_CACHE_TTL_MS) {
-    return cachedUsers;
+    return cloneUsers(cachedUsers);
   }
   const raw = await fs.readFile(USERS_PATH, 'utf-8');
   const trimmed = raw.trim();
   if (!trimmed) {
     cachedUsers = [];
     cachedUsersAt = now;
-    return cachedUsers;
+    return cloneUsers(cachedUsers);
   }
   let users;
   try {
@@ -142,27 +146,33 @@ const readUsers = async () => {
     );
     cachedUsers = [];
     cachedUsersAt = now;
-    return cachedUsers;
+    return cloneUsers(cachedUsers);
   }
   if (!Array.isArray(users)) {
     console.error('Invalid users.json format. Resetting to empty array.');
     await fs.writeFile(USERS_PATH, '[]', 'utf-8');
     cachedUsers = [];
     cachedUsersAt = now;
-    return cachedUsers;
+    return cloneUsers(cachedUsers);
   }
   await ensureUserUids(users);
   await ensureUserDefaults(users);
-  cachedUsers = users;
+  cachedUsers = cloneUsers(users);
   cachedUsersAt = now;
-  return cachedUsers;
+  return cloneUsers(cachedUsers);
 };
 
 const writeUsers = async (users) => {
   await ensureStorage();
-  await fs.writeFile(USERS_PATH, JSON.stringify(users, null, 2), 'utf-8');
-  cachedUsers = users;
-  cachedUsersAt = Date.now();
+  const snapshot = cloneUsers(users);
+  const run = writeUsersQueue.then(async () => {
+    await fs.writeFile(USERS_PATH_TMP, JSON.stringify(snapshot, null, 2), 'utf-8');
+    await fs.rename(USERS_PATH_TMP, USERS_PATH);
+    cachedUsers = cloneUsers(snapshot);
+    cachedUsersAt = Date.now();
+  });
+  writeUsersQueue = run.catch(() => {});
+  await run;
 };
 
 const ensureUserUids = async (users) => {
@@ -363,11 +373,22 @@ const hasValidToken = (user) => {
   return false;
 };
 
-const hashPassword = (password, salt = crypto.randomBytes(16)) => {
+const pbkdf2Async = (password, salt, iterations, keylen, digest) =>
+  new Promise((resolve, reject) => {
+    crypto.pbkdf2(password, salt, iterations, keylen, digest, (error, derivedKey) => {
+      if (error) {
+        reject(error);
+        return;
+      }
+      resolve(derivedKey);
+    });
+  });
+
+const hashPassword = async (password, salt = crypto.randomBytes(16)) => {
   const iterations = 120000;
   const keylen = 64;
   const digest = 'sha512';
-  const hash = crypto.pbkdf2Sync(password, salt, iterations, keylen, digest);
+  const hash = await pbkdf2Async(password, salt, iterations, keylen, digest);
   return {
     passwordHash: hash.toString('hex'),
     salt: salt.toString('hex'),
@@ -377,11 +398,11 @@ const hashPassword = (password, salt = crypto.randomBytes(16)) => {
   };
 };
 
-const verifyPassword = (password, user) => {
+const verifyPassword = async (password, user) => {
   if (!user.passwordHash || !user.salt) {
     return false;
   }
-  const hash = crypto.pbkdf2Sync(
+  const hash = await pbkdf2Async(
     password,
     Buffer.from(user.salt, 'hex'),
     user.iterations || 120000,
@@ -431,18 +452,21 @@ router.post('/register', async (req, res) => {
 
     const trimmedUsername = username.trim();
     if (trimmedUsername.length < 3 || trimmedUsername.length > 32) {
-      res.status(400).json({ success: false, message: '用户名长度需为 3-32 个字符。' });
+      res.status(400).json({
+        success: false,
+        message: '用户名长度需在 3-32 个字符之间。',
+      });
       return;
     }
 
-  const users = await readUsers();
+    const users = await readUsers();
     const normalized = normalizeUsername(trimmedUsername);
     if (users.some((user) => user.username === normalized)) {
       res.status(409).json({ success: false, message: '用户名已存在。' });
       return;
     }
 
-    const hashed = hashPassword(password);
+    const hashed = await hashPassword(password);
     const uid = getNextUid(users);
     users.push({
       uid,
@@ -463,7 +487,7 @@ router.post('/register', async (req, res) => {
     res.json({ success: true, message: '注册成功，请登录。' });
   } catch (error) {
     console.error('Register error:', error);
-    res.status(500).json({ success: false, message: '注册失败，请稍后再试。' });
+    res.status(500).json({ success: false, message: '注册失败，请稍后重试。' });
   }
 });
 
@@ -498,7 +522,7 @@ router.post('/login', async (req, res) => {
     const isMatch = user
       ? isLegacy
         ? user.password === password
-        : verifyPassword(password, user)
+        : await verifyPassword(password, user)
       : false;
 
     if (!isMatch) {
@@ -510,7 +534,7 @@ router.post('/login', async (req, res) => {
     clearLoginAttempts(lockKey);
 
     if (isLegacy) {
-      const hashed = hashPassword(password);
+      const hashed = await hashPassword(password);
       users[userIndex] = {
         uid: user.uid,
         username: normalized,
@@ -546,7 +570,7 @@ router.post('/login', async (req, res) => {
 
     res.json({
       success: true,
-      message: 'Login success.',
+      message: '登录成功。',
       token,
       tokenExpiresAt: expiresAt,
       uid: users[userIndex].uid,
@@ -562,7 +586,7 @@ router.post('/login', async (req, res) => {
     });
   } catch (error) {
     console.error('Login error:', error);
-    res.status(500).json({ success: false, message: '登录失败，请稍后再试。' });
+    res.status(500).json({ success: false, message: '登录失败，请稍后重试。' });
   }
 });
 
@@ -613,7 +637,7 @@ router.post('/profile', authenticate, async (req, res) => {
     const baseUrl = `${req.protocol}://${req.get('host')}`;
     avatar = normalizeAvatar(payload.avatar, baseUrl);
     if (avatar === null) {
-      res.status(400).json({ success: false, message: 'Invalid avatar.' });
+      res.status(400).json({ success: false, message: '头像格式无效。' });
       return;
     }
   }
@@ -668,6 +692,7 @@ router.post('/profile', authenticate, async (req, res) => {
 
 export { ensureStorage, readUsers, writeUsers, findUserByToken, hasValidToken };
 export default router;
+
 
 
 

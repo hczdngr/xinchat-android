@@ -1,5 +1,7 @@
 import React, { useState } from 'react';
 import {
+  ActivityIndicator,
+  Platform,
   Pressable,
   StyleSheet,
   Text,
@@ -8,7 +10,9 @@ import {
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import Svg, { Circle, Line, Path } from 'react-native-svg';
-import UIButton from './UIButton';
+
+const webInputNoOutline =
+  Platform.OS === 'web' ? ({ outlineStyle: 'none', boxShadow: 'none' } as any) : null;
 
 type Props = {
   username: string;
@@ -61,7 +65,7 @@ export default function Register({
             placeholder="输入昵称"
             placeholderTextColor="#c0c4cc"
             onChangeText={onUsernameChange}
-            style={styles.input}
+            style={[styles.input, webInputNoOutline]}
             autoCapitalize="none"
           />
         </View>
@@ -72,7 +76,7 @@ export default function Register({
             placeholder="输入信聊密码"
             placeholderTextColor="#c0c4cc"
             onChangeText={onPasswordChange}
-            style={styles.input}
+            style={[styles.input, webInputNoOutline]}
             autoCapitalize="none"
             secureTextEntry={!showPassword}
           />
@@ -87,7 +91,7 @@ export default function Register({
             placeholder="确认信聊密码"
             placeholderTextColor="#c0c4cc"
             onChangeText={onConfirmPasswordChange}
-            style={styles.input}
+            style={[styles.input, webInputNoOutline]}
             autoCapitalize="none"
             secureTextEntry={!showConfirm}
           />
@@ -96,13 +100,17 @@ export default function Register({
           </Pressable>
         </View>
 
-        <UIButton
-          title={loading ? '注册中' : '立即注册'}
+        <Pressable
+          style={[styles.registerBtn, (!canSubmit || loading) && styles.registerBtnDisabled]}
+          disabled={!canSubmit || loading}
           onPress={onSubmit}
-          disabled={!canSubmit}
-          loading={loading}
-          style={styles.registerBtn}
-        />
+        >
+          {loading ? (
+            <ActivityIndicator color="#fff" />
+          ) : (
+            <Text style={styles.registerText}>立即注册</Text>
+          )}
+        </Pressable>
 
         {error ? <Text style={styles.error}>{error}</Text> : null}
         {!error && status ? <Text style={styles.success}>{status}</Text> : null}
@@ -120,6 +128,8 @@ export default function Register({
 const styles = StyleSheet.create({
   page: {
     flex: 1,
+    flexGrow: 1,
+    minHeight: '100%',
     backgroundColor: '#f0f2f5',
     paddingHorizontal: 24,
   },
@@ -164,6 +174,18 @@ const styles = StyleSheet.create({
   registerBtn: {
     marginTop: 12,
     height: 50,
+    borderRadius: 10,
+    backgroundColor: '#0099ff',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  registerBtnDisabled: {
+    opacity: 0.6,
+  },
+  registerText: {
+    color: '#fff',
+    fontSize: 17,
+    fontWeight: '600',
   },
   error: {
     color: '#b5482b',
@@ -180,6 +202,7 @@ const styles = StyleSheet.create({
   },
   footer: {
     marginTop: 'auto',
+    flexShrink: 0,
     textAlign: 'center',
     fontSize: 11,
     color: '#999',

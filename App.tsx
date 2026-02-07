@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Animated, BackHandler, StatusBar } from 'react-native';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import { StatusBar, StyleSheet, View } from 'react-native';
 import { NavigationContainer } from '@react-navigation/native';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
@@ -7,13 +7,13 @@ import Home from './src/components/Home';
 import Login from './src/components/Login';
 import Register from './src/components/Register';
 import Profile from './src/components/Profile';
-import FriendProfile from './src/components/FriendProfile';
 import EditProfile from './src/components/EditProfile';
+import QRScan from './src/components/QRScan';
+import InAppBrowser from './src/components/InAppBrowser';
 import { API_BASE } from './src/config';
+import { STORAGE_KEYS } from './src/constants/storageKeys';
+import type { RootStackParamList } from './src/navigation/types';
 import { storage } from './src/storage';
-
-const TOKEN_KEY = 'xinchat.token';
-const PROFILE_KEY = 'xinchat.profile';
 
 type Profile = {
   uid?: number;
@@ -30,7 +30,7 @@ type Profile = {
 };
 
 const emptyProfile: Profile = {};
-const Stack = createNativeStackNavigator();
+const Stack = createNativeStackNavigator<RootStackParamList>();
 
 function App() {
   const [username, setUsername] = useState('');
@@ -50,7 +50,6 @@ function App() {
 
   const [token, setToken] = useState('');
   const [profile, setProfile] = useState<Profile>(emptyProfile);
-  const authAnim = useRef(new Animated.Value(1)).current;
 
   const canSubmit = useMemo(() => username.trim().length > 0 && password.length > 0, [
     username,
@@ -65,60 +64,19 @@ function App() {
   }, [registerUsername, registerPassword, registerConfirmPassword]);
   const isAuthed = useMemo(() => Boolean(token), [token]);
 
-  const authAnimStyle = useMemo(
-    () => ({
-      opacity: authAnim,
-      transform: [
-        {
-          translateY: authAnim.interpolate({
-            inputRange: [0, 1],
-            outputRange: [12, 0],
-          }),
-        },
-      ],
-    }),
-    [authAnim]
-  );
-
   useEffect(() => {
     const loadSession = async () => {
-      const [storedToken, storedProfile] = await Promise.all([
-        storage.getString(TOKEN_KEY),
-        storage.getJson<Profile>(PROFILE_KEY),
-      ]);
-      setToken(storedToken || '');
-      setProfile(storedProfile || emptyProfile);
+      const storedToken = (await storage.getString(STORAGE_KEYS.token)) || '';
+      const storedProfile =
+        (await storage.getJson<Profile>(STORAGE_KEYS.profile)) || emptyProfile;
+      setToken(storedToken);
+      setProfile(storedProfile);
     };
-    void loadSession();
+    loadSession().catch(() => undefined);
   }, []);
 
-  useEffect(() => {
-    if (isAuthed) return;
-    const onBackPress = () => {
-      if (view === 'register') {
-        setRegisterError('');
-        setRegisterStatus('');
-        setRegisterConfirmPassword('');
-        setView('login');
-        return true;
-      }
-      return true;
-    };
-    const sub = BackHandler.addEventListener('hardwareBackPress', onBackPress);
-    return () => sub.remove();
-  }, [isAuthed, view]);
-
-  useEffect(() => {
-    authAnim.setValue(0);
-    Animated.timing(authAnim, {
-      toValue: 1,
-      duration: 220,
-      useNativeDriver: true,
-    }).start();
-  }, [authAnim, view]);
-
   const refreshProfile = useCallback(async () => {
-    const authToken = token || (await storage.getString(TOKEN_KEY)) || '';
+    const authToken = token || (await storage.getString(STORAGE_KEYS.token)) || '';
     if (!authToken) return;
     try {
       const response = await fetch(`${API_BASE}/api/profile`, {
@@ -127,7 +85,7 @@ function App() {
       const data = await response.json().catch(() => ({}));
       if (response.ok && data?.success && data?.user) {
         setProfile((prev) => ({ ...prev, ...data.user }));
-        await storage.setJson(PROFILE_KEY, {
+        await storage.setJson(STORAGE_KEYS.profile, {
           uid: data.user.uid,
           username: data.user.username,
           nickname: data.user.nickname,
@@ -158,8 +116,8 @@ function App() {
       region: data.region,
       tokenExpiresAt: data.tokenExpiresAt,
     };
-    await storage.setString(TOKEN_KEY, nextToken);
-    await storage.setJson(PROFILE_KEY, nextProfile);
+    await storage.setString(STORAGE_KEYS.token, nextToken);
+    await storage.setJson(STORAGE_KEYS.profile, nextProfile);
     setToken(nextToken);
     setProfile(nextProfile);
   };
@@ -276,10 +234,10 @@ function App() {
   };
 
   return (
-    <SafeAreaProvider>
-      <StatusBar barStyle={'dark-content'} />
-      {!isAuthed && view === 'login' ? (
-        <Animated.View style={authAnimStyle}>
+    <SafeAreaProvider style={styles.appRoot}>
+      <View style={styles.appRoot}>
+        <StatusBar barStyle={'dark-content'} />
+        {!isAuthed && view === 'login' ? (
           <Login
             username={username}
             password={password}
@@ -294,10 +252,8 @@ function App() {
             onSubmit={submit}
             onGoRegister={goRegister}
           />
-        </Animated.View>
-      ) : null}
-      {!isAuthed && view === 'register' ? (
-        <Animated.View style={authAnimStyle}>
+        ) : null}
+        {!isAuthed && view === 'register' ? (
           <Register
             username={registerUsername}
             password={registerPassword}
@@ -312,55 +268,57 @@ function App() {
             onSubmit={register}
             onBack={goLogin}
           />
-        </Animated.View>
-      ) : null}
-      {isAuthed ? (
-        <NavigationContainer>
-          <Stack.Navigator
-            screenOptions={{
-              headerShown: false,
-              presentation: 'card',
-              animation: 'slide_from_right',
-              gestureEnabled: true,
-              fullScreenGestureEnabled: true,
-              gestureDirection: 'horizontal',
-              contentStyle: { backgroundColor: '#f2f2f7' },
-            }}
-          >
-            <Stack.Screen name="Home">
-              {() => <Home profile={profile} />}
-            </Stack.Screen>
-            <Stack.Screen name="Profile">
-              {({ navigation }) => (
-                <Profile
-                  profile={profile}
-                  onBack={() => navigation.goBack()}
-                  onEdit={() => navigation.navigate('EditProfile')}
-                  onRefresh={refreshProfile}
-                />
-              )}
-            </Stack.Screen>
-            <Stack.Screen
-              name="FriendProfile"
-              component={FriendProfile}
-              options={{ animation: 'slide_from_right' }}
-            />
-            <Stack.Screen name="EditProfile">
-              {({ navigation }) => (
-                <EditProfile
-                  initialProfile={profile}
-                  onBack={() => navigation.goBack()}
-                  onSaved={(next) => {
-                    setProfile((prev) => ({ ...prev, ...next }));
-                  }}
-                />
-              )}
-            </Stack.Screen>
-          </Stack.Navigator>
-        </NavigationContainer>
-      ) : null}
+        ) : null}
+        {isAuthed ? (
+          <View style={styles.appRoot}>
+            <NavigationContainer style={styles.appRoot}>
+              <Stack.Navigator
+                screenOptions={{
+                  headerShown: false,
+                  contentStyle: { backgroundColor: '#f2f2f7' },
+                }}
+              >
+                <Stack.Screen name="Home">
+                  {() => <Home profile={profile} />}
+                </Stack.Screen>
+                <Stack.Screen name="Profile">
+                  {({ navigation }) => (
+                    <Profile
+                      profile={profile}
+                      onBack={() => navigation.goBack()}
+                      onEdit={() => navigation.navigate('EditProfile')}
+                      onRefresh={refreshProfile}
+                    />
+                  )}
+                </Stack.Screen>
+                <Stack.Screen name="EditProfile">
+                  {({ navigation }) => (
+                    <EditProfile
+                      initialProfile={profile}
+                      onBack={() => navigation.goBack()}
+                      onSaved={(next) => {
+                        setProfile((prev) => ({ ...prev, ...next }));
+                      }}
+                    />
+                  )}
+                </Stack.Screen>
+                <Stack.Screen name="QRScan" component={QRScan} />
+                <Stack.Screen name="InAppBrowser" component={InAppBrowser} />
+              </Stack.Navigator>
+            </NavigationContainer>
+          </View>
+        ) : null}
+      </View>
     </SafeAreaProvider>
   );
 }
 
+const styles = StyleSheet.create({
+  appRoot: {
+    flex: 1,
+    minHeight: '100%',
+  },
+});
+
 export default App;
+

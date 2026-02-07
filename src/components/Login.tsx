@@ -1,5 +1,7 @@
 import React from 'react';
 import {
+  ActivityIndicator,
+  Platform,
   Pressable,
   StyleSheet,
   Text,
@@ -8,7 +10,6 @@ import {
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import Svg, { Circle, Line, Path } from 'react-native-svg';
-import UIButton from './UIButton';
 
 type Props = {
   username: string;
@@ -24,6 +25,19 @@ type Props = {
   onSubmit: () => void;
   onGoRegister: () => void;
 };
+
+const inputShadowStyle =
+  Platform.OS === 'web'
+    ? { boxShadow: '0px 2px 8px rgba(0, 0, 0, 0.08)' }
+    : {
+        shadowColor: '#000',
+        shadowOpacity: 0.04,
+        shadowOffset: { width: 0, height: 2 },
+        shadowRadius: 8,
+        elevation: 1,
+      };
+const webInputNoOutline =
+  Platform.OS === 'web' ? ({ outlineStyle: 'none', boxShadow: 'none' } as any) : null;
 
 export default function Login({
   username,
@@ -56,10 +70,10 @@ export default function Login({
         <View style={styles.inputGroup}>
           <TextInput
             value={username}
-            placeholder="输入账号"
+            placeholder="输入昵称"
             placeholderTextColor="#c0c4cc"
             onChangeText={onUsernameChange}
-            style={styles.input}
+            style={[styles.input, webInputNoOutline]}
             autoCapitalize="none"
           />
         </View>
@@ -70,7 +84,7 @@ export default function Login({
             placeholder="输入信聊密码"
             placeholderTextColor="#c0c4cc"
             onChangeText={onPasswordChange}
-            style={styles.input}
+            style={[styles.input, webInputNoOutline]}
             autoCapitalize="none"
             secureTextEntry={!showPassword}
           />
@@ -79,13 +93,17 @@ export default function Login({
           </Pressable>
         </View>
 
-        <UIButton
-          title={loading ? '登录中' : '登录'}
+        <Pressable
+          style={[styles.loginBtn, (!canSubmit || loading) && styles.loginBtnDisabled]}
+          disabled={!canSubmit || loading}
           onPress={onSubmit}
-          disabled={!canSubmit}
-          loading={loading}
-          style={styles.loginBtn}
-        />
+        >
+          {loading ? (
+            <ActivityIndicator color="#fff" />
+          ) : (
+            <Text style={styles.loginBtnText}>登录</Text>
+          )}
+        </Pressable>
 
         {error ? <Text style={styles.error}>{error}</Text> : null}
         {!error && status ? <Text style={styles.success}>{status}</Text> : null}
@@ -104,6 +122,8 @@ export default function Login({
 const styles = StyleSheet.create({
   page: {
     flex: 1,
+    flexGrow: 1,
+    minHeight: '100%',
     backgroundColor: '#f2f3f5',
     paddingHorizontal: 24,
   },
@@ -123,12 +143,13 @@ const styles = StyleSheet.create({
   },
   inputGroup: {
     backgroundColor: '#fff',
-    borderRadius: 10,
-    height: 52,
+    borderRadius: 12,
+    height: 54,
     paddingHorizontal: 16,
     flexDirection: 'row',
     alignItems: 'center',
     gap: 8,
+    ...inputShadowStyle,
     position: 'relative',
   },
   input: {
@@ -148,6 +169,19 @@ const styles = StyleSheet.create({
   loginBtn: {
     marginTop: 20,
     height: 50,
+    borderRadius: 12,
+    backgroundColor: '#4a9df8',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  loginBtnDisabled: {
+    opacity: 0.6,
+  },
+  loginBtnText: {
+    color: '#fff',
+    fontSize: 17,
+    fontWeight: '600',
+    letterSpacing: 1,
   },
   error: {
     color: '#b5482b',
@@ -159,6 +193,7 @@ const styles = StyleSheet.create({
   },
   footer: {
     marginTop: 'auto',
+    flexShrink: 0,
     alignItems: 'center',
     gap: 12,
   },

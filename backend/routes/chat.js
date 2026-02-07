@@ -5,7 +5,7 @@ import path from 'path';
 import crypto from 'crypto';
 import { fileURLToPath } from 'url';
 import initSqlJs from 'sql.js';
-import { findUserByToken, readUsers, writeUsers } from './auth.js';
+import { createAuthenticateMiddleware } from './session.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -135,6 +135,15 @@ const guessExtension = (name, mime) => {
   return map[mime] || 'bin';
 };
 
+const resolvePathWithinRoot = (rootDir, relativePath) => {
+  if (typeof relativePath !== 'string' || !relativePath.trim()) return '';
+  if (relativePath.includes('\0')) return '';
+  const root = path.resolve(rootDir);
+  const resolved = path.resolve(root, relativePath);
+  if (resolved === root) return '';
+  return resolved.startsWith(`${root}${path.sep}`) ? resolved : '';
+};
+
 const cleanupUserFiles = async () => {
   const now = Date.now();
   await fs.mkdir(USERFILE_DIR, { recursive: true });
@@ -214,7 +223,7 @@ const storeUserFileBuffer = async (buffer, senderUid, name, mime) => {
 const storeUserFileFromPath = async (sourcePath, senderUid, name, mime) => {
   const stat = await fs.stat(sourcePath);
   if (stat.size > MAX_FILE_BYTES) {
-    throw new Error('File too large.');
+    throw new Error('文件过大。');
   }
   const buffer = await fs.readFile(sourcePath);
   return storeUserFileBuffer(buffer, senderUid, name, mime);
@@ -263,7 +272,7 @@ const readStreamToFile = (req, tempPath, maxBytes) =>
       size += chunk.length;
       if (size > maxBytes) {
         req.destroy();
-        cleanup(new Error('File too large.'));
+        cleanup(new Error('文件过大。'));
         return;
       }
       hash.update(chunk);
@@ -286,7 +295,7 @@ const readStreamToBuffer = (req, maxBytes) =>
       size += chunk.length;
       if (size > maxBytes) {
         req.destroy();
-        reject(new Error('File too large.'));
+        reject(new Error('文件过大。'));
         return;
       }
       chunks.push(chunk);
@@ -485,39 +494,7 @@ const ensureChatStorage = async () => {
   }
 };
 
-const extractToken = (req) => {
-  const header = req.headers.authorization || '';
-  if (header.toLowerCase().startsWith('bearer ')) {
-    return header.slice(7).trim();
-  }
-  return req.body?.token || req.query?.token || '';
-};
-
-const authenticate = async (req, res, next) => {
-  try {
-    const token = extractToken(req);
-    if (!token) {
-      res.status(401).json({ success: false, message: 'Missing token.' });
-      return;
-    }
-
-    const users = await readUsers();
-    const found = findUserByToken(users, token);
-    if (found.touched) {
-      await writeUsers(users);
-    }
-    if (!found.user) {
-      res.status(401).json({ success: false, message: 'Invalid token.' });
-      return;
-    }
-
-    req.auth = { user: found.user, userIndex: found.userIndex, users };
-    next();
-  } catch (error) {
-    console.error('Chat authenticate error:', error);
-    res.status(500).json({ success: false, message: 'Server error.' });
-  }
-};
+const authenticate = createAuthenticateMiddleware({ scope: 'Chat' });
 
 const toMessage = (row) => {
   let data = {};
@@ -537,35 +514,48 @@ const toMessage = (row) => {
   };
 };
 
+const parseReadAtMap = (value) => {
+  const source = value && typeof value === 'object' ? value : {};
+  const result = {};
+  Object.entries(source).forEach(([uid, ts]) => {
+    const parsedUid = Number(uid);
+    const parsedTs = Number(ts);
+    if (Number.isInteger(parsedUid) && Number.isFinite(parsedTs) && parsedTs > 0) {
+      result[parsedUid] = parsedTs;
+    }
+  });
+  return result;
+};
+
 router.post('/send', authenticate, async (req, res) => {
   try {
     await ensureChatStorage();
     const body = req.body || {};
     if (!isValidType(body.type)) {
-      res.status(400).json({ success: false, message: 'Invalid message type.' });
+      res.status(400).json({ success: false, message: '无效的消息类型。' });
       return;
     }
     if (!isValidTargetType(body.targetType)) {
-      res.status(400).json({ success: false, message: 'Invalid target type.' });
+      res.status(400).json({ success: false, message: '无效的目标类型。' });
       return;
     }
 
     const senderUid = Number(body.senderUid);
     const targetUid = Number(body.targetUid);
     if (!Number.isInteger(senderUid) || !Number.isInteger(targetUid)) {
-      res.status(400).json({ success: false, message: 'Invalid sender/target uid.' });
+      res.status(400).json({ success: false, message: '发送者或目标用户编号无效。' });
       return;
     }
 
     const { user, users } = req.auth;
     if (user.uid !== senderUid) {
-      res.status(403).json({ success: false, message: 'Sender mismatch.' });
+      res.status(403).json({ success: false, message: '发送者身份不匹配。' });
       return;
     }
 
     const targetUser = users.find((item) => item.uid === targetUid);
     if (!targetUser) {
-      res.status(404).json({ success: false, message: 'Target user not found.' });
+      res.status(404).json({ success: false, message: '目标用户不存在。' });
       return;
     }
 
@@ -575,7 +565,7 @@ router.post('/send', authenticate, async (req, res) => {
       Array.isArray(targetUser.friends) &&
       targetUser.friends.includes(user.uid);
     if (!isMutualFriend) {
-      res.status(403).json({ success: false, message: 'Not mutual friends.' });
+      res.status(403).json({ success: false, message: '对方不是互为好友。' });
       return;
     }
 
@@ -677,11 +667,11 @@ router.post('/send', authenticate, async (req, res) => {
       if (rawDataUrl) {
         const parsed = parseDataUrl(rawDataUrl);
         if (!parsed) {
-          res.status(400).json({ success: false, message: 'Invalid file data.' });
+          res.status(400).json({ success: false, message: '文件数据无效。' });
           return;
         }
         if (parsed.buffer.length > MAX_FILE_BYTES) {
-          res.status(400).json({ success: false, message: 'File too large.' });
+          res.status(400).json({ success: false, message: '文件过大。' });
           return;
         }
         mime = parsed.mime || mime;
@@ -701,21 +691,25 @@ router.post('/send', authenticate, async (req, res) => {
           parsedUrl = null;
         }
         if (!parsedUrl || !parsedUrl.pathname.startsWith('/uploads/userfile/')) {
-          res.status(400).json({ success: false, message: 'Invalid file url.' });
+          res.status(400).json({ success: false, message: '文件地址无效。' });
           return;
         }
         const relativePath = decodeURIComponent(
           parsedUrl.pathname.replace('/uploads/userfile/', '')
         );
-        const sourcePath = path.join(USERFILE_DIR, relativePath);
+        const sourcePath = resolvePathWithinRoot(USERFILE_DIR, relativePath);
+        if (!sourcePath) {
+          res.status(400).json({ success: false, message: '文件地址无效。' });
+          return;
+        }
         if (!(await fileExists(sourcePath))) {
-          res.status(404).json({ success: false, message: 'Source file missing.' });
+          res.status(404).json({ success: false, message: '源文件不存在。' });
           return;
         }
         const stat = await fs.stat(sourcePath);
         size = stat.size;
         if (size > MAX_FILE_BYTES) {
-          res.status(400).json({ success: false, message: 'File too large.' });
+          res.status(400).json({ success: false, message: '文件过大。' });
           return;
         }
         const stored = await storeUserFileFromPath(
@@ -726,7 +720,7 @@ router.post('/send', authenticate, async (req, res) => {
         );
         filename = stored.filename;
       } else {
-        res.status(400).json({ success: false, message: 'Missing file data.' });
+        res.status(400).json({ success: false, message: '缺少文件数据。' });
         return;
       }
 
@@ -775,7 +769,7 @@ router.post('/send', authenticate, async (req, res) => {
     res.json({ success: true, data: entry });
   } catch (error) {
     console.error('Chat send error:', error);
-    res.status(500).json({ success: false, message: 'Chat send failed.' });
+    res.status(500).json({ success: false, message: '发送消息失败。' });
   }
 });
 
@@ -806,11 +800,11 @@ router.post('/upload/image', authenticate, async (req, res) => {
         buffer = Buffer.from(bodyText, 'base64');
       }
       if (!buffer || !buffer.length) {
-        res.status(400).json({ success: false, message: 'Invalid image data.' });
+        res.status(400).json({ success: false, message: '图片数据无效。' });
         return;
       }
       if (buffer.length > MAX_FILE_BYTES) {
-        res.status(400).json({ success: false, message: 'File too large.' });
+        res.status(400).json({ success: false, message: '文件过大。' });
         return;
       }
       if (!IMAGE_EXTS.includes(ext)) {
@@ -859,7 +853,7 @@ router.post('/upload/image', authenticate, async (req, res) => {
     });
   } catch (error) {
     console.error('Image upload error:', error);
-    const message = error?.message === 'File too large.' ? 'File too large.' : 'Upload failed.';
+    const message = error?.message === '文件过大。' ? '文件过大。' : '上传失败。';
     res.status(400).json({ success: false, message });
   }
 });
@@ -922,7 +916,7 @@ router.post('/upload/file', authenticate, async (req, res) => {
     });
   } catch (error) {
     console.error('File upload error:', error);
-    const message = error?.message === 'File too large.' ? 'File too large.' : 'Upload failed.';
+    const message = error?.message === '文件过大。' ? '文件过大。' : '上传失败。';
     res.status(400).json({ success: false, message });
   }
 });
@@ -946,15 +940,15 @@ router.get('/get', authenticate, async (req, res) => {
     let beforeMs = 0;
 
     if (!isValidTargetType(targetType)) {
-      res.status(400).json({ success: false, message: 'Invalid target type.' });
+      res.status(400).json({ success: false, message: '无效的目标类型。' });
       return;
     }
     if (!Number.isInteger(targetUid)) {
-      res.status(400).json({ success: false, message: 'Invalid target uid.' });
+      res.status(400).json({ success: false, message: '目标用户编号无效。' });
       return;
     }
     if (type && !isValidType(type)) {
-      res.status(400).json({ success: false, message: 'Invalid message type.' });
+      res.status(400).json({ success: false, message: '无效的消息类型。' });
       return;
     }
 
@@ -984,7 +978,7 @@ router.get('/get', authenticate, async (req, res) => {
     const { user, users } = req.auth;
     const targetUser = users.find((item) => item.uid === targetUid);
     if (!targetUser) {
-      res.status(404).json({ success: false, message: 'Target user not found.' });
+      res.status(404).json({ success: false, message: '目标用户不存在。' });
       return;
     }
     const isMutualFriend =
@@ -993,7 +987,7 @@ router.get('/get', authenticate, async (req, res) => {
       Array.isArray(targetUser.friends) &&
       targetUser.friends.includes(user.uid);
     if (!isMutualFriend) {
-      res.status(403).json({ success: false, message: 'Not mutual friends.' });
+      res.status(403).json({ success: false, message: '对方不是互为好友。' });
       return;
     }
 
@@ -1067,16 +1061,89 @@ router.get('/get', authenticate, async (req, res) => {
     res.json({ success: true, data });
   } catch (error) {
     console.error('Chat get error:', error);
-    res.status(500).json({ success: false, message: 'Chat fetch failed.' });
+    res.status(500).json({ success: false, message: '获取消息失败。' });
   }
 });
 
-router.delete('/del', async (req, res) => {
+router.post('/overview', authenticate, async (req, res) => {
+  try {
+    await ensureChatStorage();
+    const { user, users } = req.auth;
+    const friendIds = (Array.isArray(user.friends) ? user.friends : []).filter((uid) => {
+      if (!Number.isInteger(uid)) return false;
+      const target = users.find((item) => item.uid === uid);
+      return (
+        Boolean(target) &&
+        Array.isArray(target.friends) &&
+        target.friends.includes(user.uid)
+      );
+    });
+    if (!friendIds.length) {
+      res.json({ success: true, data: [] });
+      return;
+    }
+
+    const readAtRaw = req.body?.readAt;
+    let readAtSource = readAtRaw;
+    if (typeof readAtRaw === 'string') {
+      try {
+        readAtSource = JSON.parse(readAtRaw || '{}');
+      } catch {
+        readAtSource = {};
+      }
+    }
+    const readAt = parseReadAtMap(readAtSource);
+    const friendSet = new Set(friendIds);
+    const latestMap = {};
+    const unreadMap = {};
+
+    const database = await openDb();
+    const stmt = database.prepare(`
+      SELECT id, type, senderUid, targetUid, targetType, data, createdAt, createdAtMs
+      FROM messages
+      WHERE targetType = 'private' AND (senderUid = ? OR targetUid = ?)
+      ORDER BY createdAtMs DESC
+    `);
+    stmt.bind([user.uid, user.uid]);
+    while (stmt.step()) {
+      const row = stmt.getAsObject();
+      const senderUid = Number(row.senderUid);
+      const targetUid = Number(row.targetUid);
+      const createdAtMs = Number(row.createdAtMs) || 0;
+      const friendUid = senderUid === user.uid ? targetUid : senderUid;
+      if (!friendSet.has(friendUid)) {
+        continue;
+      }
+      if (!latestMap[friendUid]) {
+        latestMap[friendUid] = toMessage(row);
+      }
+      if (row.type === 'text' && senderUid !== user.uid) {
+        const seenAt = Number(readAt[friendUid]) || 0;
+        if (createdAtMs > seenAt) {
+          unreadMap[friendUid] = (unreadMap[friendUid] || 0) + 1;
+        }
+      }
+    }
+    stmt.free();
+
+    const data = friendIds.map((uid) => ({
+      uid,
+      latest: latestMap[uid] || null,
+      unread: Math.min(unreadMap[uid] || 0, 99),
+    }));
+    res.json({ success: true, data });
+  } catch (error) {
+    console.error('Chat overview error:', error);
+    res.status(500).json({ success: false, message: '获取会话概览失败。' });
+  }
+});
+
+router.delete('/del', authenticate, async (req, res) => {
   try {
     await ensureChatStorage();
     const { id } = req.body || {};
     if (typeof id !== 'string' || id.trim() === '') {
-      res.status(400).json({ success: false, message: 'Missing message id.' });
+      res.status(400).json({ success: false, message: '缺少消息编号。' });
       return;
     }
 
@@ -1087,11 +1154,25 @@ router.delete('/del', async (req, res) => {
     selectStmt.bind([id]);
     if (!selectStmt.step()) {
       selectStmt.free();
-      res.status(404).json({ success: false, message: 'Message not found.' });
+      res.status(404).json({ success: false, message: '消息不存在。' });
       return;
     }
     const existing = selectStmt.getAsObject();
     selectStmt.free();
+
+    const { user } = req.auth;
+    const senderUid = Number(existing.senderUid);
+    const targetUid = Number(existing.targetUid);
+    const targetType = String(existing.targetType || '');
+    const isSender = Number.isInteger(senderUid) && senderUid === user.uid;
+    const isPrivateRecipient =
+      targetType === 'private' &&
+      Number.isInteger(targetUid) &&
+      targetUid === user.uid;
+    if (!isSender && !isPrivateRecipient) {
+      res.status(403).json({ success: false, message: '无权删除该消息。' });
+      return;
+    }
 
     const delStmt = database.prepare('DELETE FROM messages WHERE id = ?');
     delStmt.run([id]);
@@ -1100,7 +1181,7 @@ router.delete('/del', async (req, res) => {
     res.json({ success: true, data: toMessage(existing) });
   } catch (error) {
     console.error('Chat delete error:', error);
-    res.status(500).json({ success: false, message: 'Chat delete failed.' });
+    res.status(500).json({ success: false, message: '删除消息失败。' });
   }
 });
 

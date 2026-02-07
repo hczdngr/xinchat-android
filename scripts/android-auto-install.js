@@ -3,7 +3,7 @@ const path = require('path');
 const { spawn } = require('child_process');
 
 const ROOT = path.resolve(__dirname, '..');
-const DEVICE = process.env.ADB_DEVICE || '192.168.0.2:5555';
+const DEVICE = (process.env.ADB_DEVICE || process.env.ANDROID_SERIAL || '').trim();
 const APK_PATH = path.join(
   ROOT,
   'android',
@@ -50,14 +50,17 @@ const buildAndInstall = async () => {
   }
   running = true;
   try {
-    await run('adb', ['connect', DEVICE]);
+    if (DEVICE.includes(':')) {
+      await run('adb', ['connect', DEVICE]);
+    }
     await run('cmd', ['/c', 'gradlew.bat', 'assembleDebug'], {
       cwd: path.join(ROOT, 'android'),
     });
     if (!fs.existsSync(APK_PATH)) {
       throw new Error(`APK not found: ${APK_PATH}`);
     }
-    await run('adb', ['-s', DEVICE, 'install', '-r', APK_PATH]);
+    const installArgs = DEVICE ? ['-s', DEVICE, 'install', '-r', APK_PATH] : ['install', '-r', APK_PATH];
+    await run('adb', installArgs);
     log('install complete.');
   } catch (err) {
     log(`error: ${err instanceof Error ? err.message : String(err)}`);
@@ -76,7 +79,7 @@ const scheduleBuild = () => {
   }
   timer = setTimeout(() => {
     timer = null;
-    void buildAndInstall();
+    buildAndInstall().catch(() => undefined);
   }, DEBOUNCE_MS);
 };
 

@@ -73,3 +73,22 @@ yarn-error.log
 !.yarn/releases
 !.yarn/sdks
 !.yarn/versions
+
+# Environment
+.env
+.env.*
+!.env.example
+
+# Web build artifacts
+dist/
+.cache/
+tmp/
+*.tmp
+
+# Backend runtime data (local only)
+backend/data/*
+!backend/data/.gitkeep
+backend/*.sqlite
+backend/**/*.sqlite
+backend/.env
+backend/.env.*
