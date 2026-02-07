@@ -40,6 +40,7 @@ const CLEANUP_INTERVAL_MS = 60 * 60 * 1000;
 let lastCleanupAt = 0;
 const MAX_STICKER_BYTES = 20 * 1024 * 1024;
 const MAX_STICKERS_PER_USER = 300;
+const MAX_STICKER_BATCH_UPLOAD = 9;
 const ALLOWED_STICKER_EXTS = new Set(['png', 'jpg', 'jpeg', 'gif', 'webp']);
 
 let sqlModule = null;
@@ -217,7 +218,7 @@ const getUserStickerList = (uid) => {
   return list;
 };
 
-const upsertUserSticker = async ({ uid, hash, ext, mime, size, url }) => {
+const upsertUserSticker = async ({ uid, hash, ext, mime, size, url, skipPersist = false }) => {
   await ensureStickerStore();
   const now = new Date().toISOString();
   const safeExt = String(ext || '').trim().toLowerCase();
@@ -252,7 +253,9 @@ const upsertUserSticker = async ({ uid, hash, ext, mime, size, url }) => {
     items: nextItems,
     updatedAt: now,
   };
-  await queueStickerStorePersist();
+  if (!skipPersist) {
+    await queueStickerStorePersist();
+  }
   return stickerStoreCache.byHash[safeHash];
 };
 
@@ -742,7 +745,36 @@ router.post('/send', authenticate, async (req, res) => {
     const { type, senderUid: _, targetUid: __, targetType: ___, ...data } = body;
     const messageData = { ...data };
     const baseUrl = `${req.protocol}://${req.get('host')}`;
+    if (type === 'text') {
+      const contentRaw =
+        typeof messageData.content === 'string'
+          ? messageData.content
+          : typeof messageData.text === 'string'
+            ? messageData.text
+            : '';
+      const content = String(contentRaw || '').trim();
+      const hasImagePayload =
+        (typeof messageData.url === 'string' && messageData.url.trim().length > 0) ||
+        (Array.isArray(messageData.urls) && messageData.urls.length > 0) ||
+        (messageData.hashData && typeof messageData.hashData === 'object');
+      if (!content) {
+        res.status(400).json({ success: false, message: '文本消息不能为空。' });
+        return;
+      }
+      if (hasImagePayload) {
+        res.status(400).json({ success: false, message: '不支持图文一起发送。' });
+        return;
+      }
+      messageData.content = content;
+      delete messageData.text;
+    }
     if (type === 'image') {
+      const textContent = typeof messageData.content === 'string' ? messageData.content.trim() : '';
+      const textAlias = typeof messageData.text === 'string' ? messageData.text.trim() : '';
+      if (textContent || textAlias) {
+        res.status(400).json({ success: false, message: '不支持图文一起发送。' });
+        return;
+      }
       const hashUrlMap = new Map();
       const hashData =
         messageData.hashData && typeof messageData.hashData === 'object'
@@ -796,6 +828,10 @@ router.post('/send', authenticate, async (req, res) => {
         return foundUrl;
       };
       if (Array.isArray(messageData.urls)) {
+        if (messageData.urls.length !== 1) {
+          res.status(400).json({ success: false, message: '图片消息仅支持单张发送。' });
+          return;
+        }
         const urls = [];
         for (const item of messageData.urls) {
           const normalized = await normalizeImageValue(item);
@@ -803,23 +839,28 @@ router.post('/send', authenticate, async (req, res) => {
             urls.push(normalized);
           }
         }
-        messageData.urls = urls;
+        if (!urls.length || !urls[0]) {
+          res.status(400).json({ success: false, message: '图片消息不能为空。' });
+          return;
+        }
+        messageData.url = urls[0];
+        delete messageData.urls;
       } else {
         const rawUrl =
           typeof messageData.url === 'string' ? messageData.url.trim() : '';
-        const fallbackUrl =
-          !rawUrl && typeof messageData.content === 'string'
-            ? messageData.content.trim()
-            : '';
-        const candidateUrl = rawUrl || fallbackUrl;
-        if (candidateUrl) {
-          const normalized = await normalizeImageValue(candidateUrl);
-          messageData.url = normalized;
-          if (!rawUrl && messageData.content === candidateUrl) {
-            delete messageData.content;
-          }
+        if (!rawUrl) {
+          res.status(400).json({ success: false, message: '图片消息不能为空。' });
+          return;
         }
+        const normalized = await normalizeImageValue(rawUrl);
+        if (!normalized || !String(normalized).trim()) {
+          res.status(400).json({ success: false, message: '图片消息不能为空。' });
+          return;
+        }
+        messageData.url = normalized;
       }
+      delete messageData.content;
+      delete messageData.text;
     }
     if (type === 'file') {
       const rawDataUrl =
@@ -952,6 +993,62 @@ router.get('/stickers/list', authenticate, async (req, res) => {
   } catch (error) {
     console.error('Sticker list error:', error);
     res.status(500).json({ success: false, message: '获取贴纸失败。' });
+  }
+});
+
+router.post('/stickers/upload/batch', authenticate, async (req, res) => {
+  try {
+    await ensureChatStorage();
+    const body = req.body || {};
+    const items = Array.isArray(body.items) ? body.items.slice(0, MAX_STICKER_BATCH_UPLOAD) : [];
+    if (!items.length) {
+      res.status(400).json({ success: false, message: '贴纸列表不能为空。' });
+      return;
+    }
+    const parseStickerItem = (item) => {
+      const rawDataUrl = typeof item?.dataUrl === 'string' ? item.dataUrl.trim() : '';
+      const rawMime = typeof item?.mime === 'string' ? item.mime.trim().toLowerCase() : '';
+      const rawBase64 = typeof item?.base64 === 'string' ? item.base64.trim() : '';
+      let parsed = rawDataUrl ? parseImageDataUrl(rawDataUrl) : null;
+      if (!parsed && rawBase64 && rawMime) {
+        parsed = parseImageDataUrl(`data:${rawMime};base64,${rawBase64}`);
+      }
+      if (!parsed) return null;
+      if (parsed.buffer.length <= 0 || parsed.buffer.length > MAX_STICKER_BYTES) return null;
+      return parsed;
+    };
+
+    const parsedItems = items.map(parseStickerItem).filter(Boolean);
+    if (!parsedItems.length) {
+      res.status(400).json({ success: false, message: '贴纸格式无效。' });
+      return;
+    }
+
+    const uid = req.auth.user.uid;
+    const baseUrl = `${req.protocol}://${req.get('host')}`;
+    const uploaded = [];
+    for (const parsed of parsedItems) {
+      const stored = await storeImageBuffer(parsed.buffer, parsed.ext);
+      const url = `${baseUrl}/uploads/images/${stored.filename}`;
+      const sticker = await upsertUserSticker({
+        uid,
+        hash: stored.hash,
+        ext: parsed.ext,
+        mime: parsed.mime,
+        size: parsed.buffer.length,
+        url,
+        skipPersist: true,
+      });
+      uploaded.push(sticker);
+    }
+    if (uploaded.length > 0) {
+      await queueStickerStorePersist();
+    }
+    const list = getUserStickerList(uid);
+    res.json({ success: true, data: { uploaded, stickers: list } });
+  } catch (error) {
+    console.error('Sticker batch upload error:', error);
+    res.status(400).json({ success: false, message: '贴纸批量上传失败。' });
   }
 });
 

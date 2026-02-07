@@ -376,25 +376,29 @@ export default function GroupChatSettings() {
   }, [editorField, editorValue, editorVisible, saveGroupRemark, saving, updateGroup]);
 
   const clearLocalGroupCaches = useCallback(async () => {
-    const [cachedMessages, cachedLatest, cachedUnread, hiddenChats] = await Promise.all([
+    const [cachedMessages, cachedLatest, cachedUnread, hiddenChats, readAtMap] = await Promise.all([
       storage.getJson<Record<number, any>>(STORAGE_KEYS.homeMessagesCache),
       storage.getJson<Record<number, any>>(STORAGE_KEYS.homeLatestCache),
       storage.getJson<Record<number, any>>(STORAGE_KEYS.homeUnreadCache),
       storage.getJson<Record<number, any>>(STORAGE_KEYS.hiddenChats),
+      storage.getJson<Record<number, number>>(STORAGE_KEYS.readAt),
     ]);
     const nextMessages = { ...(cachedMessages || {}) };
     const nextLatest = { ...(cachedLatest || {}) };
     const nextUnread = { ...(cachedUnread || {}) };
     const nextHidden = sanitizeBoolMap(hiddenChats);
+    const nextReadAt = { ...(readAtMap || {}) };
     delete nextMessages[uid];
     delete nextLatest[uid];
     delete nextUnread[uid];
     delete nextHidden[uid];
+    delete nextReadAt[uid];
     await Promise.all([
       storage.setJson(STORAGE_KEYS.homeMessagesCache, nextMessages),
       storage.setJson(STORAGE_KEYS.homeLatestCache, nextLatest),
       storage.setJson(STORAGE_KEYS.homeUnreadCache, nextUnread),
       storage.setJson(STORAGE_KEYS.hiddenChats, nextHidden),
+      storage.setJson(STORAGE_KEYS.readAt, nextReadAt),
     ]);
   }, [uid]);
 
@@ -499,7 +503,7 @@ export default function GroupChatSettings() {
             });
             const data = await response.json().catch(() => ({}));
             if (!response.ok || !data?.success) {
-              if (response.status === 404) {
+              if (response.status === 404 || response.status === 403) {
                 await commitLeave();
                 return;
               }
@@ -508,7 +512,7 @@ export default function GroupChatSettings() {
             }
             await commitLeave();
           } catch {
-            await commitLeave();
+            Alert.alert('退出失败', '网络异常，请稍后重试。');
           } finally {
             setLeaving(false);
           }

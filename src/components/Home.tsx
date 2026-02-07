@@ -1,5 +1,6 @@
 ﻿import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
+  AppState,
   Animated,
   BackHandler,
   Dimensions,
@@ -28,7 +29,13 @@ import {
 import { STORAGE_KEYS } from '../constants/storageKeys';
 import { storage } from '../storage';
 import FoundFriends from './FoundFriends';
-import { pickImageForPlatform } from '../utils/pickImage';
+import { getUnreadBadgeTone, shouldNotifyIncomingMessage } from '../utils/chatNotificationRules';
+import { pickImagesForPlatform } from '../utils/pickImage';
+import {
+  cancelChatSystemNotification,
+  ensureSystemNotificationPermission,
+  notifyIncomingSystemMessage,
+} from '../utils/systemNotification';
 
 type Profile = {
   uid?: number;
@@ -151,7 +158,8 @@ const EDGE_BACK_HIT_WIDTH = 28;
 const EDGE_BACK_DISTANCE = 96;
 const EDGE_BACK_VELOCITY = 0.55;
 const MAX_RECENT_EMOJIS = 14;
-const MAX_CUSTOM_STICKERS_LOCAL = 300;
+const MAX_STICKER_BATCH_PICK = 9;
+const MAX_CHAT_IMAGE_PICK = 9;
 const DEFAULT_RECENT_EMOJIS = ['🥹', '😭', '😱', '🥺', '😂', '😍', '👍', '🤔', '😎', '🙏', '🥰', '🤗', '😆', '🤭'];
 const SUPER_EMOJIS = [
   '🤣',
@@ -493,6 +501,7 @@ export default function Home({ profile }: { profile: Profile }) {
   const [recentEmojis, setRecentEmojis] = useState<string[]>(DEFAULT_RECENT_EMOJIS);
   const [customStickers, setCustomStickers] = useState<CustomSticker[]>([]);
   const [customStickerUploading, setCustomStickerUploading] = useState(false);
+  const [chatImageSending, setChatImageSending] = useState(false);
   const [activeView, setActiveView] = useState<'list' | 'found'>('list');
   const [foundFriendsInitialTab, setFoundFriendsInitialTab] = useState<'search' | 'requests'>(
     'search'
@@ -603,6 +612,8 @@ export default function Home({ profile }: { profile: Profile }) {
   const messagesByUidRef = useRef<BucketMap>({});
   const readAtMapRef = useRef<ReadAtMap>({});
   const mutedMapRef = useRef<MutedMap>({});
+  const appStateRef = useRef<string>(AppState.currentState || 'active');
+  const friendsRef = useRef<Friend[]>([]);
   const groupsRef = useRef<Group[]>([]);
   const historyLoadingRef = useRef<Record<number, boolean>>({});
   const historyHasMoreRef = useRef<Record<number, boolean>>({});
@@ -666,6 +677,10 @@ export default function Home({ profile }: { profile: Profile }) {
   }, [mutedMap]);
 
   useEffect(() => {
+    friendsRef.current = friends;
+  }, [friends]);
+
+  useEffect(() => {
     groupsRef.current = groups;
   }, [groups]);
 
@@ -700,6 +715,18 @@ export default function Home({ profile }: { profile: Profile }) {
     };
     loadToken().catch(() => undefined);
   }, []);
+
+  useEffect(() => {
+    const sub = AppState.addEventListener('change', (nextState) => {
+      appStateRef.current = String(nextState || 'active');
+    });
+    return () => sub.remove();
+  }, []);
+
+  useEffect(() => {
+    if (!tokenReady || !tokenRef.current) return;
+    ensureSystemNotificationPermission().catch(() => undefined);
+  }, [tokenReady]);
 
   useEffect(() => {
     const loadProfile = async () => {
@@ -1188,10 +1215,6 @@ export default function Home({ profile }: { profile: Profile }) {
 
   const recalcUnread = useCallback(
     (uid: number, list?: Message[]) => {
-      if (mutedMapRef.current[uid]) {
-        setUnreadMap((prev) => ({ ...prev, [uid]: 0 }));
-        return;
-      }
       const bucket = list || messagesByUidRef.current[uid] || [];
       const readAt = getReadAt(uid);
       const count = bucket.filter(
@@ -1328,7 +1351,7 @@ export default function Home({ profile }: { profile: Profile }) {
         const nextUnread = Number.isFinite(Number(entry?.unread))
           ? Math.min(Math.max(Number(entry.unread), 0), 99)
           : 0;
-        unreadPatch[uid] = mutedMapRef.current[uid] ? 0 : nextUnread;
+        unreadPatch[uid] = nextUnread;
         if (entry?.latest) {
           const normalized = normalizeMessage(entry.latest);
           latestPatch[uid] = {
@@ -1411,6 +1434,7 @@ export default function Home({ profile }: { profile: Profile }) {
       const lastTime = last ? last.createdAtMs : Date.now();
       setReadAt(uid, lastTime);
       setUnreadMap((prev) => ({ ...prev, [uid]: 0 }));
+      cancelChatSystemNotification(uid);
     },
     [setReadAt]
   );
@@ -1911,6 +1935,14 @@ export default function Home({ profile }: { profile: Profile }) {
         if (pendingAction?.type === 'group_leave' && Number.isInteger(actionUid) && actionUid > 0) {
           await storage.remove(STORAGE_KEYS.pendingChatSettingsAction);
           messageIdSetsRef.current.delete(actionUid);
+          messageOffsetMapRef.current.delete(actionUid);
+          setReadAtMap((prev) => {
+            if (!Object.prototype.hasOwnProperty.call(prev, actionUid)) return prev;
+            const next = { ...prev };
+            delete next[actionUid];
+            storage.setJson(STORAGE_KEYS.readAt, next).catch(() => undefined);
+            return next;
+          });
           setGroups((prev) => prev.filter((group) => group.id !== actionUid));
           setMessagesByUid((prev) => {
             const next = { ...prev };
@@ -1923,6 +1955,25 @@ export default function Home({ profile }: { profile: Profile }) {
             return next;
           });
           setUnreadMap((prev) => {
+            const next = { ...prev };
+            delete next[actionUid];
+            return next;
+          });
+          setHiddenMap((prev) => {
+            if (!prev[actionUid]) return prev;
+            const next = { ...prev };
+            delete next[actionUid];
+            persistHiddenMap(next).catch(() => undefined);
+            return next;
+          });
+          setHistoryLoading((prev) => {
+            if (!Object.prototype.hasOwnProperty.call(prev, actionUid)) return prev;
+            const next = { ...prev };
+            delete next[actionUid];
+            return next;
+          });
+          setHistoryHasMore((prev) => {
+            if (!Object.prototype.hasOwnProperty.call(prev, actionUid)) return prev;
             const next = { ...prev };
             delete next[actionUid];
             return next;
@@ -2051,15 +2102,24 @@ export default function Home({ profile }: { profile: Profile }) {
     if (customStickerUploading || !selfUid || !tokenRef.current) return;
     setCustomStickerUploading(true);
     try {
-      const picked = await pickImageForPlatform();
-      if (!picked?.data) return;
-      const mime = String(picked.mime || '').toLowerCase();
-      if (!ALLOWED_STICKER_MIME.has(mime)) return;
-      const dataUrl = `data:${mime};base64,${picked.data}`;
-      const response = await fetch(`${API_BASE}/api/chat/stickers/upload`, {
+      const pickedList = await pickImagesForPlatform(MAX_STICKER_BATCH_PICK);
+      const items = pickedList
+        .slice(0, MAX_STICKER_BATCH_PICK)
+        .map((picked) => ({
+          mime: String(picked?.mime || '').toLowerCase(),
+          data: String(picked?.data || ''),
+        }))
+        .filter((item) => item.data && ALLOWED_STICKER_MIME.has(item.mime))
+        .map((item) => ({
+          mime: item.mime,
+          dataUrl: `data:${item.mime};base64,${item.data}`,
+        }));
+      if (!items.length) return;
+
+      const response = await fetch(`${API_BASE}/api/chat/stickers/upload/batch`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', ...authHeaders() },
-        body: JSON.stringify({ dataUrl, mime }),
+        body: JSON.stringify({ items }),
       });
       const data = await response.json().catch(() => ({}));
       if (!response.ok || !data?.success) return;
@@ -2096,19 +2156,58 @@ export default function Home({ profile }: { profile: Profile }) {
         if (response.ok && data?.success && data?.data) {
           insertMessages(activeChatUidRef.current, [data.data]);
           setTimeout(scrollToBottom, 0);
-          setCustomStickers((prev) => {
-            const next = [sticker, ...prev.filter((item) => item.hash !== sticker.hash)].slice(
-              0,
-              MAX_CUSTOM_STICKERS_LOCAL
-            );
-            persistCustomStickers(next).catch(() => undefined);
-            return next;
-          });
         }
       } catch {}
     },
-    [authHeaders, insertMessages, persistCustomStickers, scrollToBottom, selfUid]
+    [authHeaders, insertMessages, scrollToBottom, selfUid]
   );
+
+  const sendPickedImages = useCallback(async () => {
+    const chatUid = activeChatUidRef.current;
+    if (chatImageSending || !chatUid || !selfUid || !tokenRef.current) return;
+    setEmojiPanelVisible(false);
+    setChatImageSending(true);
+    try {
+      const pickedList = await pickImagesForPlatform(MAX_CHAT_IMAGE_PICK);
+      const images = pickedList
+        .slice(0, MAX_CHAT_IMAGE_PICK)
+        .map((picked) => ({
+          mime: String(picked?.mime || '').toLowerCase(),
+          data: String(picked?.data || '').replace(/\s+/g, ''),
+        }))
+        .filter((item) => item.data && ALLOWED_STICKER_MIME.has(item.mime));
+      if (!images.length) return;
+
+      const targetType = groupsRef.current.some((group) => group.id === chatUid) ? 'group' : 'private';
+      const sentEntries: any[] = [];
+      for (const image of images) {
+        const payload = {
+          senderUid: selfUid,
+          targetUid: chatUid,
+          targetType,
+          type: 'image',
+          url: `data:${image.mime};base64,${image.data}`,
+        };
+        const response = await fetch(`${API_BASE}/api/chat/send`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', ...authHeaders() },
+          body: JSON.stringify(payload),
+        });
+        const data = await response.json().catch(() => ({}));
+        if (response.ok && data?.success && data?.data) {
+          sentEntries.push(data.data);
+        }
+      }
+      if (sentEntries.length) {
+        insertMessages(chatUid, sentEntries);
+        setTimeout(scrollToBottom, 0);
+      }
+    } catch {}
+    finally {
+      setChatImageSending(false);
+      focusChatInput();
+    }
+  }, [authHeaders, chatImageSending, focusChatInput, insertMessages, scrollToBottom, selfUid]);
 
   const sendText = useCallback(async () => {
     if (!canSend || !activeChatUidRef.current || !selfUid) return;
@@ -2181,6 +2280,45 @@ export default function Home({ profile }: { profile: Profile }) {
     Promise.all([loadFriends(), loadGroups()]).catch(() => undefined);
   }, [loadFriends, loadGroups]);
 
+  const getUserDisplayNameByUid = useCallback(
+    (uid: number) => {
+      const normalizedUid = Number(uid);
+      if (!Number.isInteger(normalizedUid) || normalizedUid <= 0) return '';
+      if (normalizedUid === selfUid) {
+        return String(profileData.nickname || profileData.username || `用户${normalizedUid}`);
+      }
+      const fromFriends = friendsRef.current.find((item) => Number(item.uid) === normalizedUid);
+      if (fromFriends) {
+        return String(fromFriends.nickname || fromFriends.username || `用户${normalizedUid}`);
+      }
+      for (const group of groupsRef.current) {
+        const list = Array.isArray(group.members) ? group.members : [];
+        const member = list.find((item) => Number(item.uid) === normalizedUid);
+        if (member) {
+          return String(member.nickname || member.username || `用户${normalizedUid}`);
+        }
+      }
+      return `用户${normalizedUid}`;
+    },
+    [profileData.nickname, profileData.username, selfUid]
+  );
+
+  const buildNotificationContent = useCallback(
+    (message: Message, targetUid: number) => {
+      const text = String(message.content || formatMessage(message.raw || message) || '[消息]').trim();
+      if (message.targetType === 'group') {
+        const group = groupsRef.current.find((item) => Number(item.id) === targetUid);
+        const senderName = getUserDisplayNameByUid(message.senderUid);
+        const title = group ? getGroupDisplayName(group) : `群聊${targetUid}`;
+        const body = senderName ? `${senderName}: ${text || '[消息]'}` : text || '[消息]';
+        return { title, body, targetType: 'group' as const };
+      }
+      const title = getUserDisplayNameByUid(message.senderUid) || `用户${message.senderUid}`;
+      return { title, body: text || '[消息]', targetType: 'private' as const };
+    },
+    [formatMessage, getUserDisplayNameByUid]
+  );
+
   const handleWsMessage = useCallback(
     (payload: any) => {
       if (!payload || typeof payload !== 'object') return;
@@ -2202,7 +2340,27 @@ export default function Home({ profile }: { profile: Profile }) {
           loadGroups().catch(() => undefined);
         }
 
-        if (activeChatUidRef.current === targetUid) {
+        const shouldNotify = shouldNotifyIncomingMessage({
+          selfUid: Number(selfUid) || 0,
+          senderUid: Number(message.senderUid),
+          chatUid: targetUid,
+          activeChatUid: activeChatUidRef.current,
+          muted: Boolean(mutedMapRef.current[targetUid]),
+          appState: appStateRef.current,
+        });
+        if (shouldNotify) {
+          const notifyContent = buildNotificationContent(message, targetUid);
+          notifyIncomingSystemMessage({
+            chatUid: targetUid,
+            title: notifyContent.title,
+            body: notifyContent.body,
+            targetType: notifyContent.targetType,
+          }).catch(() => undefined);
+        }
+
+        const isActiveChatOpen =
+          activeChatUidRef.current === targetUid && appStateRef.current === 'active';
+        if (isActiveChatOpen) {
           markChatRead(targetUid);
           setTimeout(scrollToBottom, 0);
         }
@@ -2235,11 +2393,12 @@ export default function Home({ profile }: { profile: Profile }) {
       }
     },
     [
+      buildNotificationContent,
       insertMessages,
       loadGroups,
+      loadPendingRequestCount,
       markChatRead,
       normalizeMessage,
-      loadPendingRequestCount,
       requestFriendsRefresh,
       scrollToBottom,
       selfUid,
@@ -2862,10 +3021,9 @@ export default function Home({ profile }: { profile: Profile }) {
                 <ToolMicIcon />
               </Pressable>
               <Pressable
-                style={styles.chatToolBtn}
-                onPress={() => {
-                  setEmojiPanelVisible(false);
-                }}
+                style={[styles.chatToolBtn, chatImageSending && styles.chatToolBtnDisabled]}
+                onPress={sendPickedImages}
+                disabled={chatImageSending}
               >
                 <ToolImageIcon />
               </Pressable>
@@ -3018,61 +3176,72 @@ export default function Home({ profile }: { profile: Profile }) {
                 <Text style={styles.empty}>暂无消息</Text>
               ) : null}
               {!loadingFriends &&
-                messageItems.map((item) => (
-                  <Pressable
-                    key={`${item.targetType}:${item.uid}`}
-                    style={[styles.msgItem, item.pinned && styles.msgItemPinned]}
-                    onPress={() => {
-                      if (item.targetType === 'group') {
-                        openChatFromPayload(item.uid, undefined, {
-                          targetType: 'group',
-                          group: item.group,
-                        });
-                        return;
-                      }
-                      if (item.friend) {
-                        openChat(item.friend);
-                      }
-                    }}
-                    onLongPress={(event) => openChatMenu(event, item.uid, item.targetType)}
-                  >
-                    <View style={styles.avatarBox}>
-                      {item.targetType === 'group' && item.group ? (
-                        <GroupAvatarGrid
-                          members={item.group.members}
-                          fallbackText={getAvatarText(item.title)}
-                          size={48}
-                        />
-                      ) : normalizeImageUrl(item.friend?.avatar) ? (
-                        <Image source={{ uri: normalizeImageUrl(item.friend?.avatar) }} style={styles.msgAvatar} />
-                      ) : (
-                        <View style={styles.msgAvatarFallback}>
-                          <Text style={styles.msgAvatarText}>
-                            {getAvatarText(item.friend?.nickname || item.friend?.username)}
-                          </Text>
-                        </View>
-                      )}
-                      {item.unread > 0 ? (
-                        <View style={styles.badge}>
-                          <Text style={styles.badgeText}>
-                            {item.unread > 99 ? '99+' : item.unread}
-                          </Text>
-                        </View>
-                      ) : null}
-                    </View>
-                    <View style={styles.msgContentWrapper}>
-                      <View style={styles.msgTopRow}>
-                        <Text style={styles.msgNickname} numberOfLines={1}>
-                          {item.title}
-                        </Text>
-                        <Text style={styles.msgTime}>{item.latest?.time || ''}</Text>
+                messageItems.map((item) => {
+                  const badgeTone = getUnreadBadgeTone(Boolean(mutedMap[item.uid]));
+                  return (
+                    <Pressable
+                      key={`${item.targetType}:${item.uid}`}
+                      style={[styles.msgItem, item.pinned && styles.msgItemPinned]}
+                      onPress={() => {
+                        if (item.targetType === 'group') {
+                          openChatFromPayload(item.uid, undefined, {
+                            targetType: 'group',
+                            group: item.group,
+                          });
+                          return;
+                        }
+                        if (item.friend) {
+                          openChat(item.friend);
+                        }
+                      }}
+                      onLongPress={(event) => openChatMenu(event, item.uid, item.targetType)}
+                    >
+                      <View style={styles.avatarBox}>
+                        {item.targetType === 'group' && item.group ? (
+                          <GroupAvatarGrid
+                            members={item.group.members}
+                            fallbackText={getAvatarText(item.title)}
+                            size={48}
+                          />
+                        ) : normalizeImageUrl(item.friend?.avatar) ? (
+                          <Image source={{ uri: normalizeImageUrl(item.friend?.avatar) }} style={styles.msgAvatar} />
+                        ) : (
+                          <View style={styles.msgAvatarFallback}>
+                            <Text style={styles.msgAvatarText}>
+                              {getAvatarText(item.friend?.nickname || item.friend?.username)}
+                            </Text>
+                          </View>
+                        )}
                       </View>
-                      <Text style={styles.msgPreview} numberOfLines={1}>
-                        {item.preview}
-                      </Text>
-                    </View>
-                  </Pressable>
-                ))}
+                      <View style={styles.msgContentWrapper}>
+                        <View style={styles.msgTopRow}>
+                          <Text style={styles.msgNickname} numberOfLines={1}>
+                            {item.title}
+                          </Text>
+                          <View style={styles.msgMetaColumn}>
+                            <Text style={styles.msgTime}>{item.latest?.time || ''}</Text>
+                            {item.unread > 0 ? (
+                              <View
+                                style={[
+                                  styles.badge,
+                                  styles.msgUnreadBadge,
+                                  badgeTone === 'muted' && styles.badgeMuted,
+                                ]}
+                              >
+                                <Text style={styles.badgeText}>
+                                  {item.unread > 99 ? '99+' : item.unread}
+                                </Text>
+                              </View>
+                            ) : null}
+                          </View>
+                        </View>
+                        <Text style={styles.msgPreview} numberOfLines={1}>
+                          {item.preview}
+                        </Text>
+                      </View>
+                    </Pressable>
+                  );
+                })}
             </ScrollView>
           ) : (
             <ScrollView style={styles.content} contentContainerStyle={styles.contentInner}>
@@ -3690,23 +3859,21 @@ const styles = StyleSheet.create({
     color: '#4a9df8',
   },
   badge: {
-    position: 'absolute',
-    top: -5,
-    right: -5,
     backgroundColor: '#ff4d4f',
-    borderRadius: 8,
-    minWidth: 16,
-    height: 16,
+    borderRadius: 10,
+    minWidth: 20,
+    height: 20,
     alignItems: 'center',
     justifyContent: 'center',
-    paddingHorizontal: 4,
-    borderWidth: 1,
-    borderColor: '#fff',
+    paddingHorizontal: 6,
+  },
+  badgeMuted: {
+    backgroundColor: '#a3abb8',
   },
   badgeText: {
     color: '#fff',
-    fontSize: 10,
-    fontWeight: '600',
+    fontSize: 11,
+    fontWeight: '700',
   },
   msgContentWrapper: {
     flex: 1,
@@ -3715,8 +3882,14 @@ const styles = StyleSheet.create({
   },
   msgTopRow: {
     flexDirection: 'row',
-    alignItems: 'center',
+    alignItems: 'flex-start',
     justifyContent: 'space-between',
+  },
+  msgMetaColumn: {
+    alignItems: 'flex-end',
+    justifyContent: 'flex-start',
+    marginLeft: 8,
+    minHeight: 34,
   },
   msgNickname: {
     fontSize: 16,
@@ -3728,6 +3901,9 @@ const styles = StyleSheet.create({
   msgTime: {
     fontSize: 12,
     color: '#b2b2b2',
+  },
+  msgUnreadBadge: {
+    marginTop: 4,
   },
   msgPreview: {
     fontSize: 14,
@@ -4260,6 +4436,9 @@ const styles = StyleSheet.create({
     borderRadius: 17,
     alignItems: 'center',
     justifyContent: 'center',
+  },
+  chatToolBtnDisabled: {
+    opacity: 0.5,
   },
   chatToolBtnActive: {
     backgroundColor: '#e9f3ff',

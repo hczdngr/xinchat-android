@@ -25,6 +25,7 @@ const authenticate = createAuthenticateMiddleware({ scope: 'Groups' });
 let cachedGroups = null;
 let cachedGroupsAt = 0;
 let writeQueue = Promise.resolve();
+let leaveQueue = Promise.resolve();
 
 const clone = (value) => JSON.parse(JSON.stringify(value || []));
 
@@ -450,49 +451,70 @@ router.post('/leave', authenticate, async (req, res) => {
       return;
     }
 
-    const groups = await readGroups();
-    const groupIndex = groups.findIndex((item) => item.id === groupId);
-    if (groupIndex === -1) {
-      res.status(404).json({ success: false, message: '群聊不存在。' });
-      return;
-    }
+    const leaveTask = leaveQueue
+      .catch(() => undefined)
+      .then(async () => {
+        const groups = await readGroups();
+        const groupIndex = groups.findIndex((item) => item.id === groupId);
+        if (groupIndex === -1) {
+          return {
+            status: 404,
+            body: { success: false, message: '群聊不存在。' },
+          };
+        }
 
-    const group = { ...groups[groupIndex] };
-    const memberUids = normalizeMemberUids(group.memberUids).filter((uid) => uid !== user.uid);
-    if (memberUids.length === normalizeMemberUids(group.memberUids).length) {
-      res.status(403).json({ success: false, message: '你不在该群聊中。' });
-      return;
-    }
+        const group = { ...groups[groupIndex] };
+        const originMemberUids = normalizeMemberUids(group.memberUids);
+        const memberUids = originMemberUids.filter((uid) => uid !== user.uid);
+        if (memberUids.length === originMemberUids.length) {
+          return {
+            status: 403,
+            body: { success: false, message: '你不在该群聊中。' },
+          };
+        }
 
-    if (memberUids.length === 0) {
-      groups.splice(groupIndex, 1);
-      await writeGroups(groups);
-      res.json({ success: true, removed: true });
-      return;
-    }
+        if (memberUids.length === 0) {
+          groups.splice(groupIndex, 1);
+          await writeGroups(groups);
+          return {
+            status: 200,
+            body: { success: true, removed: true },
+          };
+        }
 
-    const memberNicknames = {
-      ...(group.memberNicknames && typeof group.memberNicknames === 'object'
-        ? group.memberNicknames
-        : {}),
-    };
-    delete memberNicknames[user.uid];
+        const memberNicknames = {
+          ...(group.memberNicknames && typeof group.memberNicknames === 'object'
+            ? group.memberNicknames
+            : {}),
+        };
+        delete memberNicknames[user.uid];
 
-    group.memberUids = memberUids;
-    group.memberNicknames = memberNicknames;
-    if (!memberUids.includes(Number(group.ownerUid))) {
-      group.ownerUid = memberUids[0];
-    }
-    group.updatedAt = new Date().toISOString();
+        group.memberUids = memberUids;
+        group.memberNicknames = memberNicknames;
+        if (!memberUids.includes(Number(group.ownerUid))) {
+          group.ownerUid = memberUids[0];
+        }
+        group.updatedAt = new Date().toISOString();
 
-    groups[groupIndex] = sanitizeGroup(group);
-    await writeGroups(groups);
-    res.json({ success: true, removed: false, group: serializeGroup(groups[groupIndex], users, user.uid) });
+        groups[groupIndex] = sanitizeGroup(group);
+        await writeGroups(groups);
+        return {
+          status: 200,
+          body: {
+            success: true,
+            removed: false,
+            group: serializeGroup(groups[groupIndex], users, user.uid),
+          },
+        };
+      });
+
+    leaveQueue = leaveTask.then(() => undefined).catch(() => undefined);
+    const result = await leaveTask;
+    res.status(result.status).json(result.body);
   } catch (error) {
     console.error('Group leave error:', error);
     res.status(500).json({ success: false, message: '退出群聊失败。' });
   }
 });
-
 export { ensureGroupStorage, readGroups, writeGroups, getGroupById, getGroupMemberUids, isUserInGroup };
 export default router;
