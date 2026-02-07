@@ -12,7 +12,7 @@
       100000001
     ],
     "signature": "111",
-    "avatar": "http://192.168.0.7:3001/uploads/images/4cb34580b9a72626d520874dc587bb8efe33334364f95c6ecf46f515660595f6.jpg",
+    "avatar": "http://192.168.0.7:3001/uploads/images/90c05a5bf72ac1d30ef73ece836e5d69ef0f99ae372bbbcbc718de003aceaecd.jpg",
     "nickname": "xkitme",
     "gender": "其他",
     "birthday": "1989-12-14",
@@ -47,23 +47,27 @@
       100000000
     ],
     "signature": "这个人很神秘，暂未填写签名",
-    "avatar": "",
+    "avatar": "http://192.168.0.7:3001/uploads/images/196f5b661b9ea4a396858d9232f260d65e4cbb669c77a5f6519e41cd28c3ad7c.jpg",
     "nickname": "demo",
     "gender": "",
     "birthday": "",
     "country": "",
     "province": "",
     "region": "",
-    "token": "14d02ede636d128aad46970fa022651cecc5e6a69d26cdb4e86f07c6fb0753e7",
-    "tokenExpiresAt": "2026-08-05T10:53:21.456Z",
+    "token": "238e386ff44941cc3a0efc33f9c55d68e77970d45e4d56229dcd366853bf442d",
+    "tokenExpiresAt": "2026-08-06T09:44:39.872Z",
     "tokens": [
       {
         "token": "14d02ede636d128aad46970fa022651cecc5e6a69d26cdb4e86f07c6fb0753e7",
         "expiresAt": "2026-08-05T10:53:21.456Z"
+      },
+      {
+        "token": "238e386ff44941cc3a0efc33f9c55d68e77970d45e4d56229dcd366853bf442d",
+        "expiresAt": "2026-08-06T09:44:39.872Z"
       }
     ],
-    "lastLoginAt": "2026-02-05T10:53:21.456Z",
-    "online": false,
+    "lastLoginAt": "2026-02-06T09:44:39.872Z",
+    "online": true,
     "friendRequests": {
       "incoming": [],
       "outgoing": []

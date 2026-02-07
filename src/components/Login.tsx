@@ -1,6 +1,5 @@
 import React from 'react';
 import {
-  ActivityIndicator,
   Pressable,
   StyleSheet,
   Text,
@@ -9,6 +8,7 @@ import {
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import Svg, { Circle, Line, Path } from 'react-native-svg';
+import UIButton from './UIButton';
 
 type Props = {
   username: string;
@@ -56,7 +56,7 @@ export default function Login({
         <View style={styles.inputGroup}>
           <TextInput
             value={username}
-            placeholder="输入昵称"
+            placeholder="输入账号"
             placeholderTextColor="#c0c4cc"
             onChangeText={onUsernameChange}
             style={styles.input}
@@ -79,17 +79,13 @@ export default function Login({
           </Pressable>
         </View>
 
-        <Pressable
-          style={[styles.loginBtn, (!canSubmit || loading) && styles.loginBtnDisabled]}
-          disabled={!canSubmit || loading}
+        <UIButton
+          title={loading ? '登录中' : '登录'}
           onPress={onSubmit}
-        >
-          {loading ? (
-            <ActivityIndicator color="#fff" />
-          ) : (
-            <Text style={styles.loginBtnText}>登录</Text>
-          )}
-        </Pressable>
+          disabled={!canSubmit}
+          loading={loading}
+          style={styles.loginBtn}
+        />
 
         {error ? <Text style={styles.error}>{error}</Text> : null}
         {!error && status ? <Text style={styles.success}>{status}</Text> : null}
@@ -127,17 +123,12 @@ const styles = StyleSheet.create({
   },
   inputGroup: {
     backgroundColor: '#fff',
-    borderRadius: 12,
-    height: 54,
+    borderRadius: 10,
+    height: 52,
     paddingHorizontal: 16,
     flexDirection: 'row',
     alignItems: 'center',
     gap: 8,
-    shadowColor: '#000',
-    shadowOpacity: 0.04,
-    shadowOffset: { width: 0, height: 2 },
-    shadowRadius: 8,
-    elevation: 1,
     position: 'relative',
   },
   input: {
@@ -157,19 +148,6 @@ const styles = StyleSheet.create({
   loginBtn: {
     marginTop: 20,
     height: 50,
-    borderRadius: 12,
-    backgroundColor: '#4a9df8',
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  loginBtnDisabled: {
-    opacity: 0.6,
-  },
-  loginBtnText: {
-    color: '#fff',
-    fontSize: 17,
-    fontWeight: '600',
-    letterSpacing: 1,
   },
   error: {
     color: '#b5482b',

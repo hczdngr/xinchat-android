@@ -17,6 +17,7 @@ import {
 } from 'react-native';
 import Svg, { Path } from 'react-native-svg';
 import ImagePicker from 'react-native-image-crop-picker';
+import UIButton from './UIButton';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { API_BASE, normalizeImageUrl } from '../config';
 import { storage } from '../storage';
@@ -439,15 +440,13 @@ export default function EditProfile({ onBack, onSaved, initialProfile }: Props) 
           <BackIcon />
         </Pressable>
         <Text style={styles.title}>{'\u7f16\u8f91\u8d44\u6599'}</Text>
-        <Pressable
-          style={[styles.saveBtn, !canSave && styles.saveBtnDisabled]}
+        <UIButton
+          title={saving ? '保存中' : '保存'}
           onPress={saveProfile}
           disabled={!canSave}
-        >
-          <Text style={styles.saveText}>
-            {saving ? '\u4fdd\u5b58\u4e2d...' : '\u4fdd\u5b58'}
-          </Text>
-        </Pressable>
+          loading={saving}
+          style={styles.saveBtn}
+        />
       </View>
 
       <KeyboardAvoidingView
@@ -944,18 +943,8 @@ const styles = StyleSheet.create({
     color: '#1a1a1a',
   },
   saveBtn: {
+    height: 32,
     paddingHorizontal: 12,
-    paddingVertical: 6,
-    borderRadius: 12,
-    backgroundColor: '#4a9df8',
-  },
-  saveBtnDisabled: {
-    backgroundColor: '#9ec5fb',
-  },
-  saveText: {
-    fontSize: 13,
-    fontWeight: '600',
-    color: '#fff',
   },
   body: {
     flex: 1,

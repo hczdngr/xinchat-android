@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
-import { StatusBar } from 'react-native';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Animated, BackHandler, StatusBar } from 'react-native';
 import { NavigationContainer } from '@react-navigation/native';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
@@ -7,6 +7,7 @@ import Home from './src/components/Home';
 import Login from './src/components/Login';
 import Register from './src/components/Register';
 import Profile from './src/components/Profile';
+import FriendProfile from './src/components/FriendProfile';
 import EditProfile from './src/components/EditProfile';
 import { API_BASE } from './src/config';
 import { storage } from './src/storage';
@@ -49,6 +50,7 @@ function App() {
 
   const [token, setToken] = useState('');
   const [profile, setProfile] = useState<Profile>(emptyProfile);
+  const authAnim = useRef(new Animated.Value(1)).current;
 
   const canSubmit = useMemo(() => username.trim().length > 0 && password.length > 0, [
     username,
@@ -63,15 +65,57 @@ function App() {
   }, [registerUsername, registerPassword, registerConfirmPassword]);
   const isAuthed = useMemo(() => Boolean(token), [token]);
 
+  const authAnimStyle = useMemo(
+    () => ({
+      opacity: authAnim,
+      transform: [
+        {
+          translateY: authAnim.interpolate({
+            inputRange: [0, 1],
+            outputRange: [12, 0],
+          }),
+        },
+      ],
+    }),
+    [authAnim]
+  );
+
   useEffect(() => {
     const loadSession = async () => {
-      const storedToken = (await storage.getString(TOKEN_KEY)) || '';
-      const storedProfile = (await storage.getJson<Profile>(PROFILE_KEY)) || emptyProfile;
-      setToken(storedToken);
-      setProfile(storedProfile);
+      const [storedToken, storedProfile] = await Promise.all([
+        storage.getString(TOKEN_KEY),
+        storage.getJson<Profile>(PROFILE_KEY),
+      ]);
+      setToken(storedToken || '');
+      setProfile(storedProfile || emptyProfile);
     };
     void loadSession();
   }, []);
+
+  useEffect(() => {
+    if (isAuthed) return;
+    const onBackPress = () => {
+      if (view === 'register') {
+        setRegisterError('');
+        setRegisterStatus('');
+        setRegisterConfirmPassword('');
+        setView('login');
+        return true;
+      }
+      return true;
+    };
+    const sub = BackHandler.addEventListener('hardwareBackPress', onBackPress);
+    return () => sub.remove();
+  }, [isAuthed, view]);
+
+  useEffect(() => {
+    authAnim.setValue(0);
+    Animated.timing(authAnim, {
+      toValue: 1,
+      duration: 220,
+      useNativeDriver: true,
+    }).start();
+  }, [authAnim, view]);
 
   const refreshProfile = useCallback(async () => {
     const authToken = token || (await storage.getString(TOKEN_KEY)) || '';
@@ -235,36 +279,40 @@ function App() {
     <SafeAreaProvider>
       <StatusBar barStyle={'dark-content'} />
       {!isAuthed && view === 'login' ? (
-        <Login
-          username={username}
-          password={password}
-          showPassword={showPassword}
-          loading={loading}
-          error={error}
-          status={status}
-          canSubmit={canSubmit}
-          onUsernameChange={setUsername}
-          onPasswordChange={setPassword}
-          onTogglePassword={() => setShowPassword((prev) => !prev)}
-          onSubmit={submit}
-          onGoRegister={goRegister}
-        />
+        <Animated.View style={authAnimStyle}>
+          <Login
+            username={username}
+            password={password}
+            showPassword={showPassword}
+            loading={loading}
+            error={error}
+            status={status}
+            canSubmit={canSubmit}
+            onUsernameChange={setUsername}
+            onPasswordChange={setPassword}
+            onTogglePassword={() => setShowPassword((prev) => !prev)}
+            onSubmit={submit}
+            onGoRegister={goRegister}
+          />
+        </Animated.View>
       ) : null}
       {!isAuthed && view === 'register' ? (
-        <Register
-          username={registerUsername}
-          password={registerPassword}
-          confirmPassword={registerConfirmPassword}
-          loading={registerLoading}
-          error={registerError}
-          status={registerStatus}
-          canSubmit={canRegister}
-          onUsernameChange={setRegisterUsername}
-          onPasswordChange={setRegisterPassword}
-          onConfirmPasswordChange={setRegisterConfirmPassword}
-          onSubmit={register}
-          onBack={goLogin}
-        />
+        <Animated.View style={authAnimStyle}>
+          <Register
+            username={registerUsername}
+            password={registerPassword}
+            confirmPassword={registerConfirmPassword}
+            loading={registerLoading}
+            error={registerError}
+            status={registerStatus}
+            canSubmit={canRegister}
+            onUsernameChange={setRegisterUsername}
+            onPasswordChange={setRegisterPassword}
+            onConfirmPasswordChange={setRegisterConfirmPassword}
+            onSubmit={register}
+            onBack={goLogin}
+          />
+        </Animated.View>
       ) : null}
       {isAuthed ? (
         <NavigationContainer>
@@ -272,6 +320,10 @@ function App() {
             screenOptions={{
               headerShown: false,
               presentation: 'card',
+              animation: 'slide_from_right',
+              gestureEnabled: true,
+              fullScreenGestureEnabled: true,
+              gestureDirection: 'horizontal',
               contentStyle: { backgroundColor: '#f2f2f7' },
             }}
           >
@@ -288,6 +340,11 @@ function App() {
                 />
               )}
             </Stack.Screen>
+            <Stack.Screen
+              name="FriendProfile"
+              component={FriendProfile}
+              options={{ animation: 'slide_from_right' }}
+            />
             <Stack.Screen name="EditProfile">
               {({ navigation }) => (
                 <EditProfile
@@ -307,4 +364,3 @@ function App() {
 }
 
 export default App;
-

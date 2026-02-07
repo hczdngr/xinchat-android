@@ -1,0 +1,92 @@
+/* --- 核心按钮样式 --- */
+.btn {
+    position: relative;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 100%;
+    height: 48px;
+    border-radius: 8px;
+    border: none;
+    outline: none;
+    font-size: 17px;
+    font-weight: 600;
+    letter-spacing: 1px;
+    cursor: pointer;
+    user-select: none;
+    transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+    -webkit-tap-highlight-color: transparent;
+}
+
+.btn-primary {
+    background-color: #0099ff;
+    color: #ffffff;
+    box-shadow: 0 4px 12px rgba(0, 153, 255, 0.3);
+}
+
+.btn-primary:active {
+    background-color: #0088e6;
+    transform: scale(0.98);
+    box-shadow: 0 2px 6px rgba(0, 153, 255, 0.2);
+}
+
+.btn-secondary {
+    background-color: #ffffff;
+    color: #333333;
+    border: 1px solid #e0e0e0;
+}
+
+.btn-secondary:active {
+    background-color: #f2f2f2;
+    color: #000;
+}
+
+.btn-danger {
+    background-color: #ffffff;
+    color: #ff4d4f;
+    border: 1px solid #ff4d4f;
+}
+
+.btn-danger:active {
+    background-color: #fff0f0;
+}
+
+.btn:disabled, .btn.disabled {
+    background-color: #a0cfff !important;
+    color: #ffffff !important;
+    box-shadow: none !important;
+    cursor: not-allowed;
+    pointer-events: none;
+    opacity: 0.7;
+}
+
+.btn.loading {
+    color: transparent !important;
+    pointer-events: none;
+    position: relative;
+}
+
+.btn.loading::after {
+    content: '';
+    position: absolute;
+    left: 50%;
+    top: 50%;
+    width: 20px;
+    height: 20px;
+    margin-left: -10px;
+    margin-top: -10px;
+    border: 2px solid #fff;
+    border-top-color: transparent;
+    border-radius: 50%;
+    animation: btn-spin 0.8s linear infinite;
+}
+
+.btn-secondary.loading::after {
+    border-color: #999;
+    border-top-color: transparent;
+}
+
+@keyframes btn-spin {
+    0% { transform: rotate(0deg); }
+    100% { transform: rotate(360deg); }
+}

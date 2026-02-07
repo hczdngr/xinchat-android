@@ -14,6 +14,7 @@ import {
 import Svg, { Path } from 'react-native-svg';
 import { API_BASE } from '../config';
 import { storage } from '../storage';
+import UIButton from './UIButton';
 
 type Friend = {
   uid: number;
@@ -323,9 +324,13 @@ export default function FoundFriends({
                 style={styles.searchInput}
                 keyboardType="numeric"
               />
-              <Pressable style={styles.searchBtn} onPress={onSearch} disabled={searching}>
-                <Text style={styles.searchBtnText}>{searching ? '搜索中...' : '搜索'}</Text>
-              </Pressable>
+              <UIButton
+                title={searching ? '搜索中' : '搜索'}
+                onPress={onSearch}
+                disabled={searching}
+                style={styles.searchBtn}
+                textStyle={styles.searchBtnText}
+              />
             </View>
             {searchError ? <Text style={styles.error}>{searchError}</Text> : null}
             {searchResult ? (
@@ -342,13 +347,13 @@ export default function FoundFriends({
                     {searchHint ? <Text style={styles.hint}>{searchHint}</Text> : null}
                   </View>
                 </View>
-                <Pressable
-                  style={styles.actionBtn}
+                <UIButton
+                  title="发送请求"
                   onPress={sendRequest}
                   disabled={Boolean(searchHint) || searchResult.uid === selfUid}
-                >
-                  <Text style={styles.actionText}>发送请求</Text>
-                </Pressable>
+                  style={styles.actionBtn}
+                  textStyle={styles.actionText}
+                />
                 {requestStatus ? <Text style={styles.success}>{requestStatus}</Text> : null}
               </View>
             ) : null}
