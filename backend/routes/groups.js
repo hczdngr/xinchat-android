@@ -9,9 +9,15 @@ const __dirname = path.dirname(__filename);
 const DATA_DIR = path.join(__dirname, '..', 'data');
 const GROUPS_PATH = path.join(DATA_DIR, 'groups.json');
 const GROUPS_TMP_PATH = path.join(DATA_DIR, 'groups.json.tmp');
+
 const GROUP_ID_START = 2000000000;
 const MAX_GROUP_MEMBERS = 50;
 const GROUP_NAME_MAX_LEN = 80;
+const GROUP_DESCRIPTION_MAX_LEN = 240;
+const GROUP_ANNOUNCEMENT_MAX_LEN = 300;
+const GROUP_MEMBER_NICK_MAX_LEN = 40;
+
+const CACHE_TTL_MS = 800;
 
 const router = express.Router();
 const authenticate = createAuthenticateMiddleware({ scope: 'Groups' });
@@ -19,7 +25,6 @@ const authenticate = createAuthenticateMiddleware({ scope: 'Groups' });
 let cachedGroups = null;
 let cachedGroupsAt = 0;
 let writeQueue = Promise.resolve();
-const CACHE_TTL_MS = 800;
 
 const clone = (value) => JSON.parse(JSON.stringify(value || []));
 
@@ -51,15 +56,37 @@ const normalizeMemberUids = (input) => {
   return Array.from(set);
 };
 
+const sanitizeMemberNicknames = (input, memberUids) => {
+  const memberSet = new Set(Array.isArray(memberUids) ? memberUids : []);
+  const source = input && typeof input === 'object' ? input : {};
+  const next = {};
+  Object.entries(source).forEach(([rawUid, rawNick]) => {
+    const uid = Number(rawUid);
+    if (!Number.isInteger(uid) || !memberSet.has(uid)) return;
+    if (typeof rawNick !== 'string') return;
+    const nickname = rawNick.trim().slice(0, GROUP_MEMBER_NICK_MAX_LEN);
+    if (!nickname) return;
+    next[uid] = nickname;
+  });
+  return next;
+};
+
 const sanitizeGroup = (input) => {
   const id = Number(input?.id);
   if (!Number.isInteger(id) || id <= 0) return null;
-  const ownerUid = Number(input?.ownerUid);
-  if (!Number.isInteger(ownerUid) || ownerUid <= 0) return null;
+
+  const ownerUidRaw = Number(input?.ownerUid);
   const memberUids = normalizeMemberUids(input?.memberUids);
+  if (memberUids.length === 0) return null;
+
+  let ownerUid = ownerUidRaw;
+  if (!Number.isInteger(ownerUid) || ownerUid <= 0 || !memberUids.includes(ownerUid)) {
+    ownerUid = memberUids[0];
+  }
   if (!memberUids.includes(ownerUid)) {
     memberUids.unshift(ownerUid);
   }
+
   const createdAt =
     typeof input?.createdAt === 'string' && input.createdAt
       ? input.createdAt
@@ -68,12 +95,27 @@ const sanitizeGroup = (input) => {
     typeof input?.updatedAt === 'string' && input.updatedAt
       ? input.updatedAt
       : createdAt;
-  const rawName = typeof input?.name === 'string' ? input.name.trim() : '';
+
+  const name =
+    typeof input?.name === 'string' ? input.name.trim().slice(0, GROUP_NAME_MAX_LEN) : '';
+  const description =
+    typeof input?.description === 'string'
+      ? input.description.trim().slice(0, GROUP_DESCRIPTION_MAX_LEN)
+      : '';
+  const announcement =
+    typeof input?.announcement === 'string'
+      ? input.announcement.trim().slice(0, GROUP_ANNOUNCEMENT_MAX_LEN)
+      : '';
+  const memberNicknames = sanitizeMemberNicknames(input?.memberNicknames, memberUids);
+
   return {
     id,
     ownerUid,
     memberUids,
-    name: rawName.slice(0, GROUP_NAME_MAX_LEN),
+    name,
+    description,
+    announcement,
+    memberNicknames,
     createdAt,
     updatedAt,
   };
@@ -98,6 +140,7 @@ const readGroups = async () => {
   if (cachedGroups && now - cachedGroupsAt < CACHE_TTL_MS) {
     return clone(cachedGroups);
   }
+
   const raw = await fs.readFile(GROUPS_PATH, 'utf-8').catch(() => '[]');
   let parsed = [];
   try {
@@ -105,10 +148,12 @@ const readGroups = async () => {
   } catch {
     parsed = [];
   }
+
   const groups = sanitizeGroups(parsed);
   if (!Array.isArray(parsed) || parsed.length !== groups.length) {
     await fs.writeFile(GROUPS_PATH, JSON.stringify(groups, null, 2), 'utf-8');
   }
+
   cachedGroups = clone(groups);
   cachedGroupsAt = now;
   return clone(cachedGroups);
@@ -140,13 +185,14 @@ const getNextGroupId = (groups) => {
 const getDisplayName = (user) => {
   const nickname = typeof user?.nickname === 'string' ? user.nickname.trim() : '';
   const username = typeof user?.username === 'string' ? user.username.trim() : '';
-  return nickname || username || `ç”¨æˆ·${Number(user?.uid) || ''}`;
+  return nickname || username || `ÓÃ»§${Number(user?.uid) || ''}`;
 };
 
-const toMemberPreview = (user, uid) => ({
+const toMemberPreview = (user, uid, group) => ({
   uid,
   username: user?.username || '',
   nickname: user?.nickname || '',
+  groupNickname: String(group?.memberNicknames?.[uid] || ''),
   avatar: user?.avatar || '',
   signature: user?.signature || '',
   online: Boolean(user?.online),
@@ -162,7 +208,7 @@ const buildDefaultGroupName = (inviteOrderUids, users, selfUid) => {
     .filter(Boolean)
     .map((user) => getDisplayName(user))
     .filter(Boolean);
-  const joined = names.join('ã€') || 'ç¾¤èŠ';
+  const joined = names.join('¡¢') || 'ÈºÁÄ';
   return `${joined}(${Math.max(2, nameOrder.length)})`.slice(0, GROUP_NAME_MAX_LEN);
 };
 
@@ -172,17 +218,23 @@ const isMutualFriend = (a, b) =>
   a.friends.includes(b.uid) &&
   b.friends.includes(a.uid);
 
-const serializeGroup = (group, users) => {
+const serializeGroup = (group, users, currentUid) => {
   const safeUsers = Array.isArray(users) ? users : [];
   const memberUids = normalizeMemberUids(group?.memberUids);
   return {
     id: Number(group?.id),
     ownerUid: Number(group?.ownerUid),
     name: typeof group?.name === 'string' ? group.name : '',
+    description: typeof group?.description === 'string' ? group.description : '',
+    announcement: typeof group?.announcement === 'string' ? group.announcement : '',
     memberUids,
+    myNickname:
+      Number.isInteger(Number(currentUid)) && Number(currentUid) > 0
+        ? String(group?.memberNicknames?.[Number(currentUid)] || '')
+        : '',
     members: memberUids.map((uid) => {
       const user = safeUsers.find((item) => item.uid === uid);
-      return toMemberPreview(user, uid);
+      return toMemberPreview(user, uid, group);
     }),
     createdAt: group?.createdAt,
     updatedAt: group?.updatedAt,
@@ -214,12 +266,38 @@ router.get('/list', authenticate, async (req, res) => {
     const groups = await readGroups();
     const list = groups
       .filter((group) => normalizeMemberUids(group.memberUids).includes(user.uid))
-      .map((group) => serializeGroup(group, users))
+      .map((group) => serializeGroup(group, users, user.uid))
       .sort((a, b) => Date.parse(b.updatedAt || '') - Date.parse(a.updatedAt || ''));
     res.json({ success: true, groups: list });
   } catch (error) {
     console.error('Group list error:', error);
-    res.status(500).json({ success: false, message: 'èŽ·å–ç¾¤èŠåˆ—è¡¨å¤±è´¥ã€‚' });
+    res.status(500).json({ success: false, message: '»ñÈ¡ÈºÁÄÁÐ±íÊ§°Ü¡£' });
+  }
+});
+
+router.get('/detail', authenticate, async (req, res) => {
+  try {
+    await ensureGroupStorage();
+    const { user, users } = req.auth;
+    const groupId = Number(req.query?.groupId || req.body?.groupId);
+    if (!Number.isInteger(groupId) || groupId <= 0) {
+      res.status(400).json({ success: false, message: 'ÈºIDÎÞÐ§¡£' });
+      return;
+    }
+    const groups = await readGroups();
+    const group = groups.find((item) => item.id === groupId);
+    if (!group) {
+      res.status(404).json({ success: false, message: 'ÈºÁÄ²»´æÔÚ¡£' });
+      return;
+    }
+    if (!normalizeMemberUids(group.memberUids).includes(user.uid)) {
+      res.status(403).json({ success: false, message: 'Äã²»ÔÚ¸ÃÈºÁÄÖÐ¡£' });
+      return;
+    }
+    res.json({ success: true, group: serializeGroup(group, users, user.uid) });
+  } catch (error) {
+    console.error('Group detail error:', error);
+    res.status(500).json({ success: false, message: '»ñÈ¡ÈºÁÄÏêÇéÊ§°Ü¡£' });
   }
 });
 
@@ -230,22 +308,22 @@ router.post('/create', authenticate, async (req, res) => {
     const rawMemberUids = normalizeMemberUids(req.body?.memberUids);
     const inviteUids = rawMemberUids.filter((uid) => uid !== user.uid);
     if (inviteUids.length === 0) {
-      res.status(400).json({ success: false, message: 'è¯·è‡³å°‘é€‰æ‹©ä¸€ä½å¥½å‹ã€‚' });
+      res.status(400).json({ success: false, message: 'ÇëÖÁÉÙÑ¡ÔñÒ»Î»ºÃÓÑ¡£' });
       return;
     }
     if (inviteUids.length + 1 > MAX_GROUP_MEMBERS) {
-      res.status(400).json({ success: false, message: 'ç¾¤æˆå‘˜æ•°é‡è¶…å‡ºä¸Šé™ã€‚' });
+      res.status(400).json({ success: false, message: 'Èº³ÉÔ±ÊýÁ¿³¬¹ýÉÏÏÞ¡£' });
       return;
     }
 
     for (const uid of inviteUids) {
       const target = users.find((item) => item.uid === uid);
       if (!target) {
-        res.status(404).json({ success: false, message: `ç”¨æˆ· ${uid} ä¸å­˜åœ¨ã€‚` });
+        res.status(404).json({ success: false, message: `ÓÃ»§ ${uid} ²»´æÔÚ¡£` });
         return;
       }
       if (!isMutualFriend(user, target)) {
-        res.status(403).json({ success: false, message: `ç”¨æˆ· ${uid} ä¸æ˜¯ä½ çš„å¥½å‹ã€‚` });
+        res.status(403).json({ success: false, message: `ÓÃ»§ ${uid} ²»ÊÇÄãµÄºÃÓÑ¡£` });
         return;
       }
     }
@@ -260,17 +338,159 @@ router.post('/create', authenticate, async (req, res) => {
     const group = {
       id: groupId,
       ownerUid: user.uid,
-      name,
       memberUids,
+      name,
+      description: '',
+      announcement: '',
+      memberNicknames: {},
       createdAt: now,
       updatedAt: now,
     };
     groups.push(group);
     await writeGroups(groups);
-    res.json({ success: true, group: serializeGroup(group, users) });
+    res.json({ success: true, group: serializeGroup(group, users, user.uid) });
   } catch (error) {
     console.error('Group create error:', error);
-    res.status(500).json({ success: false, message: 'åˆ›å»ºç¾¤èŠå¤±è´¥ã€‚' });
+    res.status(500).json({ success: false, message: '´´½¨ÈºÁÄÊ§°Ü¡£' });
+  }
+});
+
+router.post('/update', authenticate, async (req, res) => {
+  try {
+    await ensureGroupStorage();
+    const { user, users } = req.auth;
+    const groupId = Number(req.body?.groupId);
+    if (!Number.isInteger(groupId) || groupId <= 0) {
+      res.status(400).json({ success: false, message: 'ÈºIDÎÞÐ§¡£' });
+      return;
+    }
+
+    const groups = await readGroups();
+    const groupIndex = groups.findIndex((item) => item.id === groupId);
+    if (groupIndex === -1) {
+      res.status(404).json({ success: false, message: 'ÈºÁÄ²»´æÔÚ¡£' });
+      return;
+    }
+
+    const group = { ...groups[groupIndex] };
+    const memberSet = new Set(normalizeMemberUids(group.memberUids));
+    if (!memberSet.has(user.uid)) {
+      res.status(403).json({ success: false, message: 'Äã²»ÔÚ¸ÃÈºÁÄÖÐ¡£' });
+      return;
+    }
+
+    let touched = false;
+
+    if (Object.prototype.hasOwnProperty.call(req.body || {}, 'name')) {
+      const nextName =
+        typeof req.body?.name === 'string' ? req.body.name.trim().slice(0, GROUP_NAME_MAX_LEN) : '';
+      group.name = nextName;
+      touched = true;
+    }
+
+    if (Object.prototype.hasOwnProperty.call(req.body || {}, 'description')) {
+      const nextDescription =
+        typeof req.body?.description === 'string'
+          ? req.body.description.trim().slice(0, GROUP_DESCRIPTION_MAX_LEN)
+          : '';
+      group.description = nextDescription;
+      touched = true;
+    }
+
+    if (Object.prototype.hasOwnProperty.call(req.body || {}, 'announcement')) {
+      const nextAnnouncement =
+        typeof req.body?.announcement === 'string'
+          ? req.body.announcement.trim().slice(0, GROUP_ANNOUNCEMENT_MAX_LEN)
+          : '';
+      group.announcement = nextAnnouncement;
+      touched = true;
+    }
+
+    if (Object.prototype.hasOwnProperty.call(req.body || {}, 'myNickname')) {
+      const nextMyNickname =
+        typeof req.body?.myNickname === 'string'
+          ? req.body.myNickname.trim().slice(0, GROUP_MEMBER_NICK_MAX_LEN)
+          : '';
+      const nextMemberNicknames = {
+        ...(group.memberNicknames && typeof group.memberNicknames === 'object'
+          ? group.memberNicknames
+          : {}),
+      };
+      if (nextMyNickname) {
+        nextMemberNicknames[user.uid] = nextMyNickname;
+      } else {
+        delete nextMemberNicknames[user.uid];
+      }
+      group.memberNicknames = nextMemberNicknames;
+      touched = true;
+    }
+
+    if (!touched) {
+      res.status(400).json({ success: false, message: 'Ã»ÓÐ¿É¸üÐÂµÄ×Ö¶Î¡£' });
+      return;
+    }
+
+    group.updatedAt = new Date().toISOString();
+    groups[groupIndex] = sanitizeGroup(group);
+    await writeGroups(groups);
+    res.json({ success: true, group: serializeGroup(groups[groupIndex], users, user.uid) });
+  } catch (error) {
+    console.error('Group update error:', error);
+    res.status(500).json({ success: false, message: '¸üÐÂÈºÐÅÏ¢Ê§°Ü¡£' });
+  }
+});
+
+router.post('/leave', authenticate, async (req, res) => {
+  try {
+    await ensureGroupStorage();
+    const { user, users } = req.auth;
+    const groupId = Number(req.body?.groupId);
+    if (!Number.isInteger(groupId) || groupId <= 0) {
+      res.status(400).json({ success: false, message: 'ÈºIDÎÞÐ§¡£' });
+      return;
+    }
+
+    const groups = await readGroups();
+    const groupIndex = groups.findIndex((item) => item.id === groupId);
+    if (groupIndex === -1) {
+      res.status(404).json({ success: false, message: 'ÈºÁÄ²»´æÔÚ¡£' });
+      return;
+    }
+
+    const group = { ...groups[groupIndex] };
+    const memberUids = normalizeMemberUids(group.memberUids).filter((uid) => uid !== user.uid);
+    if (memberUids.length === normalizeMemberUids(group.memberUids).length) {
+      res.status(403).json({ success: false, message: 'Äã²»ÔÚ¸ÃÈºÁÄÖÐ¡£' });
+      return;
+    }
+
+    if (memberUids.length === 0) {
+      groups.splice(groupIndex, 1);
+      await writeGroups(groups);
+      res.json({ success: true, removed: true });
+      return;
+    }
+
+    const memberNicknames = {
+      ...(group.memberNicknames && typeof group.memberNicknames === 'object'
+        ? group.memberNicknames
+        : {}),
+    };
+    delete memberNicknames[user.uid];
+
+    group.memberUids = memberUids;
+    group.memberNicknames = memberNicknames;
+    if (!memberUids.includes(Number(group.ownerUid))) {
+      group.ownerUid = memberUids[0];
+    }
+    group.updatedAt = new Date().toISOString();
+
+    groups[groupIndex] = sanitizeGroup(group);
+    await writeGroups(groups);
+    res.json({ success: true, removed: false, group: serializeGroup(groups[groupIndex], users, user.uid) });
+  } catch (error) {
+    console.error('Group leave error:', error);
+    res.status(500).json({ success: false, message: 'ÍË³öÈºÁÄÊ§°Ü¡£' });
   }
 });
 

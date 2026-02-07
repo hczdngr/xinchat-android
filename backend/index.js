@@ -329,6 +329,55 @@ const routeMeta = [
   },
   {
     method: 'GET',
+    path: '/api/groups/detail',
+    label: 'Group detail',
+    note: 'Get details of a group by id.',
+    templates: [
+      {
+        name: 'Get group detail',
+        body: { groupId: 2000000000 },
+        hint: 'Authorization: Bearer <token>',
+      },
+    ],
+  },
+  {
+    method: 'POST',
+    path: '/api/groups/update',
+    label: 'Update group',
+    note: 'Update group profile fields or your nickname in group.',
+    templates: [
+      {
+        name: 'Update name',
+        body: { groupId: 2000000000, name: 'New Group Name' },
+        hint: 'Authorization: Bearer <token>',
+      },
+      {
+        name: 'Update announcement',
+        body: { groupId: 2000000000, announcement: 'Welcome to this group' },
+        hint: 'Authorization: Bearer <token>',
+      },
+      {
+        name: 'Update my nickname',
+        body: { groupId: 2000000000, myNickname: 'My Group Nick' },
+        hint: 'Authorization: Bearer <token>',
+      },
+    ],
+  },
+  {
+    method: 'POST',
+    path: '/api/groups/leave',
+    label: 'Leave group',
+    note: 'Leave a joined group.',
+    templates: [
+      {
+        name: 'Leave group',
+        body: { groupId: 2000000000 },
+        hint: 'Authorization: Bearer <token>',
+      },
+    ],
+  },
+  {
+    method: 'GET',
     path: '/api/voice/directory',
     label: 'Voice directory',
     note: 'Get voice contact directory.',

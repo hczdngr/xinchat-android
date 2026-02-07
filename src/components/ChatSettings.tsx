@@ -216,7 +216,6 @@ export default function ChatSettings() {
         const params = new URLSearchParams({
           targetType: 'private',
           targetUid: String(uid),
-          type: 'text',
           limit: String(PAGE_LIMIT),
         });
         if (beforeId) {
@@ -235,7 +234,7 @@ export default function ChatSettings() {
           await fetch(`${API_BASE}/api/chat/del`, {
             method: 'DELETE',
             headers: { 'Content-Type': 'application/json', ...authHeaders },
-            body: JSON.stringify({ id: item.id }),
+            body: JSON.stringify({ id: String(item.id) }),
           }).catch(() => undefined);
         }
         if (list.length < PAGE_LIMIT) {
@@ -309,7 +308,9 @@ export default function ChatSettings() {
               )}
               <Text style={styles.userName}>{displayName}</Text>
             </View>
-            <Text style={styles.arrow}>{'>'}</Text>
+            <View style={styles.arrowIcon}>
+              <ForwardIndicatorIcon />
+            </View>
           </Pressable>
           <View style={styles.divider} />
           <Pressable
@@ -380,6 +381,21 @@ function BackIcon() {
         strokeWidth={2}
         strokeLinecap="round"
         strokeLinejoin="round"
+      />
+    </Svg>
+  );
+}
+
+function ForwardIndicatorIcon() {
+  return (
+    <Svg width={18} height={18} viewBox="0 0 24 24" fill="none">
+      <Path
+        d="M15 18L9 12L15 6"
+        stroke="#b5bcc7"
+        strokeWidth={2}
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        transform="rotate(180 12 12)"
       />
     </Svg>
   );
@@ -489,10 +505,11 @@ const styles = StyleSheet.create({
     color: '#8f97a4',
     fontSize: 13,
   },
-  arrow: {
-    color: '#b5bcc7',
-    fontSize: 18,
-    fontWeight: '400',
+  arrowIcon: {
+    width: 18,
+    height: 18,
+    alignItems: 'center',
+    justifyContent: 'center',
   },
   switchBase: {
     width: 44,

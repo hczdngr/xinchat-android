@@ -16,6 +16,9 @@ type GroupPreview = {
   ownerUid?: number;
   memberUids?: number[];
   members?: FriendPreview[];
+  description?: string;
+  announcement?: string;
+  myNickname?: string;
 };
 
 export type RootStackParamList = {
@@ -25,6 +28,7 @@ export type RootStackParamList = {
         openChatTargetType?: 'private' | 'group';
         openChatFriend?: FriendPreview;
         openChatGroup?: GroupPreview;
+        openChatFocusMessageId?: string;
       }
     | undefined;
   Profile: undefined;
@@ -35,6 +39,15 @@ export type RootStackParamList = {
   ChatSettings: {
     uid: number;
     friend?: FriendPreview;
+  };
+  GroupChatSettings: {
+    uid: number;
+    group?: GroupPreview;
+  };
+  GroupChatSearch: {
+    uid: number;
+    title?: string;
+    group?: GroupPreview;
   };
   CreateGroup:
     | {
@@ -54,5 +67,7 @@ export type RootNavigation = NativeStackNavigationProp<RootStackParamList>;
 export type HomeRoute = RouteProp<RootStackParamList, 'Home'>;
 export type FriendProfileRoute = RouteProp<RootStackParamList, 'FriendProfile'>;
 export type ChatSettingsRoute = RouteProp<RootStackParamList, 'ChatSettings'>;
+export type GroupChatSettingsRoute = RouteProp<RootStackParamList, 'GroupChatSettings'>;
+export type GroupChatSearchRoute = RouteProp<RootStackParamList, 'GroupChatSearch'>;
 export type CreateGroupRoute = RouteProp<RootStackParamList, 'CreateGroup'>;
 export type InAppBrowserRoute = RouteProp<RootStackParamList, 'InAppBrowser'>;

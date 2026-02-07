@@ -13,6 +13,8 @@ import QRScan from './src/components/QRScan';
 import InAppBrowser from './src/components/InAppBrowser';
 import ChatSettings from './src/components/ChatSettings';
 import CreateGroup from './src/components/CreateGroup';
+import GroupChatSettings from './src/components/GroupChatSettings';
+import GroupChatSearch from './src/components/GroupChatSearch';
 import { API_BASE } from './src/config';
 import { STORAGE_KEYS } from './src/constants/storageKeys';
 import type { RootStackParamList } from './src/navigation/types';
@@ -93,6 +95,59 @@ function App() {
     const sub = BackHandler.addEventListener('hardwareBackPress', onBackPress);
     return () => sub.remove();
   }, [isAuthed, view]);
+
+  useEffect(() => {
+    if (Platform.OS !== 'web' || typeof document === 'undefined') return;
+    const htmlStyle = document.documentElement.style;
+    const bodyStyle = document.body?.style;
+    const rootEl = document.getElementById('root');
+    const rootStyle = rootEl?.style;
+    if (!bodyStyle || !rootStyle) return;
+
+    const prev = {
+      htmlOverflow: htmlStyle.overflow,
+      htmlOverscroll: (htmlStyle as any).overscrollBehavior,
+      htmlHeight: htmlStyle.height,
+      bodyOverflow: bodyStyle.overflow,
+      bodyOverscroll: (bodyStyle as any).overscrollBehavior,
+      bodyMargin: bodyStyle.margin,
+      bodyHeight: bodyStyle.height,
+      bodyWidth: bodyStyle.width,
+      rootOverflow: rootStyle.overflow,
+      rootHeight: rootStyle.height,
+      rootWidth: rootStyle.width,
+    };
+
+    htmlStyle.height = '100%';
+    htmlStyle.overflow = 'hidden';
+    (htmlStyle as any).overscrollBehavior = 'none';
+
+    bodyStyle.margin = '0';
+    bodyStyle.width = '100%';
+    bodyStyle.height = '100%';
+    bodyStyle.overflow = 'hidden';
+    (bodyStyle as any).overscrollBehavior = 'none';
+
+    rootStyle.width = '100%';
+    rootStyle.height = '100%';
+    rootStyle.overflow = 'hidden';
+
+    return () => {
+      htmlStyle.overflow = prev.htmlOverflow;
+      (htmlStyle as any).overscrollBehavior = prev.htmlOverscroll;
+      htmlStyle.height = prev.htmlHeight;
+
+      bodyStyle.overflow = prev.bodyOverflow;
+      (bodyStyle as any).overscrollBehavior = prev.bodyOverscroll;
+      bodyStyle.margin = prev.bodyMargin;
+      bodyStyle.height = prev.bodyHeight;
+      bodyStyle.width = prev.bodyWidth;
+
+      rootStyle.overflow = prev.rootOverflow;
+      rootStyle.height = prev.rootHeight;
+      rootStyle.width = prev.rootWidth;
+    };
+  }, []);
 
   const refreshProfile = useCallback(async () => {
     const authToken = token || (await storage.getString(STORAGE_KEYS.token)) || '';
@@ -315,6 +370,8 @@ function App() {
                 </Stack.Screen>
                 <Stack.Screen name="FriendProfile" component={FriendProfile} />
                 <Stack.Screen name="ChatSettings" component={ChatSettings} />
+                <Stack.Screen name="GroupChatSettings" component={GroupChatSettings} />
+                <Stack.Screen name="GroupChatSearch" component={GroupChatSearch} />
                 <Stack.Screen name="CreateGroup" component={CreateGroup} />
                 <Stack.Screen name="EditProfile">
                   {({ navigation }) => (
@@ -342,6 +399,7 @@ const styles = StyleSheet.create({
   appRoot: {
     flex: 1,
     minHeight: '100%',
+    overflow: 'hidden',
   },
 });
 

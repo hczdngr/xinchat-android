@@ -55,6 +55,9 @@ type Group = {
   id: number;
   ownerUid?: number;
   name?: string;
+  description?: string;
+  announcement?: string;
+  myNickname?: string;
   memberUids: number[];
   members: Friend[];
   createdAt?: string;
@@ -92,6 +95,7 @@ type MessageListItem = {
 };
 type SearchChatHit = {
   key: string;
+  messageId: string;
   uid: number;
   targetType: 'private' | 'group';
   title: string;
@@ -203,10 +207,15 @@ const normalizeGroup = (input: any): Group | null => {
       )
     : [];
   const members = Array.isArray(input?.members) ? sanitizeFriends(input.members) : [];
+  const memberCount = memberUids.length > 0 ? memberUids.length : members.length;
+  const normalizedName = stripAutoGroupCountSuffix(input?.name, memberCount);
   return {
     id,
     ownerUid: Number.isInteger(Number(input?.ownerUid)) ? Number(input.ownerUid) : undefined,
-    name: typeof input?.name === 'string' ? input.name : '',
+    name: normalizedName,
+    description: typeof input?.description === 'string' ? input.description : '',
+    announcement: typeof input?.announcement === 'string' ? input.announcement : '',
+    myNickname: typeof input?.myNickname === 'string' ? input.myNickname : '',
     memberUids,
     members,
     createdAt: typeof input?.createdAt === 'string' ? input.createdAt : '',
@@ -285,6 +294,44 @@ const sanitizeChatBackgroundMap = (input: any): ChatBackgroundMap => {
   return next;
 };
 
+const sanitizeGroupRemarksMap = (input: any): Record<number, string> => {
+  if (!input || typeof input !== 'object') return {};
+  const next: Record<number, string> = {};
+  Object.entries(input).forEach(([rawUid, rawValue]) => {
+    const uid = Number(rawUid);
+    if (!Number.isInteger(uid) || uid <= 0) return;
+    if (typeof rawValue !== 'string') return;
+    const text = rawValue.trim().slice(0, 60);
+    if (!text) return;
+    next[uid] = text;
+  });
+  return next;
+};
+
+const stripAutoGroupCountSuffix = (rawName: any, memberCount: number) => {
+  const text = String(rawName || '').trim();
+  if (!text) return '';
+  if (!Number.isInteger(memberCount) || memberCount <= 0) return text;
+  const match = text.match(/\((\d+)\)$/);
+  if (!match) return text;
+  const suffixCount = Number(match[1]);
+  if (!Number.isInteger(suffixCount) || suffixCount !== memberCount) return text;
+  return text.slice(0, text.length - match[0].length).trim();
+};
+
+const getGroupDisplayName = (group?: Partial<Group> | null) => {
+  if (!group) return '';
+  const memberCount = Array.isArray(group.memberUids)
+    ? group.memberUids.length
+    : Array.isArray(group.members)
+      ? group.members.length
+      : 0;
+  const stripped = stripAutoGroupCountSuffix(group.name, memberCount);
+  if (stripped) return stripped;
+  const gid = Number(group.id);
+  return Number.isInteger(gid) && gid > 0 ? `群聊${gid}` : '群聊';
+};
+
 export default function Home({ profile }: { profile: Profile }) {
   const insets = useSafeAreaInsets();
   const navPad = Math.min(insets.bottom, 6);
@@ -311,6 +358,7 @@ export default function Home({ profile }: { profile: Profile }) {
   const [hiddenMap, setHiddenMap] = useState<HiddenMap>({});
   const [mutedMap, setMutedMap] = useState<MutedMap>({});
   const [chatBackgroundMap, setChatBackgroundMap] = useState<ChatBackgroundMap>({});
+  const [groupRemarksMap, setGroupRemarksMap] = useState<Record<number, string>>({});
   const [chatMenuVisible, setChatMenuVisible] = useState(false);
   const [chatMenuTargetUid, setChatMenuTargetUid] = useState<number | null>(null);
   const [chatMenuTargetType, setChatMenuTargetType] = useState<'private' | 'group'>('private');
@@ -323,6 +371,7 @@ export default function Home({ profile }: { profile: Profile }) {
   const [searchVisible, setSearchVisible] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
   const searchAnim = useRef(new Animated.Value(0)).current;
+  const [focusedMessageId, setFocusedMessageId] = useState<string | null>(null);
   const [avatarFailed, setAvatarFailed] = useState(false);
 
   const [activeChatUid, setActiveChatUid] = useState<number | null>(null);
@@ -438,6 +487,10 @@ export default function Home({ profile }: { profile: Profile }) {
   const readAtMapRef = useRef<ReadAtMap>({});
   const mutedMapRef = useRef<MutedMap>({});
   const groupsRef = useRef<Group[]>([]);
+  const historyLoadingRef = useRef<Record<number, boolean>>({});
+  const historyHasMoreRef = useRef<Record<number, boolean>>({});
+  const messageOffsetMapRef = useRef<Map<number, Map<string, number>>>(new Map());
+  const messageFocusTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const activeChatUidRef = useRef<number | null>(null);
   const contentHeightRef = useRef(0);
   const messageListRef = useRef<ScrollView | null>(null);
@@ -496,6 +549,24 @@ export default function Home({ profile }: { profile: Profile }) {
   useEffect(() => {
     groupsRef.current = groups;
   }, [groups]);
+
+  useEffect(() => {
+    historyLoadingRef.current = historyLoading;
+  }, [historyLoading]);
+
+  useEffect(() => {
+    historyHasMoreRef.current = historyHasMore;
+  }, [historyHasMore]);
+
+  useEffect(
+    () => () => {
+      if (messageFocusTimerRef.current) {
+        clearTimeout(messageFocusTimerRef.current);
+        messageFocusTimerRef.current = null;
+      }
+    },
+    []
+  );
 
   useEffect(() => {
     if (profile) {
@@ -697,13 +768,18 @@ export default function Home({ profile }: { profile: Profile }) {
   const selfUid = useMemo(() => profileData.uid, [profileData.uid]);
   const canSend = useMemo(() => draftMessage.trim().length > 0, [draftMessage]);
   const activeChatTitle = useMemo(() => {
-    if (activeChatGroup) return activeChatGroup.name || `群聊${activeChatGroup.id}`;
+    if (activeChatGroup) return getGroupDisplayName(activeChatGroup);
     return activeChatFriend?.nickname || activeChatFriend?.username || '聊天';
   }, [activeChatFriend?.nickname, activeChatFriend?.username, activeChatGroup]);
   const activeChatStatusText = useMemo(() => {
-    if (activeChatGroup) return '';
+    if (activeChatGroup) {
+      const remark = String(groupRemarksMap[activeChatGroup.id] || '').trim();
+      if (remark) return remark;
+      const myNickname = String(activeChatGroup.myNickname || '').trim();
+      return myNickname;
+    }
     return activeChatFriend?.online ? '在线' : '离线';
-  }, [activeChatFriend?.online, activeChatGroup]);
+  }, [activeChatFriend?.online, activeChatGroup, groupRemarksMap]);
   const activeChatFriendAvatar = useMemo(
     () => normalizeImageUrl(activeChatFriend?.avatar),
     [activeChatFriend?.avatar]
@@ -756,7 +832,15 @@ export default function Home({ profile }: { profile: Profile }) {
   }, []);
 
   const hydrateHomeCache = useCallback(async () => {
-    const [cachedFriends, cachedGroups, cachedMessages, cachedLatest, cachedUnread, cachedPending] =
+    const [
+      cachedFriends,
+      cachedGroups,
+      cachedMessages,
+      cachedLatest,
+      cachedUnread,
+      cachedPending,
+      cachedGroupRemarks,
+    ] =
       await Promise.all([
         storage.getJson<Friend[]>(STORAGE_KEYS.homeFriendsCache),
         storage.getJson<Group[]>(STORAGE_KEYS.homeGroupsCache),
@@ -764,6 +848,7 @@ export default function Home({ profile }: { profile: Profile }) {
         storage.getJson<LatestMap>(STORAGE_KEYS.homeLatestCache),
         storage.getJson<Record<number, number>>(STORAGE_KEYS.homeUnreadCache),
         storage.getJson<number>(STORAGE_KEYS.homePendingRequestsCache),
+        storage.getJson<Record<number, string>>(STORAGE_KEYS.groupRemarks),
       ]);
 
     const nextFriends = sanitizeFriends(Array.isArray(cachedFriends) ? cachedFriends : []);
@@ -813,6 +898,7 @@ export default function Home({ profile }: { profile: Profile }) {
     setLatestMap(nextLatest);
     setUnreadMap(nextUnread);
     setPendingRequestCount(Number.isFinite(Number(cachedPending)) ? Math.max(0, Number(cachedPending)) : 0);
+    setGroupRemarksMap(sanitizeGroupRemarksMap(cachedGroupRemarks));
     homeCacheHydratedRef.current = true;
 
     return (
@@ -1145,6 +1231,90 @@ export default function Home({ profile }: { profile: Profile }) {
     }, 0);
   }, []);
 
+  const sleep = useCallback((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)), []);
+
+  const flashMessageFocus = useCallback((messageId: string) => {
+    if (!messageId) return;
+    setFocusedMessageId(messageId);
+    if (messageFocusTimerRef.current) {
+      clearTimeout(messageFocusTimerRef.current);
+    }
+    messageFocusTimerRef.current = setTimeout(() => {
+      setFocusedMessageId(null);
+      messageFocusTimerRef.current = null;
+    }, 1800);
+  }, []);
+
+  const recordMessageOffset = useCallback((uid: number, messageId: string, y: number) => {
+    if (!uid || !messageId || !Number.isFinite(y)) return;
+    const key = String(messageId);
+    const bucketMap = messageOffsetMapRef.current.get(uid) || new Map<string, number>();
+    bucketMap.set(key, y);
+    messageOffsetMapRef.current.set(uid, bucketMap);
+  }, []);
+
+  const scrollToMessageById = useCallback((uid: number, messageId: string, animated = true) => {
+    if (!uid || !messageId || !messageListRef.current) return false;
+    const key = String(messageId);
+    const bucketMap = messageOffsetMapRef.current.get(uid);
+    const measuredY = bucketMap?.get(key);
+    if (typeof measuredY === 'number' && Number.isFinite(measuredY)) {
+      messageListRef.current.scrollTo({ y: Math.max(0, measuredY - 12), animated });
+      return true;
+    }
+    const bucket = messagesByUidRef.current[uid] || [];
+    const fallbackIndex = bucket.findIndex((item) => String(item.id) === key);
+    if (fallbackIndex === -1) return false;
+    const estimatedY = Math.max(0, fallbackIndex * 66);
+    messageListRef.current.scrollTo({ y: estimatedY, animated });
+    return true;
+  }, []);
+
+  const locateChatMessage = useCallback(
+    async (uid: number, messageId: string) => {
+      if (!uid || !messageId) return;
+      const normalizedId = String(messageId);
+      let guard = 0;
+      while (guard < 60) {
+        guard += 1;
+        const bucket = messagesByUidRef.current[uid] || [];
+        const found = bucket.some((item) => String(item.id) === normalizedId);
+        if (found) {
+          for (let i = 0; i < 8; i += 1) {
+            const done = scrollToMessageById(uid, normalizedId, true);
+            if (done) {
+              flashMessageFocus(normalizedId);
+              return;
+            }
+            await sleep(50);
+          }
+          flashMessageFocus(normalizedId);
+          return;
+        }
+
+        if (historyLoadingRef.current[uid]) {
+          await sleep(120);
+          continue;
+        }
+
+        const first = bucket[0];
+        if (!first) {
+          await loadHistory(uid);
+          await sleep(60);
+          continue;
+        }
+
+        if (!historyHasMoreRef.current[uid]) {
+          break;
+        }
+
+        await loadHistory(uid, { beforeId: first.id });
+        await sleep(60);
+      }
+    },
+    [flashMessageFocus, loadHistory, scrollToMessageById, sleep]
+  );
+
   const openChat = useCallback(
     async (friend: Friend) => {
       if (!friend) return;
@@ -1394,17 +1564,24 @@ export default function Home({ profile }: { profile: Profile }) {
     const params = route.params || {};
     const targetUid = Number(params.openChatUid);
     if (!Number.isFinite(targetUid) || targetUid <= 0) return;
+    const focusMessageId = String(params.openChatFocusMessageId || '').trim();
     openChatFromPayload(targetUid, params.openChatFriend, {
       targetType: params.openChatTargetType,
       group: params.openChatGroup,
     });
+    if (focusMessageId) {
+      setTimeout(() => {
+        locateChatMessage(targetUid, focusMessageId).catch(() => undefined);
+      }, 120);
+    }
     navigation.setParams({
       openChatUid: undefined,
       openChatTargetType: undefined,
       openChatFriend: undefined,
       openChatGroup: undefined,
+      openChatFocusMessageId: undefined,
     });
-  }, [route.params, navigation, openChatFromPayload]);
+  }, [route.params, navigation, locateChatMessage, openChatFromPayload]);
 
   useFocusEffect(
     useCallback(() => {
@@ -1415,19 +1592,27 @@ export default function Home({ profile }: { profile: Profile }) {
           targetType?: 'private' | 'group';
           friend?: Partial<Friend>;
           group?: Partial<Group>;
+          focusMessageId?: string | number;
         }>(STORAGE_KEYS.pendingOpenChat);
         if (cancelled || !pending?.uid) return;
         await storage.remove(STORAGE_KEYS.pendingOpenChat);
-        openChatFromPayload(Number(pending.uid), pending.friend, {
+        const targetUid = Number(pending.uid);
+        openChatFromPayload(targetUid, pending.friend, {
           targetType: pending.targetType,
           group: pending.group,
         });
+        const focusMessageId = String(pending.focusMessageId || '').trim();
+        if (focusMessageId) {
+          setTimeout(() => {
+            locateChatMessage(targetUid, focusMessageId).catch(() => undefined);
+          }, 120);
+        }
       };
       loadPending().catch(() => undefined);
       return () => {
         cancelled = true;
       };
-    }, [openChatFromPayload])
+    }, [locateChatMessage, openChatFromPayload])
   );
 
   useFocusEffect(
@@ -1442,19 +1627,49 @@ export default function Home({ profile }: { profile: Profile }) {
     useCallback(() => {
       let cancelled = false;
       const syncFromSettings = async () => {
-        const [storedPinned, storedMuted, storedBackground, pendingAction] = await Promise.all([
-          storage.getJson<PinnedMap>(STORAGE_KEYS.pinned),
-          storage.getJson<MutedMap>(STORAGE_KEYS.chatMuted),
-          storage.getJson<ChatBackgroundMap>(STORAGE_KEYS.chatBackground),
-          storage.getJson<{ type?: string; uid?: number }>(STORAGE_KEYS.pendingChatSettingsAction),
-        ]);
+        const [storedPinned, storedMuted, storedBackground, storedGroupRemarks, pendingAction] =
+          await Promise.all([
+            storage.getJson<PinnedMap>(STORAGE_KEYS.pinned),
+            storage.getJson<MutedMap>(STORAGE_KEYS.chatMuted),
+            storage.getJson<ChatBackgroundMap>(STORAGE_KEYS.chatBackground),
+            storage.getJson<Record<number, string>>(STORAGE_KEYS.groupRemarks),
+            storage.getJson<{
+              type?: string;
+              uid?: number;
+              group?: Partial<Group>;
+            }>(STORAGE_KEYS.pendingChatSettingsAction),
+          ]);
         if (cancelled) return;
 
         setPinnedMap(sanitizeBooleanMap(storedPinned));
         setMutedMap(sanitizeBooleanMap(storedMuted));
         setChatBackgroundMap(sanitizeChatBackgroundMap(storedBackground));
+        setGroupRemarksMap(sanitizeGroupRemarksMap(storedGroupRemarks));
 
         const actionUid = Number(pendingAction?.uid);
+        if (pendingAction?.type === 'group_update' && Number.isInteger(actionUid) && actionUid > 0) {
+          await storage.remove(STORAGE_KEYS.pendingChatSettingsAction);
+          const payload = pendingAction.group || {};
+          setGroups((prev) => {
+            const existing = prev.find((item) => item.id === actionUid);
+            const merged = normalizeGroup({
+              ...(existing || {
+                id: actionUid,
+                memberUids: [],
+                members: [],
+              }),
+              ...payload,
+              id: actionUid,
+            });
+            if (!merged) return prev;
+            if (existing) {
+              return prev.map((item) => (item.id === actionUid ? { ...item, ...merged } : item));
+            }
+            return [merged, ...prev];
+          });
+          return;
+        }
+
         if (pendingAction?.type === 'delete_chat' && Number.isInteger(actionUid) && actionUid > 0) {
           await storage.remove(STORAGE_KEYS.pendingChatSettingsAction);
           messageIdSetsRef.current.delete(actionUid);
@@ -1472,6 +1687,76 @@ export default function Home({ profile }: { profile: Profile }) {
           setHiddenMap((prev) => {
             const next = { ...prev, [actionUid]: true };
             persistHiddenMap(next).catch(() => undefined);
+            return next;
+          });
+          if (activeChatUidRef.current === actionUid) {
+            setActiveChatUid(null);
+          }
+          return;
+        }
+
+        if (pendingAction?.type === 'group_delete_chat' && Number.isInteger(actionUid) && actionUid > 0) {
+          await storage.remove(STORAGE_KEYS.pendingChatSettingsAction);
+          messageIdSetsRef.current.delete(actionUid);
+          setMessagesByUid((prev) => {
+            const next = { ...prev };
+            delete next[actionUid];
+            return next;
+          });
+          setLatestMap((prev) => {
+            const next = { ...prev };
+            delete next[actionUid];
+            return next;
+          });
+          setUnreadMap((prev) => ({ ...prev, [actionUid]: 0 }));
+          return;
+        }
+
+        if (pendingAction?.type === 'group_leave' && Number.isInteger(actionUid) && actionUid > 0) {
+          await storage.remove(STORAGE_KEYS.pendingChatSettingsAction);
+          messageIdSetsRef.current.delete(actionUid);
+          setGroups((prev) => prev.filter((group) => group.id !== actionUid));
+          setMessagesByUid((prev) => {
+            const next = { ...prev };
+            delete next[actionUid];
+            return next;
+          });
+          setLatestMap((prev) => {
+            const next = { ...prev };
+            delete next[actionUid];
+            return next;
+          });
+          setUnreadMap((prev) => {
+            const next = { ...prev };
+            delete next[actionUid];
+            return next;
+          });
+          setPinnedMap((prev) => {
+            if (!prev[actionUid]) return prev;
+            const next = { ...prev };
+            delete next[actionUid];
+            storage.setJson(STORAGE_KEYS.pinned, next).catch(() => undefined);
+            return next;
+          });
+          setMutedMap((prev) => {
+            if (!prev[actionUid]) return prev;
+            const next = { ...prev };
+            delete next[actionUid];
+            storage.setJson(STORAGE_KEYS.chatMuted, next).catch(() => undefined);
+            return next;
+          });
+          setChatBackgroundMap((prev) => {
+            if (!prev[actionUid]) return prev;
+            const next = { ...prev };
+            delete next[actionUid];
+            storage.setJson(STORAGE_KEYS.chatBackground, next).catch(() => undefined);
+            return next;
+          });
+          setGroupRemarksMap((prev) => {
+            if (!prev[actionUid]) return prev;
+            const next = { ...prev };
+            delete next[actionUid];
+            storage.setJson(STORAGE_KEYS.groupRemarks, next).catch(() => undefined);
             return next;
           });
           if (activeChatUidRef.current === actionUid) {
@@ -1814,7 +2099,7 @@ export default function Home({ profile }: { profile: Profile }) {
         return {
           uid,
           targetType: 'group',
-          title: group.name || `群聊${uid}`,
+          title: getGroupDisplayName(group),
           preview: latest?.text || '暂无消息',
           latest,
           pinned: Boolean(pinnedMap[uid]),
@@ -1854,9 +2139,11 @@ export default function Home({ profile }: { profile: Profile }) {
   }, [friends, hasSearchQuery, normalizedSearchQuery]);
   const searchGroups = useMemo(() => {
     if (!hasSearchQuery) return [] as Group[];
-    return groups.filter((group) =>
-      String(group.name || '').toLowerCase().includes(normalizedSearchQuery)
-    );
+    return groups.filter((group) => {
+      const rawName = String(group.name || '').toLowerCase();
+      const displayName = getGroupDisplayName(group).toLowerCase();
+      return rawName.includes(normalizedSearchQuery) || displayName.includes(normalizedSearchQuery);
+    });
   }, [groups, hasSearchQuery, normalizedSearchQuery]);
   const searchChatHits = useMemo<SearchChatHit[]>(() => {
     if (!hasSearchQuery) return [];
@@ -1873,7 +2160,7 @@ export default function Home({ profile }: { profile: Profile }) {
       const targetType: 'private' | 'group' = maybeGroup ? 'group' : 'private';
       const title =
         targetType === 'group'
-          ? maybeGroup?.name || `群聊${uid}`
+          ? getGroupDisplayName(maybeGroup)
           : maybeFriend?.nickname || maybeFriend?.username || `用户${uid}`;
       list.forEach((message) => {
         const content = String(message?.content || '').trim();
@@ -1882,6 +2169,7 @@ export default function Home({ profile }: { profile: Profile }) {
         const createdAtMs = Number(message?.createdAtMs);
         hits.push({
           key: `${uid}:${String(message?.id)}`,
+          messageId: String(message?.id),
           uid,
           targetType,
           title,
@@ -1963,19 +2251,27 @@ export default function Home({ profile }: { profile: Profile }) {
   const onSelectSearchChatHit = useCallback(
     (hit: SearchChatHit) => {
       closeSearchPanel();
+      const scheduleLocate = () => {
+        setTimeout(() => {
+          locateChatMessage(hit.uid, hit.messageId).catch(() => undefined);
+        }, 80);
+      };
       if (hit.targetType === 'group') {
         const group = groups.find((item) => item.id === hit.uid);
         openChatFromPayload(hit.uid, undefined, { targetType: 'group', group });
+        scheduleLocate();
         return;
       }
       const friend = friends.find((item) => item.uid === hit.uid);
       if (friend) {
         openChat(friend);
+        scheduleLocate();
         return;
       }
       openChatFromPayload(hit.uid);
+      scheduleLocate();
     },
-    [closeSearchPanel, friends, groups, openChat, openChatFromPayload]
+    [closeSearchPanel, friends, groups, locateChatMessage, openChat, openChatFromPayload]
   );
 
   const closeChatMenu = useCallback(() => {
@@ -2018,7 +2314,6 @@ export default function Home({ profile }: { profile: Profile }) {
       const params = new URLSearchParams({
         targetType: chatMenuTargetType,
         targetUid: String(uid),
-        type: 'text',
         limit: String(PAGE_LIMIT),
       });
       if (beforeId) {
@@ -2037,7 +2332,7 @@ export default function Home({ profile }: { profile: Profile }) {
         await fetch(`${API_BASE}/api/chat/del`, {
           method: 'DELETE',
           headers: { 'Content-Type': 'application/json', ...authHeaders() },
-          body: JSON.stringify({ id: item.id }),
+          body: JSON.stringify({ id: String(item.id) }),
         }).catch(() => undefined);
       }
       if (list.length < PAGE_LIMIT) {
@@ -2120,7 +2415,23 @@ export default function Home({ profile }: { profile: Profile }) {
             <Pressable
               style={styles.chatHeaderMenu}
               onPress={() => {
-                if (!activeChatUid || activeChatGroup) return;
+                if (!activeChatUid) return;
+                if (activeChatGroup) {
+                  navigation.navigate('GroupChatSettings', {
+                    uid: activeChatUid,
+                    group: {
+                      id: activeChatGroup.id,
+                      ownerUid: activeChatGroup.ownerUid,
+                      name: activeChatGroup.name,
+                      description: activeChatGroup.description,
+                      announcement: activeChatGroup.announcement,
+                      myNickname: activeChatGroup.myNickname,
+                      memberUids: activeChatGroup.memberUids,
+                      members: activeChatGroup.members,
+                    },
+                  });
+                  return;
+                }
                 navigation.navigate('ChatSettings', {
                   uid: activeChatUid,
                   friend: activeChatFriend
@@ -2157,6 +2468,8 @@ export default function Home({ profile }: { profile: Profile }) {
             ) : null}
             {activeChatMessages.map((item, idx) => {
               const isSelf = item.senderUid === selfUid;
+              const itemId = String(item.id);
+              const isFocused = focusedMessageId === itemId;
               const prev = idx > 0 ? activeChatMessages[idx - 1] : null;
               const prevMs = Number(prev?.createdAtMs);
               const currentMs = Number(item.createdAtMs);
@@ -2175,13 +2488,22 @@ export default function Home({ profile }: { profile: Profile }) {
                 : getAvatarText(senderName || '群友');
               const showSender = Boolean(activeChatGroup && !isSelf);
               return (
-                <React.Fragment key={String(item.id)}>
+                <React.Fragment key={itemId}>
                   {showTime ? (
                     <Text style={styles.chatTimeDivider}>
                       {formatTime(item.createdAt, item.createdAtMs)}
                     </Text>
                   ) : null}
-                  <View style={[styles.messageRow, isSelf && styles.selfRow]}>
+                  <View
+                    style={[styles.messageRow, isSelf && styles.selfRow]}
+                    onLayout={(event) =>
+                      recordMessageOffset(
+                        activeChatUid,
+                        itemId,
+                        Number(event?.nativeEvent?.layout?.y) || 0
+                      )
+                    }
+                  >
                     <View style={[styles.msgAvatarWrap, isSelf && styles.selfMsgAvatarWrap]}>
                       {avatarUrl ? (
                         <Image source={{ uri: avatarUrl }} style={styles.msgAvatarImage} />
@@ -2193,7 +2515,14 @@ export default function Home({ profile }: { profile: Profile }) {
                     </View>
                     <View style={[styles.bubbleWrap, isSelf && styles.selfBubbleWrap]}>
                       {showSender ? <Text style={styles.groupSenderName}>{senderName}</Text> : null}
-                      <View style={[styles.bubble, isSelf && styles.selfBubble]}>
+                      <View
+                        style={[
+                          styles.bubble,
+                          isSelf && styles.selfBubble,
+                          isFocused && !isSelf && styles.bubbleFocused,
+                          isFocused && isSelf && styles.selfBubbleFocused,
+                        ]}
+                      >
                         <Text style={[styles.messageText, isSelf && styles.selfText]}>
                           {item.content}
                         </Text>
@@ -2302,10 +2631,9 @@ export default function Home({ profile }: { profile: Profile }) {
                     style={[styles.msgItem, item.pinned && styles.msgItemPinned]}
                     onPress={() => {
                       if (item.targetType === 'group') {
-                        openChat({
-                          uid: item.uid,
-                          nickname: item.title,
-                          username: item.title,
+                        openChatFromPayload(item.uid, undefined, {
+                          targetType: 'group',
+                          group: item.group,
                         });
                         return;
                       }
@@ -2374,7 +2702,9 @@ export default function Home({ profile }: { profile: Profile }) {
                     </Text>
                   </View>
                 ) : null}
-                <Text style={styles.newFriendArrow}>{'\u203a'}</Text>
+                <View style={styles.newFriendArrowIcon}>
+                  <ForwardIndicatorIcon />
+                </View>
               </Pressable>
               {!loadingFriends && friends.length > 0
                 ? friends.map((friend) => (
@@ -2490,17 +2820,6 @@ export default function Home({ profile }: { profile: Profile }) {
           </View>
 
           <ScrollView style={styles.searchOverlayScroll} contentContainerStyle={styles.searchOverlayInner}>
-            {!hasSearchQuery ? (
-              <View style={styles.searchGuideCard}>
-                <Text style={styles.searchGuideTitle}>支持搜索</Text>
-                <Text style={styles.searchGuideItem}>用户名</Text>
-                <Text style={styles.searchGuideItem}>用户昵称</Text>
-                <Text style={styles.searchGuideItem}>用户UID</Text>
-                <Text style={styles.searchGuideItem}>聊天记录</Text>
-                <Text style={styles.searchGuideItem}>群昵称</Text>
-              </View>
-            ) : null}
-
             {hasSearchQuery ? (
               <>
                 <View style={styles.searchSection}>
@@ -2545,11 +2864,11 @@ export default function Home({ profile }: { profile: Profile }) {
                       >
                         <GroupAvatarGrid
                           members={group.members}
-                          fallbackText={getAvatarText(group.name || `群${group.id}`)}
+                          fallbackText={getAvatarText(getGroupDisplayName(group))}
                           size={36}
                         />
                         <View style={styles.searchResultInfo}>
-                          <Text style={styles.searchResultTitle}>{group.name || `群聊${group.id}`}</Text>
+                          <Text style={styles.searchResultTitle}>{getGroupDisplayName(group)}</Text>
                           <Text style={styles.searchResultSub}>群ID: {group.id}</Text>
                         </View>
                       </Pressable>
@@ -2813,24 +3132,6 @@ const styles = StyleSheet.create({
     paddingVertical: 12,
     gap: 10,
     paddingBottom: 28,
-  },
-  searchGuideCard: {
-    backgroundColor: '#ffffff',
-    borderWidth: 1,
-    borderColor: '#e4eaf3',
-    borderRadius: 12,
-    paddingHorizontal: 12,
-    paddingVertical: 10,
-    gap: 6,
-  },
-  searchGuideTitle: {
-    fontSize: 14,
-    color: '#2b3e56',
-    fontWeight: '600',
-  },
-  searchGuideItem: {
-    fontSize: 13,
-    color: '#607289',
   },
   searchSection: {
     backgroundColor: '#ffffff',
@@ -3140,10 +3441,11 @@ const styles = StyleSheet.create({
     fontSize: 10,
     fontWeight: '700',
   },
-  newFriendArrow: {
-    color: '#9aa7b8',
-    fontSize: 22,
-    lineHeight: 22,
+  newFriendArrowIcon: {
+    width: 18,
+    height: 18,
+    alignItems: 'center',
+    justifyContent: 'center',
   },
   contactItem: {
     flexDirection: 'row',
@@ -3505,6 +3807,13 @@ const styles = StyleSheet.create({
     backgroundColor: '#4a9df8',
     borderColor: '#4a9df8',
   },
+  bubbleFocused: {
+    borderColor: '#f7b84b',
+    backgroundColor: '#fff8e8',
+  },
+  selfBubbleFocused: {
+    borderColor: '#ffd487',
+  },
   messageText: {
     fontSize: 14,
     color: '#1a1a1a',
@@ -3620,6 +3929,21 @@ function BackIcon() {
         strokeWidth={2}
         strokeLinecap="round"
         strokeLinejoin="round"
+      />
+    </Svg>
+  );
+}
+
+function ForwardIndicatorIcon() {
+  return (
+    <Svg width={18} height={18} viewBox="0 0 24 24" fill="none">
+      <Path
+        d="M15 18L9 12L15 6"
+        stroke="#9aa7b8"
+        strokeWidth={2}
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        transform="rotate(180 12 12)"
       />
     </Svg>
   );

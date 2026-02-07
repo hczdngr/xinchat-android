@@ -1224,11 +1224,12 @@ router.post('/overview', authenticate, async (req, res) => {
 router.delete('/del', authenticate, async (req, res) => {
   try {
     await ensureChatStorage();
-    const { id } = req.body || {};
-    if (typeof id !== 'string' || id.trim() === '') {
+    const rawId = req.body?.id;
+    if ((typeof rawId !== 'string' && typeof rawId !== 'number') || String(rawId).trim() === '') {
       res.status(400).json({ success: false, message: '请求失败。' });
       return;
     }
+    const id = String(rawId).trim();
 
     const database = await openDb();
     const selectStmt = database.prepare(
@@ -1252,7 +1253,16 @@ router.delete('/del', authenticate, async (req, res) => {
       targetType === 'private' &&
       Number.isInteger(targetUid) &&
       targetUid === user.uid;
-    if (!isSender && !isPrivateRecipient) {
+    let isGroupMember = false;
+    if (targetType === 'group' && Number.isInteger(targetUid) && targetUid > 0) {
+      const groups = await readGroups();
+      const group = groups.find((item) => Number(item?.id) === targetUid);
+      const memberUids = Array.isArray(group?.memberUids)
+        ? group.memberUids.filter((uid) => Number.isInteger(uid))
+        : [];
+      isGroupMember = memberUids.includes(user.uid);
+    }
+    if (!isSender && !isPrivateRecipient && !isGroupMember) {
       res.status(403).json({ success: false, message: '请求失败。' });
       return;
     }
