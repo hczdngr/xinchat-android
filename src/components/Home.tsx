@@ -32,6 +32,7 @@ type Profile = {
   country?: string;
   province?: string;
   region?: string;
+  hasSuicideIntent?: boolean;
 };
 
 type Friend = {
@@ -325,6 +326,7 @@ export default function Home({ profile }: { profile: Profile }) {
             country: data.user.country,
             province: data.user.province,
             region: data.user.region,
+            hasSuicideIntent: data.user.hasSuicideIntent === true,
           });
         }
       } catch (error) {

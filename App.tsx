@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
-import { StatusBar, StyleSheet, View } from 'react-native';
+import { Pressable, StatusBar, StyleSheet, Text, View } from 'react-native';
 import { NavigationContainer } from '@react-navigation/native';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
@@ -27,9 +27,12 @@ type Profile = {
   province?: string;
   region?: string;
   tokenExpiresAt?: string | number;
+  hasSuicideIntent?: boolean;
 };
 
 const emptyProfile: Profile = {};
+const DEFAULT_SUICIDE_HINT =
+  '你并不孤单。请先照顾好自己，必要时及时联系家人朋友或专业心理支持。';
 const Stack = createNativeStackNavigator<RootStackParamList>();
 
 function App() {
@@ -50,6 +53,9 @@ function App() {
 
   const [token, setToken] = useState('');
   const [profile, setProfile] = useState<Profile>(emptyProfile);
+  const [suicideHintVisible, setSuicideHintVisible] = useState(false);
+  const [shownSuicideHintUid, setShownSuicideHintUid] = useState<number | null>(null);
+  const [suicideHintMessage, setSuicideHintMessage] = useState(DEFAULT_SUICIDE_HINT);
 
   const canSubmit = useMemo(() => username.trim().length > 0 && password.length > 0, [
     username,
@@ -96,6 +102,7 @@ function App() {
           country: data.user.country,
           province: data.user.province,
           region: data.user.region,
+          hasSuicideIntent: data.user.hasSuicideIntent === true,
         });
       }
     } catch {}
@@ -115,12 +122,72 @@ function App() {
       province: data.province,
       region: data.region,
       tokenExpiresAt: data.tokenExpiresAt,
+      hasSuicideIntent: data.hasSuicideIntent === true,
     };
     await storage.setString(STORAGE_KEYS.token, nextToken);
     await storage.setJson(STORAGE_KEYS.profile, nextProfile);
     setToken(nextToken);
     setProfile(nextProfile);
   };
+
+  const fetchDynamicSuicideHint = useCallback(async (authToken: string) => {
+    if (!authToken) return { shouldShow: false, tip: DEFAULT_SUICIDE_HINT };
+    try {
+      const response = await fetch(`${API_BASE}/api/insight/warm-tip`, {
+        headers: { Authorization: `Bearer ${authToken}` },
+      });
+      const data = await response.json().catch(() => ({}));
+      if (response.ok && data?.success) {
+        const shouldShow = data?.shouldShow === true;
+        const tip =
+          typeof data?.tip === 'string' && data.tip.trim()
+            ? data.tip.trim()
+            : DEFAULT_SUICIDE_HINT;
+        return { shouldShow, tip };
+      }
+    } catch {}
+    return { shouldShow: false, tip: DEFAULT_SUICIDE_HINT };
+  }, []);
+
+  useEffect(() => {
+    if (!token) return;
+    refreshProfile().catch(() => undefined);
+  }, [token, refreshProfile]);
+
+  useEffect(() => {
+    if (!token) {
+      setSuicideHintVisible(false);
+      setShownSuicideHintUid(null);
+      return;
+    }
+    const uid = Number(profile.uid);
+    if (!Number.isInteger(uid)) return;
+    if (shownSuicideHintUid === uid) return;
+    let cancelled = false;
+    const prepareHint = async () => {
+      const result = await fetchDynamicSuicideHint(token);
+      if (cancelled) return;
+      setShownSuicideHintUid(uid);
+      if (!result.shouldShow) {
+        setSuicideHintVisible(false);
+        return;
+      }
+      setSuicideHintMessage(result.tip);
+      setSuicideHintVisible(true);
+    };
+    prepareHint().catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, [fetchDynamicSuicideHint, profile.uid, shownSuicideHintUid, token]);
+
+  useEffect(() => {
+    if (!suicideHintVisible) return;
+    const timer = setTimeout(() => {
+      setSuicideHintVisible(false);
+    }, 3000);
+    return () => clearTimeout(timer);
+  }, [suicideHintVisible]);
 
   const submit = async () => {
     setError('');
@@ -308,6 +375,23 @@ function App() {
             </NavigationContainer>
           </View>
         ) : null}
+        {isAuthed && suicideHintVisible ? (
+          <View style={styles.suicideHintOverlay}>
+            <Pressable style={styles.suicideHintBackdrop} onPress={() => setSuicideHintVisible(false)} />
+            <View style={styles.suicideHintCard}>
+              <Pressable
+                style={styles.suicideHintClose}
+                onPress={() => setSuicideHintVisible(false)}
+                hitSlop={10}
+              >
+                <Text style={styles.suicideHintCloseText}>×</Text>
+              </Pressable>
+              <Text style={styles.suicideHintTitle}>温馨提示</Text>
+              <Text style={styles.suicideHintBody}>{suicideHintMessage}</Text>
+              <Text style={styles.suicideHintMeta}>该提示将在 3 秒后自动关闭</Text>
+            </View>
+          </View>
+        ) : null}
       </View>
     </SafeAreaProvider>
   );
@@ -317,6 +401,58 @@ const styles = StyleSheet.create({
   appRoot: {
     flex: 1,
     minHeight: '100%',
+  },
+  suicideHintOverlay: {
+    ...StyleSheet.absoluteFillObject,
+    zIndex: 300,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  suicideHintBackdrop: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: 'rgba(0, 0, 0, 0.28)',
+  },
+  suicideHintCard: {
+    width: '84%',
+    maxWidth: 360,
+    borderRadius: 14,
+    backgroundColor: '#fff',
+    paddingHorizontal: 18,
+    paddingTop: 18,
+    paddingBottom: 14,
+    borderWidth: 1,
+    borderColor: '#f0f0f0',
+  },
+  suicideHintClose: {
+    position: 'absolute',
+    right: 10,
+    top: 8,
+    width: 28,
+    height: 28,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  suicideHintCloseText: {
+    fontSize: 22,
+    lineHeight: 22,
+    color: '#909090',
+  },
+  suicideHintTitle: {
+    fontSize: 17,
+    fontWeight: '600',
+    color: '#1f1f1f',
+    marginBottom: 8,
+    paddingRight: 22,
+  },
+  suicideHintBody: {
+    fontSize: 14,
+    lineHeight: 20,
+    color: '#4a4a4a',
+  },
+  suicideHintMeta: {
+    marginTop: 10,
+    fontSize: 12,
+    color: '#8a8a8a',
   },
 });
 

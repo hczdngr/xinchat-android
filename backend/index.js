@@ -12,6 +12,7 @@ import authRouter, {
 import chatRouter, { ensureChatStorage, setChatNotifier } from './routes/chat.js';
 import friendsRouter, { setFriendsNotifier } from './routes/friends.js';
 import voiceRouter from './routes/voice.js';
+import insightApiRouter, { prewarmWarmTipCache } from './routes/insightApi.js';
 import { startInsightWorker } from './routes/insight.js';
 import {
   markDisconnected,
@@ -341,6 +342,19 @@ const routeMeta = [
   },
   {
     method: 'GET',
+    path: '/api/insight/warm-tip',
+    label: 'Warm tip',
+    note: 'Generate a dynamic warm tip from current user profile.',
+    templates: [
+      {
+        name: 'Get warm tip',
+        body: null,
+        hint: 'Authorization: Bearer <token>',
+      },
+    ],
+  },
+  {
+    method: 'GET',
     path: '/api/routes',
     label: 'Routes',
     note: 'List backend routes and templates.',
@@ -477,6 +491,16 @@ app.get('/api/routes', (req, res) => {
   res.json({ success: true, data: buildRouteResponse(app) });
 });
 
+app.use('/api', (req, res, next) => {
+  // Dynamic API responses should not be cached; cached 304 responses have no body.
+  delete req.headers['if-none-match'];
+  delete req.headers['if-modified-since'];
+  res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
+  res.setHeader('Pragma', 'no-cache');
+  res.setHeader('Expires', '0');
+  next();
+});
+
 app.use('/resource', express.static(path.join(__dirname, 'resource')));
 app.use(
   '/uploads/images',
@@ -500,6 +524,7 @@ app.use('/api', authRouter);
 app.use('/api/chat', chatRouter);
 app.use('/api/friends', friendsRouter);
 app.use('/api/voice', voiceRouter);
+app.use('/api/insight', insightApiRouter);
 
 app.use((err, req, res, next) => {
   if (!err) {
@@ -716,6 +741,14 @@ export function startServer(port = PORT) {
   return server.listen(port, '0.0.0.0', async () => {
     await Promise.all([ensureStorage(), ensureChatStorage()]);
     await resetOnlineState();
+    void (async () => {
+      try {
+        const users = await readUsers();
+        await prewarmWarmTipCache({ users, logger: console });
+      } catch (error) {
+        console.warn('[warm-tip] prewarm failed', error instanceof Error ? error.message : error);
+      }
+    })();
     console.log(`Backend listening on http://0.0.0.0:${port}`);
   });
 }
