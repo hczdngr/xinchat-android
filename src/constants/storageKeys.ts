@@ -5,5 +5,16 @@ export const STORAGE_KEYS = {
   pinned: 'xinchat.pinned',
   hiddenChats: 'xinchat.hiddenChats',
   homeTourSeen: 'xinchat.homeTourSeen',
+  pendingOpenChat: 'xinchat.pendingOpenChat',
+  homeFriendsCache: 'xinchat.homeFriendsCache',
+  homeGroupsCache: 'xinchat.homeGroupsCache',
+  homeMessagesCache: 'xinchat.homeMessagesCache',
+  homeLatestCache: 'xinchat.homeLatestCache',
+  homeUnreadCache: 'xinchat.homeUnreadCache',
+  homePendingRequestsCache: 'xinchat.homePendingRequestsCache',
+  chatMuted: 'xinchat.chatMuted',
+  chatBackground: 'xinchat.chatBackground',
+  groupRemarks: 'xinchat.groupRemarks',
+  pendingChatSettingsAction: 'xinchat.pendingChatSettingsAction',
 } as const;
 

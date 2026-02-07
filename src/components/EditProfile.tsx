@@ -893,7 +893,7 @@ export default function EditProfile({ onBack, onSaved, initialProfile }: Props) 
             <View style={styles.cropFrameWrap}>
               <View
                 style={[styles.cropFrame, { width: avatarCrop.frameSize, height: avatarCrop.frameSize }]}
-                onWheel={handleCropWheel}
+                {...(Platform.OS === 'web' ? ({ onWheel: handleCropWheel } as any) : {})}
                 {...cropPanResponder.panHandlers}
               >
                 <Image
@@ -1076,7 +1076,9 @@ function SelectField({
         <Text style={[styles.selectValue, !value && styles.selectPlaceholder]}>
           {value || placeholder || '\u8bf7\u9009\u62e9'}
         </Text>
-        <Text style={styles.selectArrow}>{'\u203a'}</Text>
+        <View style={styles.selectArrowIcon}>
+          <ForwardIndicatorIcon />
+        </View>
       </View>
     </Pressable>
   );
@@ -1411,9 +1413,11 @@ const styles = StyleSheet.create({
   selectPlaceholder: {
     color: '#999',
   },
-  selectArrow: {
-    fontSize: 18,
-    color: '#999',
+  selectArrowIcon: {
+    width: 18,
+    height: 18,
+    alignItems: 'center',
+    justifyContent: 'center',
   },
   input: {
     borderWidth: 1,
@@ -1733,6 +1737,21 @@ function BackIcon() {
         strokeWidth={2}
         strokeLinecap="round"
         strokeLinejoin="round"
+      />
+    </Svg>
+  );
+}
+
+function ForwardIndicatorIcon() {
+  return (
+    <Svg width={18} height={18} viewBox="0 0 24 24" fill="none">
+      <Path
+        d="M15 18L9 12L15 6"
+        stroke="#999"
+        strokeWidth={2}
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        transform="rotate(180 12 12)"
       />
     </Svg>
   );

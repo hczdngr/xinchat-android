@@ -15,6 +15,7 @@ import Svg, { Path } from 'react-native-svg';
 import { API_BASE } from '../config';
 import { STORAGE_KEYS } from '../constants/storageKeys';
 import { storage } from '../storage';
+import UIButton from './UIButton';
 
 type Friend = {
   uid: number;
@@ -35,6 +36,7 @@ type Props = {
   friends: Friend[];
   selfUid: number | null;
   refreshKey: number;
+  initialTab?: 'search' | 'requests';
   onBack: () => void;
   onRefreshFriends: () => void;
 };
@@ -43,12 +45,13 @@ export default function FoundFriends({
   friends,
   selfUid,
   refreshKey,
+  initialTab = 'search',
   onBack,
   onRefreshFriends,
 }: Props) {
   const appear = useRef(new Animated.Value(0)).current;
   const isLeaving = useRef(false);
-  const [activeTab, setActiveTab] = useState<'search' | 'requests'>('search');
+  const [activeTab, setActiveTab] = useState<'search' | 'requests'>(initialTab);
   const [searchUid, setSearchUid] = useState('');
   const [searching, setSearching] = useState(false);
   const [searchError, setSearchError] = useState('');
@@ -117,7 +120,7 @@ export default function FoundFriends({
     return '';
   }, [friendUidSet, incomingPendingSet, outgoingPendingSet, searchResult]);
 
-  const authHeaders = useCallback(async () => {
+  const authHeaders = useCallback(async (): Promise<Record<string, string>> => {
     const token = await storage.getString(STORAGE_KEYS.token);
     return token ? { Authorization: `Bearer ${token}` } : {};
   }, []);
@@ -133,7 +136,7 @@ export default function FoundFriends({
     setRequestsError('');
     try {
       const response = await fetch(`${API_BASE}/api/friends/requests`, {
-        headers: { ...(await authHeaders()) },
+        headers: await authHeaders(),
       });
       const data = await response.json().catch(() => ({}));
       if (response.ok && data?.success) {
@@ -164,7 +167,7 @@ export default function FoundFriends({
     try {
       const params = new URLSearchParams({ uid: String(uid) });
       const response = await fetch(`${API_BASE}/api/friends/search?${params.toString()}`, {
-        headers: { ...(await authHeaders()) },
+        headers: await authHeaders(),
       });
       const data = await response.json().catch(() => ({}));
       if (response.ok && data?.success && data?.user) {
@@ -200,7 +203,7 @@ export default function FoundFriends({
     try {
       const response = await fetch(`${API_BASE}/api/friends/add`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', ...(await authHeaders()) },
+        headers: { ...(await authHeaders()), 'Content-Type': 'application/json' },
         body: JSON.stringify({ friendUid: uid }),
       });
       const data = await response.json().catch(() => ({}));
@@ -228,7 +231,7 @@ export default function FoundFriends({
     try {
       const response = await fetch(`${API_BASE}/api/friends/respond`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', ...(await authHeaders()) },
+        headers: { ...(await authHeaders()), 'Content-Type': 'application/json' },
         body: JSON.stringify({ requesterUid: uid, action }),
       });
       const data = await response.json().catch(() => ({}));
@@ -247,6 +250,10 @@ export default function FoundFriends({
   useEffect(() => {
     loadRequests().catch(() => undefined);
   }, [loadRequests, refreshKey]);
+
+  useEffect(() => {
+    setActiveTab(initialTab);
+  }, [initialTab]);
 
   useEffect(() => {
     Animated.timing(appear, {
@@ -324,9 +331,13 @@ export default function FoundFriends({
                 style={styles.searchInput}
                 keyboardType="numeric"
               />
-              <Pressable style={styles.searchBtn} onPress={onSearch} disabled={searching}>
-                <Text style={styles.searchBtnText}>{searching ? '搜索中...' : '搜索'}</Text>
-              </Pressable>
+              <UIButton
+                title={searching ? '搜索中' : '搜索'}
+                onPress={onSearch}
+                disabled={searching}
+                style={styles.searchBtn}
+                textStyle={styles.searchBtnText}
+              />
             </View>
             {searchError ? <Text style={styles.error}>{searchError}</Text> : null}
             {searchResult ? (
@@ -343,13 +354,13 @@ export default function FoundFriends({
                     {searchHint ? <Text style={styles.hint}>{searchHint}</Text> : null}
                   </View>
                 </View>
-                <Pressable
-                  style={styles.actionBtn}
+                <UIButton
+                  title="发送请求"
                   onPress={sendRequest}
                   disabled={Boolean(searchHint) || searchResult.uid === selfUid}
-                >
-                  <Text style={styles.actionText}>发送请求</Text>
-                </Pressable>
+                  style={styles.actionBtn}
+                  textStyle={styles.actionText}
+                />
                 {requestStatus ? <Text style={styles.success}>{requestStatus}</Text> : null}
               </View>
             ) : null}

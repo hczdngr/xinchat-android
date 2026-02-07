@@ -1,8 +1,11 @@
 ﻿import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
+  Animated,
   BackHandler,
   Dimensions,
+  Easing,
   Image,
+  PanResponder,
   Platform,
   Pressable,
   ScrollView,
@@ -13,10 +16,15 @@ import {
   type ViewStyle,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { useNavigation } from '@react-navigation/native';
-import type { RootNavigation } from '../navigation/types';
+import { useFocusEffect, useNavigation, useRoute } from '@react-navigation/native';
+import type { HomeRoute, RootNavigation } from '../navigation/types';
 import Svg, { Line, Path } from 'react-native-svg';
 import { API_BASE, normalizeImageUrl } from '../config';
+import {
+  CHAT_BACKGROUND_COLORS,
+  CHAT_BACKGROUND_PRESETS,
+  type ChatBackgroundKey,
+} from '../constants/chatSettings';
 import { STORAGE_KEYS } from '../constants/storageKeys';
 import { storage } from '../storage';
 import FoundFriends from './FoundFriends';
@@ -40,7 +48,21 @@ type Friend = {
   username?: string;
   nickname?: string;
   avatar?: string;
+  signature?: string;
   online?: boolean;
+};
+
+type Group = {
+  id: number;
+  ownerUid?: number;
+  name?: string;
+  description?: string;
+  announcement?: string;
+  myNickname?: string;
+  memberUids: number[];
+  members: Friend[];
+  createdAt?: string;
+  updatedAt?: string;
 };
 
 type Message = {
@@ -59,6 +81,29 @@ type ReadAtMap = Record<number, number>;
 type BucketMap = Record<number, Message[]>;
 type PinnedMap = Record<number, boolean>;
 type HiddenMap = Record<number, boolean>;
+type MutedMap = Record<number, boolean>;
+type ChatBackgroundMap = Record<number, ChatBackgroundKey>;
+type MessageListItem = {
+  uid: number;
+  targetType: 'private' | 'group';
+  title: string;
+  preview: string;
+  latest?: { text: string; time: string; ts: number };
+  pinned: boolean;
+  unread: number;
+  friend?: Friend;
+  group?: Group;
+};
+type SearchChatHit = {
+  key: string;
+  messageId: string;
+  uid: number;
+  targetType: 'private' | 'group';
+  title: string;
+  content: string;
+  createdAt: string;
+  createdAtMs: number;
+};
 type HomeTourStep = {
   id: string;
   title: string;
@@ -71,6 +116,17 @@ const PAGE_LIMIT = 30;
 const HEARTBEAT_MS = 20000;
 const RECONNECT_BASE_MS = 1500;
 const RECONNECT_MAX_MS = 10000;
+const HOME_REFRESH_DELAY_MS = 2000;
+const CHAT_TIME_GAP_MS = 3 * 60 * 1000;
+const CHAT_INPUT_MAX_LENGTH = 3000;
+const SCENE_TRANSITION_MS = 180;
+const SCENE_EDGE_SNAP_MS = 160;
+const SCENE_EDGE_EXIT_MS = 180;
+const SCENE_EASING = Easing.bezier(0.22, 0, 0, 1);
+const SEARCH_MAX_CHAT_HITS = 120;
+const EDGE_BACK_HIT_WIDTH = 28;
+const EDGE_BACK_DISTANCE = 96;
+const EDGE_BACK_VELOCITY = 0.55;
 const surfaceShadowStyle =
   Platform.OS === 'web'
     ? { boxShadow: '0px 1px 2px rgba(0, 0, 0, 0.08)' }
@@ -122,6 +178,7 @@ const normalizeFriend = (input: any): Friend | null => {
     username: typeof input?.username === 'string' ? input.username : '',
     nickname: typeof input?.nickname === 'string' ? input.nickname : '',
     avatar: typeof input?.avatar === 'string' ? input.avatar : '',
+    signature: typeof input?.signature === 'string' ? input.signature : '',
     online: Boolean(input?.online),
   };
 };
@@ -138,6 +195,144 @@ const sanitizeFriends = (list: any[]): Friend[] => {
   return next;
 };
 
+const normalizeGroup = (input: any): Group | null => {
+  const id = Number(input?.id);
+  if (!Number.isInteger(id) || id <= 0) return null;
+  const memberUids: number[] = Array.isArray(input?.memberUids)
+    ? Array.from(
+        new Set(
+          input.memberUids
+            .map((rawUid: any) => Number(rawUid))
+            .filter((uid: number) => Number.isInteger(uid) && uid > 0)
+        )
+      )
+    : [];
+  const members = Array.isArray(input?.members) ? sanitizeFriends(input.members) : [];
+  const memberCount = memberUids.length > 0 ? memberUids.length : members.length;
+  const normalizedName = stripAutoGroupCountSuffix(input?.name, memberCount);
+  return {
+    id,
+    ownerUid: Number.isInteger(Number(input?.ownerUid)) ? Number(input.ownerUid) : undefined,
+    name: normalizedName,
+    description: typeof input?.description === 'string' ? input.description : '',
+    announcement: typeof input?.announcement === 'string' ? input.announcement : '',
+    myNickname: typeof input?.myNickname === 'string' ? input.myNickname : '',
+    memberUids,
+    members,
+    createdAt: typeof input?.createdAt === 'string' ? input.createdAt : '',
+    updatedAt: typeof input?.updatedAt === 'string' ? input.updatedAt : '',
+  };
+};
+
+const sanitizeGroups = (list: any[]): Group[] => {
+  const seen = new Set<number>();
+  const next: Group[] = [];
+  for (const item of list || []) {
+    const group = normalizeGroup(item);
+    if (!group || seen.has(group.id)) continue;
+    seen.add(group.id);
+    next.push(group);
+  }
+  return next;
+};
+
+const sanitizeCachedMessages = (input: any): BucketMap => {
+  if (!input || typeof input !== 'object') return {};
+  const next: BucketMap = {};
+  Object.entries(input).forEach(([rawUid, rawList]) => {
+    const uid = Number(rawUid);
+    if (!Number.isInteger(uid) || uid <= 0 || !Array.isArray(rawList)) return;
+    const list: Message[] = rawList
+      .map((entry: any) => ({
+        id: entry?.id,
+        senderUid: Number(entry?.senderUid),
+        targetUid: Number(entry?.targetUid),
+        targetType: String(entry?.targetType || ''),
+        content: String(entry?.content || ''),
+        createdAt: String(entry?.createdAt || ''),
+        createdAtMs: Number(entry?.createdAtMs),
+        raw: entry?.raw,
+      }))
+      .filter(
+        (entry) =>
+          (typeof entry.id === 'number' || typeof entry.id === 'string') &&
+          Number.isInteger(entry.senderUid) &&
+          Number.isInteger(entry.targetUid) &&
+          Number.isFinite(entry.createdAtMs)
+      )
+      .sort((a, b) => a.createdAtMs - b.createdAtMs);
+    next[uid] = list;
+  });
+  return next;
+};
+
+const sanitizeBooleanMap = (input: any): Record<number, boolean> => {
+  if (!input || typeof input !== 'object') return {};
+  const next: Record<number, boolean> = {};
+  Object.entries(input).forEach(([rawUid, rawValue]) => {
+    const uid = Number(rawUid);
+    if (!Number.isInteger(uid) || uid <= 0) return;
+    if (!rawValue) return;
+    next[uid] = true;
+  });
+  return next;
+};
+
+const CHAT_BACKGROUND_KEY_SET = new Set<ChatBackgroundKey>(
+  CHAT_BACKGROUND_PRESETS.map((item) => item.key)
+);
+
+const sanitizeChatBackgroundMap = (input: any): ChatBackgroundMap => {
+  if (!input || typeof input !== 'object') return {};
+  const next: ChatBackgroundMap = {};
+  Object.entries(input).forEach(([rawUid, rawValue]) => {
+    const uid = Number(rawUid);
+    if (!Number.isInteger(uid) || uid <= 0) return;
+    const key = String(rawValue || '').trim() as ChatBackgroundKey;
+    if (!CHAT_BACKGROUND_KEY_SET.has(key)) return;
+    next[uid] = key;
+  });
+  return next;
+};
+
+const sanitizeGroupRemarksMap = (input: any): Record<number, string> => {
+  if (!input || typeof input !== 'object') return {};
+  const next: Record<number, string> = {};
+  Object.entries(input).forEach(([rawUid, rawValue]) => {
+    const uid = Number(rawUid);
+    if (!Number.isInteger(uid) || uid <= 0) return;
+    if (typeof rawValue !== 'string') return;
+    const text = rawValue.trim().slice(0, 60);
+    if (!text) return;
+    next[uid] = text;
+  });
+  return next;
+};
+
+const stripAutoGroupCountSuffix = (rawName: any, memberCount: number) => {
+  const text = String(rawName || '').trim();
+  if (!text) return '';
+  if (!Number.isInteger(memberCount) || memberCount <= 0) return text;
+  const match = text.match(/\((\d+)\)$/);
+  if (!match) return text;
+  const suffixCount = Number(match[1]);
+  if (!Number.isInteger(suffixCount) || suffixCount !== memberCount) return text;
+  return text.slice(0, text.length - match[0].length).trim();
+};
+
+const getGroupDisplayName = (group?: Partial<Group> | null) => {
+  if (!group) return '';
+  const memberCount = Array.isArray(group.memberUids)
+    ? group.memberUids.length
+    : Array.isArray(group.members)
+      ? group.members.length
+      : 0;
+  const stripped = stripAutoGroupCountSuffix(group.name, memberCount);
+  if (stripped) return stripped;
+  const gid = Number(group.id);
+  return Number.isInteger(gid) && gid > 0 ? `群聊${gid}` : '群聊';
+};
+
 export default function Home({ profile }: { profile: Profile }) {
   const insets = useSafeAreaInsets();
   const navPad = Math.min(insets.bottom, 6);
@@ -151,6 +346,7 @@ export default function Home({ profile }: { profile: Profile }) {
     ...profile,
   });
   const [friends, setFriends] = useState<Friend[]>([]);
+  const [groups, setGroups] = useState<Group[]>([]);
   const [latestMap, setLatestMap] = useState<LatestMap>({});
   const [loadingFriends, setLoadingFriends] = useState(false);
 
@@ -161,16 +357,32 @@ export default function Home({ profile }: { profile: Profile }) {
   const [readAtMap, setReadAtMap] = useState<ReadAtMap>({});
   const [pinnedMap, setPinnedMap] = useState<PinnedMap>({});
   const [hiddenMap, setHiddenMap] = useState<HiddenMap>({});
+  const [mutedMap, setMutedMap] = useState<MutedMap>({});
+  const [chatBackgroundMap, setChatBackgroundMap] = useState<ChatBackgroundMap>({});
+  const [groupRemarksMap, setGroupRemarksMap] = useState<Record<number, string>>({});
   const [chatMenuVisible, setChatMenuVisible] = useState(false);
   const [chatMenuTargetUid, setChatMenuTargetUid] = useState<number | null>(null);
+  const [chatMenuTargetType, setChatMenuTargetType] = useState<'private' | 'group'>('private');
   const [chatMenuPosition, setChatMenuPosition] = useState({ x: 0, y: 0 });
   const [quickMenuVisible, setQuickMenuVisible] = useState(false);
+  const [quickMenuMounted, setQuickMenuMounted] = useState(false);
+  const quickMenuAnim = useRef(new Animated.Value(0)).current;
+  const chatSceneAnim = useRef(new Animated.Value(0)).current;
+  const foundSceneAnim = useRef(new Animated.Value(0)).current;
+  const [searchVisible, setSearchVisible] = useState(false);
+  const [searchQuery, setSearchQuery] = useState('');
+  const searchAnim = useRef(new Animated.Value(0)).current;
+  const [focusedMessageId, setFocusedMessageId] = useState<string | null>(null);
   const [avatarFailed, setAvatarFailed] = useState(false);
 
   const [activeChatUid, setActiveChatUid] = useState<number | null>(null);
   const [draftMessage, setDraftMessage] = useState('');
   const [activeView, setActiveView] = useState<'list' | 'found'>('list');
+  const [foundFriendsInitialTab, setFoundFriendsInitialTab] = useState<'search' | 'requests'>(
+    'search'
+  );
   const [friendsRefreshKey, setFriendsRefreshKey] = useState(0);
+  const [pendingRequestCount, setPendingRequestCount] = useState(0);
   const [homeTab, setHomeTab] = useState<'messages' | 'contacts'>('messages');
   const [tourStepIndex, setTourStepIndex] = useState(0);
   const [tourVisible, setTourVisible] = useState(false);
@@ -266,18 +478,58 @@ export default function Home({ profile }: { profile: Profile }) {
   }, [insets.top, navPad]);
 
   const navigation = useNavigation<RootNavigation>();
+  const route = useRoute<HomeRoute>();
   const messageIdSetsRef = useRef<Map<number, Set<number | string>>>(new Map());
   const wsRef = useRef<WebSocket | null>(null);
-  const heartbeatTimerRef = useRef<NodeJS.Timeout | null>(null);
-  const reconnectTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const heartbeatTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const reconnectAttemptsRef = useRef(0);
   const messagesByUidRef = useRef<BucketMap>({});
   const readAtMapRef = useRef<ReadAtMap>({});
+  const mutedMapRef = useRef<MutedMap>({});
+  const groupsRef = useRef<Group[]>([]);
+  const historyLoadingRef = useRef<Record<number, boolean>>({});
+  const historyHasMoreRef = useRef<Record<number, boolean>>({});
+  const messageOffsetMapRef = useRef<Map<number, Map<string, number>>>(new Map());
+  const messageFocusTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const activeChatUidRef = useRef<number | null>(null);
   const contentHeightRef = useRef(0);
   const messageListRef = useRef<ScrollView | null>(null);
   const chatInputRef = useRef<TextInput | null>(null);
+  const searchInputRef = useRef<TextInput | null>(null);
   const connectWsRef = useRef<() => void>(() => {});
+  const cacheWriteTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const homeRefreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const homeCacheHydratedRef = useRef(false);
+
+  useEffect(() => {
+    if (!activeChatUid) {
+      chatSceneAnim.setValue(0);
+      return;
+    }
+    chatSceneAnim.setValue(16);
+    Animated.timing(chatSceneAnim, {
+      toValue: 0,
+      duration: SCENE_TRANSITION_MS,
+      easing: SCENE_EASING,
+      useNativeDriver: true,
+    }).start();
+  }, [activeChatUid, chatSceneAnim]);
+
+  useEffect(() => {
+    const showingFoundView = activeView === 'found' && !activeChatUid;
+    if (!showingFoundView) {
+      foundSceneAnim.setValue(0);
+      return;
+    }
+    foundSceneAnim.setValue(16);
+    Animated.timing(foundSceneAnim, {
+      toValue: 0,
+      duration: SCENE_TRANSITION_MS,
+      easing: SCENE_EASING,
+      useNativeDriver: true,
+    }).start();
+  }, [activeChatUid, activeView, foundSceneAnim]);
 
   useEffect(() => {
     activeChatUidRef.current = activeChatUid;
@@ -290,6 +542,32 @@ export default function Home({ profile }: { profile: Profile }) {
   useEffect(() => {
     readAtMapRef.current = readAtMap;
   }, [readAtMap]);
+
+  useEffect(() => {
+    mutedMapRef.current = mutedMap;
+  }, [mutedMap]);
+
+  useEffect(() => {
+    groupsRef.current = groups;
+  }, [groups]);
+
+  useEffect(() => {
+    historyLoadingRef.current = historyLoading;
+  }, [historyLoading]);
+
+  useEffect(() => {
+    historyHasMoreRef.current = historyHasMore;
+  }, [historyHasMore]);
+
+  useEffect(
+    () => () => {
+      if (messageFocusTimerRef.current) {
+        clearTimeout(messageFocusTimerRef.current);
+        messageFocusTimerRef.current = null;
+      }
+    },
+    []
+  );
 
   useEffect(() => {
     if (profile) {
@@ -349,18 +627,24 @@ export default function Home({ profile }: { profile: Profile }) {
   useEffect(() => {
     const loadPinned = async () => {
       const stored = await storage.getJson<PinnedMap>(STORAGE_KEYS.pinned);
-      if (stored) {
-        setPinnedMap(stored);
-      }
+      setPinnedMap(sanitizeBooleanMap(stored));
     };
     const loadHidden = async () => {
       const stored = await storage.getJson<HiddenMap>(STORAGE_KEYS.hiddenChats);
-      if (stored) {
-        setHiddenMap(stored);
-      }
+      setHiddenMap(sanitizeBooleanMap(stored));
+    };
+    const loadMuted = async () => {
+      const stored = await storage.getJson<MutedMap>(STORAGE_KEYS.chatMuted);
+      setMutedMap(sanitizeBooleanMap(stored));
+    };
+    const loadChatBackground = async () => {
+      const stored = await storage.getJson<ChatBackgroundMap>(STORAGE_KEYS.chatBackground);
+      setChatBackgroundMap(sanitizeChatBackgroundMap(stored));
     };
     loadPinned().catch(() => undefined);
     loadHidden().catch(() => undefined);
+    loadMuted().catch(() => undefined);
+    loadChatBackground().catch(() => undefined);
   }, []);
 
   useEffect(() => {
@@ -394,6 +678,56 @@ export default function Home({ profile }: { profile: Profile }) {
   const avatarText = useMemo(() => displayName.slice(0, 2), [displayName]);
   const canShowMainHome = !activeChatUid && activeView !== 'found';
   const currentTourStep = tourSteps[tourStepIndex] || null;
+  const quickMenuPanelAnimatedStyle = useMemo(
+    () => ({
+      opacity: quickMenuAnim,
+      transform: [
+        {
+          translateY: quickMenuAnim.interpolate({
+            inputRange: [0, 1],
+            outputRange: [-6, 0],
+          }),
+        },
+        {
+          scale: quickMenuAnim.interpolate({
+            inputRange: [0, 1],
+            outputRange: [0.98, 1],
+          }),
+        },
+      ],
+    }),
+    [quickMenuAnim]
+  );
+
+  const closeQuickMenu = useCallback(() => {
+    if (!quickMenuMounted) {
+      setQuickMenuVisible(false);
+      return;
+    }
+    setQuickMenuVisible(false);
+    quickMenuAnim.stopAnimation();
+    Animated.timing(quickMenuAnim, {
+      toValue: 0,
+      duration: 130,
+      useNativeDriver: true,
+    }).start(() => {
+      setQuickMenuMounted(false);
+    });
+  }, [quickMenuAnim, quickMenuMounted]);
+
+  const openQuickMenu = useCallback(() => {
+    if (!quickMenuMounted) {
+      quickMenuAnim.setValue(0);
+      setQuickMenuMounted(true);
+    }
+    setQuickMenuVisible(true);
+    quickMenuAnim.stopAnimation();
+    Animated.timing(quickMenuAnim, {
+      toValue: 1,
+      duration: 170,
+      useNativeDriver: true,
+    }).start();
+  }, [quickMenuAnim, quickMenuMounted]);
 
   useEffect(() => {
     setAvatarFailed(false);
@@ -417,20 +751,47 @@ export default function Home({ profile }: { profile: Profile }) {
 
   useEffect(() => {
     if (!tourVisible) return;
-    setQuickMenuVisible(false);
+    closeQuickMenu();
     setChatMenuVisible(false);
-  }, [tourVisible]);
+  }, [closeQuickMenu, tourVisible]);
 
   const activeChatFriend = useMemo(() => {
     if (!activeChatUid) return null;
     return friends.find((item) => Number(item?.uid) === activeChatUid) || null;
   }, [activeChatUid, friends]);
+  const activeChatGroup = useMemo(() => {
+    if (!activeChatUid) return null;
+    return groups.find((item) => Number(item?.id) === activeChatUid) || null;
+  }, [activeChatUid, groups]);
   const activeChatMessages = useMemo(() => {
     if (!activeChatUid) return [];
     return messagesByUid[activeChatUid] || [];
   }, [activeChatUid, messagesByUid]);
   const selfUid = useMemo(() => profileData.uid, [profileData.uid]);
   const canSend = useMemo(() => draftMessage.trim().length > 0, [draftMessage]);
+  const activeChatTitle = useMemo(() => {
+    if (activeChatGroup) return getGroupDisplayName(activeChatGroup);
+    return activeChatFriend?.nickname || activeChatFriend?.username || '聊天';
+  }, [activeChatFriend?.nickname, activeChatFriend?.username, activeChatGroup]);
+  const activeChatStatusText = useMemo(() => {
+    if (activeChatGroup) {
+      const remark = String(groupRemarksMap[activeChatGroup.id] || '').trim();
+      if (remark) return remark;
+      const myNickname = String(activeChatGroup.myNickname || '').trim();
+      return myNickname;
+    }
+    return activeChatFriend?.online ? '在线' : '离线';
+  }, [activeChatFriend?.online, activeChatGroup, groupRemarksMap]);
+  const activeChatFriendAvatar = useMemo(
+    () => normalizeImageUrl(activeChatFriend?.avatar),
+    [activeChatFriend?.avatar]
+  );
+  const selfChatAvatar = useMemo(() => normalizeImageUrl(profileData.avatar), [profileData.avatar]);
+  const activeChatBackgroundColor = useMemo(() => {
+    if (!activeChatUid) return CHAT_BACKGROUND_COLORS.default;
+    const key = chatBackgroundMap[activeChatUid] || 'default';
+    return CHAT_BACKGROUND_COLORS[key] || CHAT_BACKGROUND_COLORS.default;
+  }, [activeChatUid, chatBackgroundMap]);
 
   const getAvatarText = useCallback((value?: string) => {
     const text = String(value || '').trim();
@@ -438,9 +799,118 @@ export default function Home({ profile }: { profile: Profile }) {
     return text.slice(0, 2);
   }, []);
 
-  const authHeaders = useCallback(() => {
+  const findUserByUid = useCallback(
+    (uid: number) => {
+      if (!Number.isInteger(uid) || uid <= 0) return null;
+      if (selfUid && uid === selfUid) {
+        return {
+          uid,
+          username: profileData.username,
+          nickname: profileData.nickname,
+          avatar: profileData.avatar,
+        };
+      }
+      if (activeChatGroup?.members?.length) {
+        const member = activeChatGroup.members.find((item) => Number(item?.uid) === uid);
+        if (member) return member;
+      }
+      const friend = friends.find((item) => Number(item?.uid) === uid);
+      if (friend) return friend;
+      return null;
+    },
+    [
+      activeChatGroup?.members,
+      friends,
+      profileData.avatar,
+      profileData.nickname,
+      profileData.username,
+      selfUid,
+    ]
+  );
+
+  const authHeaders = useCallback((): Record<string, string> => {
     const token = tokenRef.current;
     return token ? { Authorization: `Bearer ${token}` } : {};
+  }, []);
+
+  const hydrateHomeCache = useCallback(async () => {
+    const [
+      cachedFriends,
+      cachedGroups,
+      cachedMessages,
+      cachedLatest,
+      cachedUnread,
+      cachedPending,
+      cachedGroupRemarks,
+    ] =
+      await Promise.all([
+        storage.getJson<Friend[]>(STORAGE_KEYS.homeFriendsCache),
+        storage.getJson<Group[]>(STORAGE_KEYS.homeGroupsCache),
+        storage.getJson<BucketMap>(STORAGE_KEYS.homeMessagesCache),
+        storage.getJson<LatestMap>(STORAGE_KEYS.homeLatestCache),
+        storage.getJson<Record<number, number>>(STORAGE_KEYS.homeUnreadCache),
+        storage.getJson<number>(STORAGE_KEYS.homePendingRequestsCache),
+        storage.getJson<Record<number, string>>(STORAGE_KEYS.groupRemarks),
+      ]);
+
+    const nextFriends = sanitizeFriends(Array.isArray(cachedFriends) ? cachedFriends : []);
+    const nextGroups = sanitizeGroups(Array.isArray(cachedGroups) ? cachedGroups : []);
+    const nextMessages = sanitizeCachedMessages(cachedMessages);
+
+    const nextLatest: LatestMap = {};
+    if (cachedLatest && typeof cachedLatest === 'object') {
+      Object.entries(cachedLatest).forEach(([rawUid, rawItem]) => {
+        const uid = Number(rawUid);
+        if (!Number.isInteger(uid) || uid <= 0) return;
+        const text = String((rawItem as any)?.text || '');
+        const time = String((rawItem as any)?.time || '');
+        const ts = Number((rawItem as any)?.ts);
+        if (!Number.isFinite(ts)) return;
+        nextLatest[uid] = { text, time, ts };
+      });
+    }
+
+    const nextUnread: Record<number, number> = {};
+    if (cachedUnread && typeof cachedUnread === 'object') {
+      Object.entries(cachedUnread).forEach(([rawUid, rawValue]) => {
+        const uid = Number(rawUid);
+        if (!Number.isInteger(uid) || uid <= 0) return;
+        const count = Number(rawValue);
+        nextUnread[uid] = Number.isFinite(count) ? Math.max(0, count) : 0;
+      });
+    }
+
+    const nextIdSets = new Map<number, Set<number | string>>();
+    Object.entries(nextMessages).forEach(([rawUid, list]) => {
+      const uid = Number(rawUid);
+      if (!Number.isInteger(uid) || uid <= 0) return;
+      const set = new Set<number | string>();
+      list.forEach((item) => {
+        if (typeof item.id === 'number' || typeof item.id === 'string') {
+          set.add(item.id);
+        }
+      });
+      nextIdSets.set(uid, set);
+    });
+
+    messageIdSetsRef.current = nextIdSets;
+    setFriends(nextFriends);
+    setGroups(nextGroups);
+    setMessagesByUid(nextMessages);
+    setLatestMap(nextLatest);
+    setUnreadMap(nextUnread);
+    setPendingRequestCount(Number.isFinite(Number(cachedPending)) ? Math.max(0, Number(cachedPending)) : 0);
+    setGroupRemarksMap(sanitizeGroupRemarksMap(cachedGroupRemarks));
+    homeCacheHydratedRef.current = true;
+
+    return (
+      nextFriends.length > 0 ||
+      nextGroups.length > 0 ||
+      Object.keys(nextMessages).length > 0 ||
+      Object.keys(nextLatest).length > 0 ||
+      Object.keys(nextUnread).length > 0 ||
+      Math.max(0, Number(cachedPending) || 0) > 0
+    );
   }, []);
 
   const normalizeMessage = useCallback((entry: any): Message => {
@@ -525,6 +995,10 @@ export default function Home({ profile }: { profile: Profile }) {
 
   const recalcUnread = useCallback(
     (uid: number, list?: Message[]) => {
+      if (mutedMapRef.current[uid]) {
+        setUnreadMap((prev) => ({ ...prev, [uid]: 0 }));
+        return;
+      }
       const bucket = list || messagesByUidRef.current[uid] || [];
       const readAt = getReadAt(uid);
       const count = bucket.filter(
@@ -534,6 +1008,14 @@ export default function Home({ profile }: { profile: Profile }) {
     },
     [getReadAt, selfUid]
   );
+
+  useEffect(() => {
+    Object.keys(messagesByUidRef.current).forEach((rawUid) => {
+      const uid = Number(rawUid);
+      if (!Number.isInteger(uid) || uid <= 0) return;
+      recalcUnread(uid, messagesByUidRef.current[uid] || []);
+    });
+  }, [mutedMap, recalcUnread]);
 
   const updateLatest = useCallback(
     (uid: number, entry: any) => {
@@ -590,13 +1072,47 @@ export default function Home({ profile }: { profile: Profile }) {
 
       const last = nextBucket[nextBucket.length - 1];
       if (last) {
-        const friendUid = last.senderUid === selfUid ? last.targetUid : last.senderUid;
-        updateLatest(friendUid, last);
+        updateLatest(uid, last);
       }
       recalcUnread(uid, nextBucket);
     },
-    [ensureMessageBucket, normalizeMessage, recalcUnread, selfUid, unhideChat, updateLatest]
+    [ensureMessageBucket, normalizeMessage, recalcUnread, unhideChat, updateLatest]
   );
+
+  const loadPendingRequestCount = useCallback(async () => {
+    if (!tokenRef.current) {
+      setPendingRequestCount(0);
+      return;
+    }
+    try {
+      const response = await fetch(`${API_BASE}/api/friends/requests`, {
+        headers: { ...authHeaders() },
+      });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok || !data?.success) return;
+      const incoming = Array.isArray(data?.incoming) ? data.incoming : [];
+      const pending = incoming.filter((entry: any) => String(entry?.status || 'pending') === 'pending');
+      setPendingRequestCount(Math.max(0, pending.length));
+    } catch {}
+  }, [authHeaders]);
+
+  const loadGroups = useCallback(async () => {
+    if (!tokenRef.current) return;
+    try {
+      const response = await fetch(`${API_BASE}/api/groups/list`, {
+        headers: { ...authHeaders() },
+      });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok || !data?.success || !Array.isArray(data?.groups)) {
+        return;
+      }
+      const nextGroups = sanitizeGroups(data.groups);
+      setGroups(nextGroups);
+      nextGroups.forEach((group) => {
+        ensureMessageBucket(group.id);
+      });
+    } catch {}
+  }, [authHeaders, ensureMessageBucket]);
 
   const loadOverview = useCallback(async () => {
     if (!tokenRef.current) return;
@@ -615,9 +1131,11 @@ export default function Home({ profile }: { profile: Profile }) {
       data.data.forEach((entry: any) => {
         const uid = Number(entry?.uid);
         if (!Number.isInteger(uid)) return;
-        unreadPatch[uid] = Number.isFinite(Number(entry?.unread))
+        ensureMessageBucket(uid);
+        const nextUnread = Number.isFinite(Number(entry?.unread))
           ? Math.min(Math.max(Number(entry.unread), 0), 99)
           : 0;
+        unreadPatch[uid] = mutedMapRef.current[uid] ? 0 : nextUnread;
         if (entry?.latest) {
           const normalized = normalizeMessage(entry.latest);
           latestPatch[uid] = {
@@ -632,11 +1150,13 @@ export default function Home({ profile }: { profile: Profile }) {
         setLatestMap((prev) => ({ ...prev, ...latestPatch }));
       }
     } catch {}
-  }, [authHeaders, formatMessage, formatTime, normalizeMessage]);
+  }, [authHeaders, ensureMessageBucket, formatMessage, formatTime, normalizeMessage]);
 
-  const loadFriends = useCallback(async () => {
+  const loadFriends = useCallback(async ({ silent = true }: { silent?: boolean } = {}) => {
     if (!tokenRef.current) return;
-    setLoadingFriends(true);
+    if (!silent) {
+      setLoadingFriends(true);
+    }
     try {
       const response = await fetch(`${API_BASE}/api/friends/list`, {
         headers: { ...authHeaders() },
@@ -648,11 +1168,13 @@ export default function Home({ profile }: { profile: Profile }) {
         nextFriends.forEach((friend) => {
           ensureMessageBucket(friend.uid);
         });
-        await loadOverview();
+        await Promise.all([loadOverview(), loadPendingRequestCount(), loadGroups()]);
       }
     } catch {}
-    setLoadingFriends(false);
-  }, [authHeaders, ensureMessageBucket, loadOverview]);
+    if (!silent) {
+      setLoadingFriends(false);
+    }
+  }, [authHeaders, ensureMessageBucket, loadGroups, loadOverview, loadPendingRequestCount]);
 
   const loadHistory = useCallback(
     async (uid: number, { beforeId }: { beforeId?: number | string } = {}) => {
@@ -661,8 +1183,9 @@ export default function Home({ profile }: { profile: Profile }) {
       if (historyLoading[uid]) return;
       setHistoryLoading((prev) => ({ ...prev, [uid]: true }));
       try {
+        const targetType = groupsRef.current.some((item) => item.id === uid) ? 'group' : 'private';
         const params = new URLSearchParams({
-          targetType: 'private',
+          targetType,
           targetUid: String(uid),
           type: 'text',
           limit: String(PAGE_LIMIT),
@@ -710,10 +1233,94 @@ export default function Home({ profile }: { profile: Profile }) {
     }, 0);
   }, []);
 
+  const sleep = useCallback((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)), []);
+
+  const flashMessageFocus = useCallback((messageId: string) => {
+    if (!messageId) return;
+    setFocusedMessageId(messageId);
+    if (messageFocusTimerRef.current) {
+      clearTimeout(messageFocusTimerRef.current);
+    }
+    messageFocusTimerRef.current = setTimeout(() => {
+      setFocusedMessageId(null);
+      messageFocusTimerRef.current = null;
+    }, 1800);
+  }, []);
+
+  const recordMessageOffset = useCallback((uid: number, messageId: string, y: number) => {
+    if (!uid || !messageId || !Number.isFinite(y)) return;
+    const key = String(messageId);
+    const bucketMap = messageOffsetMapRef.current.get(uid) || new Map<string, number>();
+    bucketMap.set(key, y);
+    messageOffsetMapRef.current.set(uid, bucketMap);
+  }, []);
+
+  const scrollToMessageById = useCallback((uid: number, messageId: string, animated = true) => {
+    if (!uid || !messageId || !messageListRef.current) return false;
+    const key = String(messageId);
+    const bucketMap = messageOffsetMapRef.current.get(uid);
+    const measuredY = bucketMap?.get(key);
+    if (typeof measuredY === 'number' && Number.isFinite(measuredY)) {
+      messageListRef.current.scrollTo({ y: Math.max(0, measuredY - 12), animated });
+      return true;
+    }
+    const bucket = messagesByUidRef.current[uid] || [];
+    const fallbackIndex = bucket.findIndex((item) => String(item.id) === key);
+    if (fallbackIndex === -1) return false;
+    const estimatedY = Math.max(0, fallbackIndex * 66);
+    messageListRef.current.scrollTo({ y: estimatedY, animated });
+    return true;
+  }, []);
+
+  const locateChatMessage = useCallback(
+    async (uid: number, messageId: string) => {
+      if (!uid || !messageId) return;
+      const normalizedId = String(messageId);
+      let guard = 0;
+      while (guard < 60) {
+        guard += 1;
+        const bucket = messagesByUidRef.current[uid] || [];
+        const found = bucket.some((item) => String(item.id) === normalizedId);
+        if (found) {
+          for (let i = 0; i < 8; i += 1) {
+            const done = scrollToMessageById(uid, normalizedId, true);
+            if (done) {
+              flashMessageFocus(normalizedId);
+              return;
+            }
+            await sleep(50);
+          }
+          flashMessageFocus(normalizedId);
+          return;
+        }
+
+        if (historyLoadingRef.current[uid]) {
+          await sleep(120);
+          continue;
+        }
+
+        const first = bucket[0];
+        if (!first) {
+          await loadHistory(uid);
+          await sleep(60);
+          continue;
+        }
+
+        if (!historyHasMoreRef.current[uid]) {
+          break;
+        }
+
+        await loadHistory(uid, { beforeId: first.id });
+        await sleep(60);
+      }
+    },
+    [flashMessageFocus, loadHistory, scrollToMessageById, sleep]
+  );
+
   const openChat = useCallback(
     async (friend: Friend) => {
       if (!friend) return;
-      setQuickMenuVisible(false);
+      closeQuickMenu();
       setActiveChatUid(friend.uid);
       ensureMessageBucket(friend.uid);
       if ((messagesByUidRef.current[friend.uid] || []).length === 0) {
@@ -723,7 +1330,70 @@ export default function Home({ profile }: { profile: Profile }) {
       focusChatInput();
       markChatRead(friend.uid);
     },
-    [ensureMessageBucket, focusChatInput, loadHistory, markChatRead, scrollToBottom]
+    [closeQuickMenu, ensureMessageBucket, focusChatInput, loadHistory, markChatRead, scrollToBottom]
+  );
+
+  const openChatFromPayload = useCallback(
+    (targetUid: number, paramFriend?: Partial<Friend>, options?: { targetType?: 'private' | 'group'; group?: Partial<Group> }) => {
+      if (!Number.isFinite(targetUid) || targetUid <= 0) return;
+      if (options?.targetType === 'group') {
+        const payloadGroup =
+          options?.group && Number.isInteger(Number(options.group.id || targetUid))
+            ? normalizeGroup({ ...options.group, id: targetUid })
+            : null;
+        if (payloadGroup) {
+          setGroups((prev) =>
+            prev.some((item) => item.id === payloadGroup.id)
+              ? prev.map((item) => (item.id === payloadGroup.id ? { ...item, ...payloadGroup } : item))
+              : [payloadGroup, ...prev]
+          );
+          ensureMessageBucket(payloadGroup.id);
+        }
+        setActiveChatUid(targetUid);
+        ensureMessageBucket(targetUid);
+        if ((messagesByUidRef.current[targetUid] || []).length === 0) {
+          loadHistory(targetUid).catch(() => undefined);
+        }
+        setTimeout(scrollToBottom, 0);
+        focusChatInput();
+        markChatRead(targetUid);
+        return;
+      }
+      const existing = friends.find((item) => item.uid === targetUid);
+      const payloadFriend =
+        paramFriend && paramFriend.uid
+          ? {
+              uid: Number(paramFriend.uid),
+              username: paramFriend.username,
+              nickname: paramFriend.nickname,
+              avatar: paramFriend.avatar,
+              online: paramFriend.online,
+            }
+          : null;
+
+      if (!existing && payloadFriend?.uid) {
+        setFriends((prev) =>
+          prev.some((item) => item.uid === payloadFriend.uid) ? prev : [payloadFriend, ...prev]
+        );
+      }
+
+      if (existing) {
+        openChat(existing);
+      } else if (payloadFriend?.uid) {
+        openChat(payloadFriend);
+      } else {
+        setActiveChatUid(targetUid);
+      }
+    },
+    [ensureMessageBucket, focusChatInput, friends, loadHistory, markChatRead, openChat, scrollToBottom]
+  );
+
+  const openContactProfile = useCallback(
+    (friend: Friend) => {
+      if (!friend) return;
+      navigation.navigate('FriendProfile', { uid: friend.uid, friend });
+    },
+    [navigation]
   );
 
   const closeChat = useCallback(() => {
@@ -733,18 +1403,112 @@ export default function Home({ profile }: { profile: Profile }) {
     setActiveChatUid(null);
   }, [markChatRead]);
 
-  const openFoundFriends = useCallback(() => {
-    setQuickMenuVisible(false);
-    setActiveView('found');
-  }, []);
+  const openFoundFriends = useCallback(
+    (initialTab: 'search' | 'requests' = 'search') => {
+      closeQuickMenu();
+      setFoundFriendsInitialTab(initialTab);
+      setActiveView('found');
+    },
+    [closeQuickMenu]
+  );
 
   const closeFoundFriends = useCallback(() => {
+    setFoundFriendsInitialTab('search');
     setActiveView('list');
   }, []);
 
-  const closeQuickMenu = useCallback(() => {
-    setQuickMenuVisible(false);
+  const resetSceneAnim = useCallback((sceneAnim: Animated.Value) => {
+    Animated.timing(sceneAnim, {
+      toValue: 0,
+      duration: SCENE_EDGE_SNAP_MS,
+      easing: SCENE_EASING,
+      useNativeDriver: true,
+    }).start();
   }, []);
+
+  const exitScene = useCallback(
+    (sceneAnim: Animated.Value, onDone: () => void) => {
+      Animated.timing(sceneAnim, {
+        toValue: Dimensions.get('window').width,
+        duration: SCENE_EDGE_EXIT_MS,
+        easing: SCENE_EASING,
+        useNativeDriver: true,
+      }).start(() => {
+        onDone();
+      });
+    },
+    []
+  );
+
+  const chatEdgePanResponder = useMemo(
+    () =>
+      PanResponder.create({
+        onStartShouldSetPanResponder: (event) =>
+          Boolean(activeChatUidRef.current) && Number(event?.nativeEvent?.pageX || 0) <= EDGE_BACK_HIT_WIDTH,
+        onMoveShouldSetPanResponder: (event, gestureState) => {
+          if (!activeChatUidRef.current) return false;
+          const startX = Number(event?.nativeEvent?.pageX || 0);
+          const horizontal = Math.abs(gestureState.dx) > Math.abs(gestureState.dy) * 1.2;
+          return startX <= EDGE_BACK_HIT_WIDTH && horizontal && gestureState.dx > 6;
+        },
+        onPanResponderMove: (_, gestureState) => {
+          chatSceneAnim.setValue(Math.max(0, gestureState.dx));
+        },
+        onPanResponderRelease: (_, gestureState) => {
+          const shouldBack =
+            gestureState.dx > EDGE_BACK_DISTANCE || gestureState.vx > EDGE_BACK_VELOCITY;
+          if (!shouldBack) {
+            resetSceneAnim(chatSceneAnim);
+            return;
+          }
+          exitScene(chatSceneAnim, closeChat);
+        },
+        onPanResponderTerminate: () => {
+          resetSceneAnim(chatSceneAnim);
+        },
+      }),
+    [chatSceneAnim, closeChat, exitScene, resetSceneAnim]
+  );
+
+  const foundEdgePanResponder = useMemo(
+    () =>
+      PanResponder.create({
+        onStartShouldSetPanResponder: (event) =>
+          activeView === 'found' && Number(event?.nativeEvent?.pageX || 0) <= EDGE_BACK_HIT_WIDTH,
+        onMoveShouldSetPanResponder: (event, gestureState) => {
+          if (activeView !== 'found') return false;
+          const startX = Number(event?.nativeEvent?.pageX || 0);
+          const horizontal = Math.abs(gestureState.dx) > Math.abs(gestureState.dy) * 1.2;
+          return startX <= EDGE_BACK_HIT_WIDTH && horizontal && gestureState.dx > 6;
+        },
+        onPanResponderMove: (_, gestureState) => {
+          foundSceneAnim.setValue(Math.max(0, gestureState.dx));
+        },
+        onPanResponderRelease: (_, gestureState) => {
+          const shouldBack =
+            gestureState.dx > EDGE_BACK_DISTANCE || gestureState.vx > EDGE_BACK_VELOCITY;
+          if (!shouldBack) {
+            resetSceneAnim(foundSceneAnim);
+            return;
+          }
+          exitScene(foundSceneAnim, closeFoundFriends);
+        },
+        onPanResponderTerminate: () => {
+          resetSceneAnim(foundSceneAnim);
+        },
+      }),
+    [activeView, closeFoundFriends, exitScene, foundSceneAnim, resetSceneAnim]
+  );
+
+  const onPressChatBack = useCallback(() => {
+    if (!activeChatUidRef.current) return;
+    exitScene(chatSceneAnim, closeChat);
+  }, [chatSceneAnim, closeChat, exitScene]);
+
+  const onPressFoundBack = useCallback(() => {
+    if (activeView !== 'found') return;
+    exitScene(foundSceneAnim, closeFoundFriends);
+  }, [activeView, closeFoundFriends, exitScene, foundSceneAnim]);
 
   const markTourSeen = useCallback(() => {
     storage.setString(STORAGE_KEYS.homeTourSeen, '1');
@@ -755,12 +1519,12 @@ export default function Home({ profile }: { profile: Profile }) {
     (markSeen = true) => {
       setTourVisible(false);
       setTourStepIndex(0);
-      setQuickMenuVisible(false);
+      closeQuickMenu();
       if (markSeen) {
         markTourSeen();
       }
     },
-    [markTourSeen]
+    [closeQuickMenu, markTourSeen]
   );
 
   const nextTourStep = useCallback(() => {
@@ -773,17 +1537,25 @@ export default function Home({ profile }: { profile: Profile }) {
 
   const toggleQuickMenu = useCallback(() => {
     if (tourVisible || activeChatUid || activeView === 'found') return;
-    setQuickMenuVisible((prev) => !prev);
-  }, [activeChatUid, activeView, tourVisible]);
+    if (quickMenuVisible) {
+      closeQuickMenu();
+      return;
+    }
+    openQuickMenu();
+  }, [activeChatUid, activeView, closeQuickMenu, openQuickMenu, quickMenuVisible, tourVisible]);
 
   const onQuickCreateGroup = useCallback(() => {
     closeQuickMenu();
-  }, [closeQuickMenu]);
+    navigation.navigate('CreateGroup');
+  }, [closeQuickMenu, navigation]);
 
   const onQuickAdd = useCallback(() => {
-    closeQuickMenu();
-    openFoundFriends();
-  }, [closeQuickMenu, openFoundFriends]);
+    openFoundFriends('search');
+  }, [openFoundFriends]);
+
+  const onOpenNewFriends = useCallback(() => {
+    openFoundFriends('requests');
+  }, [openFoundFriends]);
 
   const onQuickScan = useCallback(() => {
     closeQuickMenu();
@@ -791,18 +1563,242 @@ export default function Home({ profile }: { profile: Profile }) {
   }, [closeQuickMenu, navigation]);
 
   useEffect(() => {
+    const params = route.params || {};
+    const targetUid = Number(params.openChatUid);
+    if (!Number.isFinite(targetUid) || targetUid <= 0) return;
+    const focusMessageId = String(params.openChatFocusMessageId || '').trim();
+    openChatFromPayload(targetUid, params.openChatFriend, {
+      targetType: params.openChatTargetType,
+      group: params.openChatGroup,
+    });
+    if (focusMessageId) {
+      setTimeout(() => {
+        locateChatMessage(targetUid, focusMessageId).catch(() => undefined);
+      }, 120);
+    }
+    navigation.setParams({
+      openChatUid: undefined,
+      openChatTargetType: undefined,
+      openChatFriend: undefined,
+      openChatGroup: undefined,
+      openChatFocusMessageId: undefined,
+    });
+  }, [route.params, navigation, locateChatMessage, openChatFromPayload]);
+
+  useFocusEffect(
+    useCallback(() => {
+      let cancelled = false;
+      const loadPending = async () => {
+        const pending = await storage.getJson<{
+          uid?: number;
+          targetType?: 'private' | 'group';
+          friend?: Partial<Friend>;
+          group?: Partial<Group>;
+          focusMessageId?: string | number;
+        }>(STORAGE_KEYS.pendingOpenChat);
+        if (cancelled || !pending?.uid) return;
+        await storage.remove(STORAGE_KEYS.pendingOpenChat);
+        const targetUid = Number(pending.uid);
+        openChatFromPayload(targetUid, pending.friend, {
+          targetType: pending.targetType,
+          group: pending.group,
+        });
+        const focusMessageId = String(pending.focusMessageId || '').trim();
+        if (focusMessageId) {
+          setTimeout(() => {
+            locateChatMessage(targetUid, focusMessageId).catch(() => undefined);
+          }, 120);
+        }
+      };
+      loadPending().catch(() => undefined);
+      return () => {
+        cancelled = true;
+      };
+    }, [locateChatMessage, openChatFromPayload])
+  );
+
+  useFocusEffect(
+    useCallback(() => {
+      if (!tokenReady || !tokenRef.current) return undefined;
+      loadPendingRequestCount().catch(() => undefined);
+      return undefined;
+    }, [loadPendingRequestCount, tokenReady])
+  );
+
+  useFocusEffect(
+    useCallback(() => {
+      let cancelled = false;
+      const syncFromSettings = async () => {
+        const [storedPinned, storedMuted, storedBackground, storedGroupRemarks, pendingAction] =
+          await Promise.all([
+            storage.getJson<PinnedMap>(STORAGE_KEYS.pinned),
+            storage.getJson<MutedMap>(STORAGE_KEYS.chatMuted),
+            storage.getJson<ChatBackgroundMap>(STORAGE_KEYS.chatBackground),
+            storage.getJson<Record<number, string>>(STORAGE_KEYS.groupRemarks),
+            storage.getJson<{
+              type?: string;
+              uid?: number;
+              group?: Partial<Group>;
+            }>(STORAGE_KEYS.pendingChatSettingsAction),
+          ]);
+        if (cancelled) return;
+
+        setPinnedMap(sanitizeBooleanMap(storedPinned));
+        setMutedMap(sanitizeBooleanMap(storedMuted));
+        setChatBackgroundMap(sanitizeChatBackgroundMap(storedBackground));
+        setGroupRemarksMap(sanitizeGroupRemarksMap(storedGroupRemarks));
+
+        const actionUid = Number(pendingAction?.uid);
+        if (pendingAction?.type === 'group_update' && Number.isInteger(actionUid) && actionUid > 0) {
+          await storage.remove(STORAGE_KEYS.pendingChatSettingsAction);
+          const payload = pendingAction.group || {};
+          setGroups((prev) => {
+            const existing = prev.find((item) => item.id === actionUid);
+            const merged = normalizeGroup({
+              ...(existing || {
+                id: actionUid,
+                memberUids: [],
+                members: [],
+              }),
+              ...payload,
+              id: actionUid,
+            });
+            if (!merged) return prev;
+            if (existing) {
+              return prev.map((item) => (item.id === actionUid ? { ...item, ...merged } : item));
+            }
+            return [merged, ...prev];
+          });
+          return;
+        }
+
+        if (pendingAction?.type === 'delete_chat' && Number.isInteger(actionUid) && actionUid > 0) {
+          await storage.remove(STORAGE_KEYS.pendingChatSettingsAction);
+          messageIdSetsRef.current.delete(actionUid);
+          setMessagesByUid((prev) => {
+            const next = { ...prev };
+            delete next[actionUid];
+            return next;
+          });
+          setLatestMap((prev) => {
+            const next = { ...prev };
+            delete next[actionUid];
+            return next;
+          });
+          setUnreadMap((prev) => ({ ...prev, [actionUid]: 0 }));
+          setHiddenMap((prev) => {
+            const next = { ...prev, [actionUid]: true };
+            persistHiddenMap(next).catch(() => undefined);
+            return next;
+          });
+          if (activeChatUidRef.current === actionUid) {
+            setActiveChatUid(null);
+          }
+          return;
+        }
+
+        if (pendingAction?.type === 'group_delete_chat' && Number.isInteger(actionUid) && actionUid > 0) {
+          await storage.remove(STORAGE_KEYS.pendingChatSettingsAction);
+          messageIdSetsRef.current.delete(actionUid);
+          setMessagesByUid((prev) => {
+            const next = { ...prev };
+            delete next[actionUid];
+            return next;
+          });
+          setLatestMap((prev) => {
+            const next = { ...prev };
+            delete next[actionUid];
+            return next;
+          });
+          setUnreadMap((prev) => ({ ...prev, [actionUid]: 0 }));
+          return;
+        }
+
+        if (pendingAction?.type === 'group_leave' && Number.isInteger(actionUid) && actionUid > 0) {
+          await storage.remove(STORAGE_KEYS.pendingChatSettingsAction);
+          messageIdSetsRef.current.delete(actionUid);
+          setGroups((prev) => prev.filter((group) => group.id !== actionUid));
+          setMessagesByUid((prev) => {
+            const next = { ...prev };
+            delete next[actionUid];
+            return next;
+          });
+          setLatestMap((prev) => {
+            const next = { ...prev };
+            delete next[actionUid];
+            return next;
+          });
+          setUnreadMap((prev) => {
+            const next = { ...prev };
+            delete next[actionUid];
+            return next;
+          });
+          setPinnedMap((prev) => {
+            if (!prev[actionUid]) return prev;
+            const next = { ...prev };
+            delete next[actionUid];
+            storage.setJson(STORAGE_KEYS.pinned, next).catch(() => undefined);
+            return next;
+          });
+          setMutedMap((prev) => {
+            if (!prev[actionUid]) return prev;
+            const next = { ...prev };
+            delete next[actionUid];
+            storage.setJson(STORAGE_KEYS.chatMuted, next).catch(() => undefined);
+            return next;
+          });
+          setChatBackgroundMap((prev) => {
+            if (!prev[actionUid]) return prev;
+            const next = { ...prev };
+            delete next[actionUid];
+            storage.setJson(STORAGE_KEYS.chatBackground, next).catch(() => undefined);
+            return next;
+          });
+          setGroupRemarksMap((prev) => {
+            if (!prev[actionUid]) return prev;
+            const next = { ...prev };
+            delete next[actionUid];
+            storage.setJson(STORAGE_KEYS.groupRemarks, next).catch(() => undefined);
+            return next;
+          });
+          if (activeChatUidRef.current === actionUid) {
+            setActiveChatUid(null);
+          }
+        }
+      };
+      syncFromSettings().catch(() => undefined);
+      return () => {
+        cancelled = true;
+      };
+    }, [persistHiddenMap])
+  );
+
+  useEffect(() => {
     if (Platform.OS !== 'android') return;
     const sub = BackHandler.addEventListener('hardwareBackPress', () => {
+      if (searchVisible) {
+        searchInputRef.current?.blur();
+        Animated.timing(searchAnim, {
+          toValue: 0,
+          duration: 140,
+          easing: SCENE_EASING,
+          useNativeDriver: true,
+        }).start(() => {
+          setSearchVisible(false);
+          setSearchQuery('');
+        });
+        return true;
+      }
       if (tourVisible) {
         closeTour(true);
         return true;
       }
       if (!quickMenuVisible) return false;
-      setQuickMenuVisible(false);
+      closeQuickMenu();
       return true;
     });
     return () => sub.remove();
-  }, [closeTour, quickMenuVisible, tourVisible]);
+  }, [closeQuickMenu, closeTour, quickMenuVisible, searchAnim, searchVisible, tourVisible]);
 
   const onChatScroll = useCallback(
     async (event: any) => {
@@ -827,13 +1823,16 @@ export default function Home({ profile }: { profile: Profile }) {
 
   const sendText = useCallback(async () => {
     if (!canSend || !activeChatUidRef.current || !selfUid) return;
-    const content = draftMessage.trim();
+    const content = draftMessage.trim().slice(0, CHAT_INPUT_MAX_LENGTH);
     if (!content) return;
+    const targetType = groupsRef.current.some((group) => group.id === activeChatUidRef.current)
+      ? 'group'
+      : 'private';
     focusChatInput();
     const payload = {
       senderUid: selfUid,
       targetUid: activeChatUidRef.current,
-      targetType: 'private',
+      targetType,
       type: 'text',
       content,
     };
@@ -852,35 +1851,6 @@ export default function Home({ profile }: { profile: Profile }) {
       }
     } catch {}
   }, [authHeaders, canSend, draftMessage, focusChatInput, insertMessages, scrollToBottom, selfUid]);
-
-  const deleteMessage = useCallback(
-    async (uid: number, message: Message) => {
-      if (!message?.id) return;
-      try {
-        const response = await fetch(`${API_BASE}/api/chat/del`, {
-          method: 'DELETE',
-          headers: { 'Content-Type': 'application/json', ...authHeaders() },
-          body: JSON.stringify({ id: message.id }),
-        });
-        const data = await response.json().catch(() => ({}));
-        if (response.ok && data?.success) {
-          const currentBucket = messagesByUidRef.current[uid] || [];
-          const nextBucket = currentBucket.filter((item) => item.id !== message.id);
-          setMessagesByUid((prev) => ({ ...prev, [uid]: nextBucket }));
-          const idSet = messageIdSetsRef.current.get(uid);
-          if (idSet) {
-            idSet.delete(message.id);
-          }
-          const last = nextBucket[nextBucket.length - 1];
-          if (last) {
-            updateLatest(uid, last);
-          }
-          recalcUnread(uid, nextBucket);
-        }
-      } catch {}
-    },
-    [authHeaders, recalcUnread, updateLatest]
-  );
 
   const buildWsUrl = useCallback(() => {
     try {
@@ -919,8 +1889,8 @@ export default function Home({ profile }: { profile: Profile }) {
 
   const requestFriendsRefresh = useCallback(() => {
     setFriendsRefreshKey((prev) => prev + 1);
-    loadFriends().catch(() => undefined);
-  }, [loadFriends]);
+    Promise.all([loadFriends(), loadGroups()]).catch(() => undefined);
+  }, [loadFriends, loadGroups]);
 
   const handleWsMessage = useCallback(
     (payload: any) => {
@@ -929,12 +1899,22 @@ export default function Home({ profile }: { profile: Profile }) {
         const entry = payload.data;
         if (!entry?.id) return;
         const message = normalizeMessage(entry);
-        const friendUid =
-          message.senderUid === selfUid ? message.targetUid : message.senderUid;
-        insertMessages(friendUid, [entry]);
+        const targetUid =
+          message.targetType === 'group'
+            ? message.targetUid
+            : message.senderUid === selfUid
+              ? message.targetUid
+              : message.senderUid;
+        insertMessages(targetUid, [entry]);
+        if (
+          message.targetType === 'group' &&
+          !groupsRef.current.some((group) => Number(group.id) === targetUid)
+        ) {
+          loadGroups().catch(() => undefined);
+        }
 
-        if (activeChatUidRef.current === friendUid) {
-          markChatRead(friendUid);
+        if (activeChatUidRef.current === targetUid) {
+          markChatRead(targetUid);
           setTimeout(scrollToBottom, 0);
         }
         return;
@@ -945,6 +1925,7 @@ export default function Home({ profile }: { profile: Profile }) {
       }
       if (payload.type === 'requests') {
         setFriendsRefreshKey((prev) => prev + 1);
+        loadPendingRequestCount().catch(() => undefined);
         return;
       }
       if (payload.type === 'presence') {
@@ -966,8 +1947,10 @@ export default function Home({ profile }: { profile: Profile }) {
     },
     [
       insertMessages,
+      loadGroups,
       markChatRead,
       normalizeMessage,
+      loadPendingRequestCount,
       requestFriendsRefresh,
       scrollToBottom,
       selfUid,
@@ -1030,8 +2013,29 @@ export default function Home({ profile }: { profile: Profile }) {
     connectWsRef.current = connectWs;
   }, [connectWs]);
 
+  useEffect(() => {
+    if (!homeCacheHydratedRef.current) return;
+    if (cacheWriteTimerRef.current) {
+      clearTimeout(cacheWriteTimerRef.current);
+      cacheWriteTimerRef.current = null;
+    }
+    cacheWriteTimerRef.current = setTimeout(() => {
+      cacheWriteTimerRef.current = null;
+      storage.setJson(STORAGE_KEYS.homeFriendsCache, friends).catch(() => undefined);
+      storage.setJson(STORAGE_KEYS.homeGroupsCache, groups).catch(() => undefined);
+      storage.setJson(STORAGE_KEYS.homeMessagesCache, messagesByUid).catch(() => undefined);
+      storage.setJson(STORAGE_KEYS.homeLatestCache, latestMap).catch(() => undefined);
+      storage.setJson(STORAGE_KEYS.homeUnreadCache, unreadMap).catch(() => undefined);
+      storage.setJson(STORAGE_KEYS.homePendingRequestsCache, pendingRequestCount).catch(() => undefined);
+    }, 220);
+  }, [friends, groups, latestMap, messagesByUid, pendingRequestCount, unreadMap]);
+
   const teardownWs = useCallback(() => {
     stopHeartbeat();
+    if (homeRefreshTimerRef.current) {
+      clearTimeout(homeRefreshTimerRef.current);
+      homeRefreshTimerRef.current = null;
+    }
     if (reconnectTimerRef.current) {
       clearTimeout(reconnectTimerRef.current);
       reconnectTimerRef.current = null;
@@ -1046,42 +2050,239 @@ export default function Home({ profile }: { profile: Profile }) {
 
   useEffect(() => {
     if (!tokenReady || !tokenRef.current) return;
-    loadFriends().catch(() => undefined);
-    connectWs();
+    let cancelled = false;
+    const bootstrapHome = async () => {
+      setLoadingFriends(true);
+      const hasCache = await hydrateHomeCache().catch(() => {
+        homeCacheHydratedRef.current = true;
+        return false;
+      });
+      if (cancelled) return;
+      setLoadingFriends(!hasCache);
+      connectWs();
+      homeRefreshTimerRef.current = setTimeout(() => {
+        if (cancelled) return;
+        Promise.all([loadFriends({ silent: hasCache }), loadGroups()]).catch(() => undefined);
+      }, HOME_REFRESH_DELAY_MS);
+    };
+    bootstrapHome().catch(() => undefined);
     return () => {
+      cancelled = true;
+      if (cacheWriteTimerRef.current) {
+        clearTimeout(cacheWriteTimerRef.current);
+        cacheWriteTimerRef.current = null;
+      }
       teardownWs();
     };
-  }, [connectWs, loadFriends, teardownWs, tokenReady]);
+  }, [connectWs, hydrateHomeCache, loadFriends, loadGroups, teardownWs, tokenReady]);
 
-  const messageItems = useMemo(() => {
-    const filtered = friends.filter(
-      (friend) => Number.isInteger(Number(friend?.uid)) && !hiddenMap[Number(friend.uid)]
-    );
-    return filtered
+  const messageItems = useMemo<MessageListItem[]>(() => {
+    const privateItems: MessageListItem[] = friends
+      .filter((friend) => Number.isInteger(Number(friend?.uid)) && !hiddenMap[Number(friend.uid)])
       .map((friend) => {
         const uid = Number(friend.uid);
         const latest = latestMap[uid];
         return {
-          friend,
+          uid,
+          targetType: 'private',
+          title: friend.nickname || friend.username || '联系人',
+          preview: latest?.text || '暂无消息',
           latest,
           pinned: Boolean(pinnedMap[uid]),
           unread: unreadMap[uid] || 0,
+          friend,
         };
-      })
-      .sort((a, b) => {
-        if (a.pinned !== b.pinned) return a.pinned ? -1 : 1;
-        const ta = a.latest?.ts || 0;
-        const tb = b.latest?.ts || 0;
-        return tb - ta;
       });
-  }, [friends, hiddenMap, latestMap, pinnedMap, unreadMap]);
+    const groupItems: MessageListItem[] = groups
+      .filter((group) => Number.isInteger(Number(group?.id)) && !hiddenMap[Number(group.id)])
+      .map((group) => {
+        const uid = Number(group.id);
+        const latest = latestMap[uid];
+        return {
+          uid,
+          targetType: 'group',
+          title: getGroupDisplayName(group),
+          preview: latest?.text || '暂无消息',
+          latest,
+          pinned: Boolean(pinnedMap[uid]),
+          unread: unreadMap[uid] || 0,
+          group,
+        };
+      });
+    return [...privateItems, ...groupItems].sort((a, b) => {
+      if (a.pinned !== b.pinned) return a.pinned ? -1 : 1;
+      const ta = a.latest?.ts || 0;
+      const tb = b.latest?.ts || 0;
+      return tb - ta;
+    });
+  }, [friends, groups, hiddenMap, latestMap, pinnedMap, unreadMap]);
+  const totalUnreadCount = useMemo(
+    () => messageItems.reduce((sum, item) => sum + Math.max(0, Number(item.unread) || 0), 0),
+    [messageItems]
+  );
+
+  const normalizedSearchQuery = useMemo(
+    () => searchQuery.trim().toLowerCase(),
+    [searchQuery]
+  );
+  const hasSearchQuery = normalizedSearchQuery.length > 0;
+  const searchFriends = useMemo(() => {
+    if (!hasSearchQuery) return [] as Friend[];
+    return friends.filter((friend) => {
+      const username = String(friend.username || '').toLowerCase();
+      const nickname = String(friend.nickname || '').toLowerCase();
+      const uidText = String(friend.uid);
+      return (
+        username.includes(normalizedSearchQuery) ||
+        nickname.includes(normalizedSearchQuery) ||
+        uidText.includes(normalizedSearchQuery)
+      );
+    });
+  }, [friends, hasSearchQuery, normalizedSearchQuery]);
+  const searchGroups = useMemo(() => {
+    if (!hasSearchQuery) return [] as Group[];
+    return groups.filter((group) => {
+      const rawName = String(group.name || '').toLowerCase();
+      const groupDisplayName = getGroupDisplayName(group).toLowerCase();
+      return rawName.includes(normalizedSearchQuery) || groupDisplayName.includes(normalizedSearchQuery);
+    });
+  }, [groups, hasSearchQuery, normalizedSearchQuery]);
+  const searchChatHits = useMemo<SearchChatHit[]>(() => {
+    if (!hasSearchQuery) return [];
+    const groupMap = new Map<number, Group>();
+    groups.forEach((group) => groupMap.set(group.id, group));
+    const friendMap = new Map<number, Friend>();
+    friends.forEach((friend) => friendMap.set(friend.uid, friend));
+    const hits: SearchChatHit[] = [];
+    Object.entries(messagesByUid).forEach(([rawUid, list]) => {
+      const uid = Number(rawUid);
+      if (!Number.isInteger(uid) || uid <= 0 || !Array.isArray(list)) return;
+      const maybeGroup = groupMap.get(uid);
+      const maybeFriend = friendMap.get(uid);
+      const targetType: 'private' | 'group' = maybeGroup ? 'group' : 'private';
+      const title =
+        targetType === 'group'
+          ? getGroupDisplayName(maybeGroup)
+          : maybeFriend?.nickname || maybeFriend?.username || `用户${uid}`;
+      list.forEach((message) => {
+        const content = String(message?.content || '').trim();
+        if (!content) return;
+        if (!content.toLowerCase().includes(normalizedSearchQuery)) return;
+        const createdAtMs = Number(message?.createdAtMs);
+        hits.push({
+          key: `${uid}:${String(message?.id)}`,
+          messageId: String(message?.id),
+          uid,
+          targetType,
+          title,
+          content,
+          createdAt: String(message?.createdAt || ''),
+          createdAtMs: Number.isFinite(createdAtMs) ? createdAtMs : Date.now(),
+        });
+      });
+    });
+    hits.sort((a, b) => b.createdAtMs - a.createdAtMs);
+    if (hits.length > SEARCH_MAX_CHAT_HITS) {
+      return hits.slice(0, SEARCH_MAX_CHAT_HITS);
+    }
+    return hits;
+  }, [friends, groups, hasSearchQuery, messagesByUid, normalizedSearchQuery]);
+
+  const searchTranslateY = useMemo(
+    () =>
+      searchAnim.interpolate({
+        inputRange: [0, 1],
+        outputRange: [14, 0],
+      }),
+    [searchAnim]
+  );
+
+  const openSearchPanel = useCallback(() => {
+    if (activeChatUid || activeView === 'found') return;
+    if (searchVisible) return;
+    closeQuickMenu();
+    setSearchVisible(true);
+    searchAnim.setValue(0);
+    Animated.timing(searchAnim, {
+      toValue: 1,
+      duration: 180,
+      easing: SCENE_EASING,
+      useNativeDriver: true,
+    }).start();
+    setTimeout(() => {
+      searchInputRef.current?.focus();
+    }, 0);
+  }, [activeChatUid, activeView, closeQuickMenu, searchAnim, searchVisible]);
+
+  const closeSearchPanel = useCallback(
+    (clearQuery = true) => {
+      if (!searchVisible) {
+        if (clearQuery) setSearchQuery('');
+        return;
+      }
+      searchInputRef.current?.blur();
+      Animated.timing(searchAnim, {
+        toValue: 0,
+        duration: 140,
+        easing: SCENE_EASING,
+        useNativeDriver: true,
+      }).start(() => {
+        setSearchVisible(false);
+        if (clearQuery) setSearchQuery('');
+      });
+    },
+    [searchAnim, searchVisible]
+  );
+
+  const onSelectSearchFriend = useCallback(
+    (friend: Friend) => {
+      closeSearchPanel();
+      openChat(friend);
+    },
+    [closeSearchPanel, openChat]
+  );
+
+  const onSelectSearchGroup = useCallback(
+    (group: Group) => {
+      closeSearchPanel();
+      openChatFromPayload(group.id, undefined, { targetType: 'group', group });
+    },
+    [closeSearchPanel, openChatFromPayload]
+  );
+
+  const onSelectSearchChatHit = useCallback(
+    (hit: SearchChatHit) => {
+      closeSearchPanel();
+      const scheduleLocate = () => {
+        setTimeout(() => {
+          locateChatMessage(hit.uid, hit.messageId).catch(() => undefined);
+        }, 80);
+      };
+      if (hit.targetType === 'group') {
+        const group = groups.find((item) => item.id === hit.uid);
+        openChatFromPayload(hit.uid, undefined, { targetType: 'group', group });
+        scheduleLocate();
+        return;
+      }
+      const friend = friends.find((item) => item.uid === hit.uid);
+      if (friend) {
+        openChat(friend);
+        scheduleLocate();
+        return;
+      }
+      openChatFromPayload(hit.uid);
+      scheduleLocate();
+    },
+    [closeSearchPanel, friends, groups, locateChatMessage, openChat, openChatFromPayload]
+  );
 
   const closeChatMenu = useCallback(() => {
     setChatMenuVisible(false);
     setChatMenuTargetUid(null);
+    setChatMenuTargetType('private');
   }, []);
 
-  const openChatMenu = useCallback((event: any, uid: number) => {
+  const openChatMenu = useCallback((event: any, uid: number, targetType: 'private' | 'group') => {
     const { width, height } = Dimensions.get('window');
     const menuWidth = 160;
     const menuHeight = 96;
@@ -1089,6 +2290,7 @@ export default function Home({ profile }: { profile: Profile }) {
     const y = Math.min(event.nativeEvent.pageY, height - menuHeight - 10);
     setChatMenuPosition({ x, y });
     setChatMenuTargetUid(uid);
+    setChatMenuTargetType(targetType);
     setChatMenuVisible(true);
   }, []);
 
@@ -1112,9 +2314,8 @@ export default function Home({ profile }: { profile: Profile }) {
 
     const deleteBatch = async (beforeId?: number | string) => {
       const params = new URLSearchParams({
-        targetType: 'private',
+        targetType: chatMenuTargetType,
         targetUid: String(uid),
-        type: 'text',
         limit: String(PAGE_LIMIT),
       });
       if (beforeId) {
@@ -1133,7 +2334,7 @@ export default function Home({ profile }: { profile: Profile }) {
         await fetch(`${API_BASE}/api/chat/del`, {
           method: 'DELETE',
           headers: { 'Content-Type': 'application/json', ...authHeaders() },
-          body: JSON.stringify({ id: item.id }),
+          body: JSON.stringify({ id: String(item.id) }),
         }).catch(() => undefined);
       }
       if (list.length < PAGE_LIMIT) {
@@ -1165,39 +2366,96 @@ export default function Home({ profile }: { profile: Profile }) {
       return next;
     });
     setUnreadMap((prev) => ({ ...prev, [uid]: 0 }));
-  }, [authHeaders, chatMenuTargetUid, closeChatMenu, persistHiddenMap]);
+  }, [authHeaders, chatMenuTargetType, chatMenuTargetUid, closeChatMenu, persistHiddenMap]);
 
   return (
     <View style={[styles.page, { paddingTop: insets.top }]}>
       {activeView === 'found' && !activeChatUid ? (
-        <FoundFriends
-          friends={friends}
-          selfUid={selfUid || null}
-          refreshKey={friendsRefreshKey}
-          onBack={closeFoundFriends}
-          onRefreshFriends={requestFriendsRefresh}
-        />
+        <Animated.View
+          style={[styles.sceneContainer, { transform: [{ translateX: foundSceneAnim }] }]}
+          {...foundEdgePanResponder.panHandlers}
+        >
+          <FoundFriends
+            friends={friends}
+            selfUid={selfUid || null}
+            refreshKey={friendsRefreshKey}
+            initialTab={foundFriendsInitialTab}
+            onBack={onPressFoundBack}
+            onRefreshFriends={requestFriendsRefresh}
+          />
+        </Animated.View>
       ) : null}
 
       {activeChatUid ? (
-        <>
+        <Animated.View
+          style={[styles.sceneContainer, { transform: [{ translateX: chatSceneAnim }] }]}
+          {...chatEdgePanResponder.panHandlers}
+        >
           <View style={styles.chatHeader}>
-            <Pressable style={styles.chatBack} onPress={closeChat}>
-              <BackIcon />
-            </Pressable>
-            <View>
-              <Text style={styles.chatName}>
-                {activeChatFriend?.nickname || activeChatFriend?.username || '聊天'}
-              </Text>
-              <Text style={[styles.chatStatus, activeChatFriend?.online && styles.chatOnline]}>
-                {activeChatFriend?.online ? '在线' : '离线'}
-              </Text>
+            <View style={styles.chatHeaderLeft}>
+              <Pressable style={styles.chatBack} onPress={onPressChatBack}>
+                <BackIcon />
+              </Pressable>
+              {totalUnreadCount > 0 ? (
+                <View style={styles.chatHeaderUnread}>
+                  <Text style={styles.chatHeaderUnreadText}>
+                    {totalUnreadCount > 99 ? '99+' : totalUnreadCount}
+                  </Text>
+                </View>
+              ) : null}
             </View>
+            <View style={styles.chatHeaderCenter}>
+              <Text style={styles.chatName} numberOfLines={1}>
+                {activeChatTitle}
+              </Text>
+              {activeChatStatusText ? (
+                <Text style={[styles.chatStatus, !activeChatGroup && activeChatFriend?.online && styles.chatOnline]}>
+                  {activeChatStatusText}
+                </Text>
+              ) : null}
+            </View>
+            <Pressable
+              style={styles.chatHeaderMenu}
+              onPress={() => {
+                if (!activeChatUid) return;
+                if (activeChatGroup) {
+                  navigation.navigate('GroupChatSettings', {
+                    uid: activeChatUid,
+                    group: {
+                      id: activeChatGroup.id,
+                      ownerUid: activeChatGroup.ownerUid,
+                      name: activeChatGroup.name,
+                      description: activeChatGroup.description,
+                      announcement: activeChatGroup.announcement,
+                      myNickname: activeChatGroup.myNickname,
+                      memberUids: activeChatGroup.memberUids,
+                      members: activeChatGroup.members,
+                    },
+                  });
+                  return;
+                }
+                navigation.navigate('ChatSettings', {
+                  uid: activeChatUid,
+                  friend: activeChatFriend
+                    ? {
+                        uid: activeChatFriend.uid,
+                        username: activeChatFriend.username,
+                        nickname: activeChatFriend.nickname,
+                        avatar: activeChatFriend.avatar,
+                        signature: activeChatFriend.signature,
+                        online: activeChatFriend.online,
+                      }
+                    : undefined,
+                });
+              }}
+            >
+              <ChatSettingsIcon />
+            </Pressable>
           </View>
 
           <ScrollView
             ref={messageListRef}
-            style={styles.chatBody}
+            style={[styles.chatBody, { backgroundColor: activeChatBackgroundColor }]}
             onScroll={onChatScroll}
             scrollEventThrottle={16}
             onContentSizeChange={(_, height) => {
@@ -1210,59 +2468,115 @@ export default function Home({ profile }: { profile: Profile }) {
             {!historyLoading[activeChatUid] && activeChatMessages.length === 0 ? (
               <Text style={styles.empty}>还没有消息，先聊几句吧。</Text>
             ) : null}
-            {historyHasMore[activeChatUid] ? (
-              <Text style={styles.loadMore}>
-                {historyLoading[activeChatUid] ? '加载更多...' : '上拉加载更多'}
-              </Text>
-            ) : null}
-            {activeChatMessages.map((item) => {
+            {activeChatMessages.map((item, idx) => {
               const isSelf = item.senderUid === selfUid;
+              const itemId = String(item.id);
+              const isFocused = focusedMessageId === itemId;
+              const prev = idx > 0 ? activeChatMessages[idx - 1] : null;
+              const prevMs = Number(prev?.createdAtMs);
+              const currentMs = Number(item.createdAtMs);
+              const showTime =
+                idx === 0 ||
+                !Number.isFinite(prevMs) ||
+                !Number.isFinite(currentMs) ||
+                currentMs - prevMs > CHAT_TIME_GAP_MS;
+              const senderProfile = !isSelf ? findUserByUid(item.senderUid) : null;
+              const senderName = senderProfile?.nickname || senderProfile?.username || `用户${item.senderUid}`;
+              const senderAvatarUrl = isSelf
+                ? selfChatAvatar
+                : normalizeImageUrl(senderProfile?.avatar || activeChatFriendAvatar);
+              const avatarLabel = isSelf
+                ? getAvatarText(profileData.nickname || profileData.username || '我')
+                : getAvatarText(senderName || '群友');
+              const showSender = Boolean(activeChatGroup && !isSelf);
               return (
-                <View key={String(item.id)} style={[styles.messageRow, isSelf && styles.selfRow]}>
-                  <View style={[styles.bubble, isSelf && styles.selfBubble]}>
-                    <Text style={[styles.messageText, isSelf && styles.selfText]}>
-                      {item.content}
+                <React.Fragment key={itemId}>
+                  {showTime ? (
+                    <Text style={styles.chatTimeDivider}>
+                      {formatTime(item.createdAt, item.createdAtMs)}
                     </Text>
-                    <View style={styles.meta}>
-                      <Text style={[styles.metaText, isSelf && styles.selfMeta]}>
-                        {formatTime(item.createdAt, item.createdAtMs)}
-                      </Text>
-                      {!isSelf ? (
-                        <Text style={styles.readState}>
-                          {item.createdAtMs <= getReadAt(activeChatUid) ? '已读' : '未读'}
+                  ) : null}
+                  <View
+                    style={[styles.messageRow, isSelf && styles.selfRow]}
+                    onLayout={(event) =>
+                      recordMessageOffset(
+                        activeChatUid,
+                        itemId,
+                        Number(event?.nativeEvent?.layout?.y) || 0
+                      )
+                    }
+                  >
+                    <View style={[styles.msgAvatarWrap, isSelf && styles.selfMsgAvatarWrap]}>
+                      {senderAvatarUrl ? (
+                        <Image source={{ uri: senderAvatarUrl }} style={styles.msgAvatarImage} />
+                      ) : (
+                        <View style={styles.msgAvatarFallbackCircle}>
+                          <Text style={styles.msgAvatarFallbackText}>{avatarLabel}</Text>
+                        </View>
+                      )}
+                    </View>
+                    <View style={[styles.bubbleWrap, isSelf && styles.selfBubbleWrap]}>
+                      {showSender ? <Text style={styles.groupSenderName}>{senderName}</Text> : null}
+                      <View
+                        style={[
+                          styles.bubble,
+                          isSelf && styles.selfBubble,
+                          isFocused && !isSelf && styles.bubbleFocused,
+                          isFocused && isSelf && styles.selfBubbleFocused,
+                        ]}
+                      >
+                        <Text style={[styles.messageText, isSelf && styles.selfText]}>
+                          {item.content}
                         </Text>
-                      ) : null}
+                      </View>
                     </View>
                   </View>
-                  <Pressable onPress={() => deleteMessage(activeChatUid, item)}>
-                    <Text style={[styles.deleteBtn, isSelf && styles.selfDelete]}>删除</Text>
-                  </Pressable>
-                </View>
+                </React.Fragment>
               );
             })}
           </ScrollView>
 
-          <View style={[styles.chatInput, { paddingBottom: 12 + insets.bottom }]}>
-            <TextInput
-              ref={chatInputRef}
-              value={draftMessage}
-              placeholder="输入消息..."
-              placeholderTextColor="#b0b0b0"
-              onChangeText={setDraftMessage}
-              style={[styles.chatInputField, webInputNoOutline]}
-              onSubmitEditing={sendText}
-              blurOnSubmit={false}
-              returnKeyType="send"
-            />
-            <Pressable
-              style={[styles.sendBtn, !canSend && styles.sendBtnDisabled]}
-              onPress={sendText}
-              disabled={!canSend}
-            >
-              <Text style={styles.sendText}>发送</Text>
-            </Pressable>
+          <View style={[styles.chatComposer, { paddingBottom: 8 + insets.bottom }]}>
+            <View style={styles.chatInputRow}>
+              <TextInput
+                ref={chatInputRef}
+                value={draftMessage}
+                placeholder="输入消息..."
+                placeholderTextColor="#b0b0b0"
+                onChangeText={setDraftMessage}
+                maxLength={CHAT_INPUT_MAX_LENGTH}
+                style={[styles.chatInputField, webInputNoOutline]}
+                onSubmitEditing={sendText}
+                blurOnSubmit={false}
+                returnKeyType="send"
+              />
+              <Pressable
+                style={[styles.sendBtn, !canSend && styles.sendBtnDisabled]}
+                onPress={sendText}
+                disabled={!canSend}
+              >
+                <Text style={styles.sendText}>发送</Text>
+              </Pressable>
+            </View>
+            <View style={styles.chatToolRow}>
+              <Pressable style={styles.chatToolBtn} onPress={() => undefined}>
+                <ToolMicIcon />
+              </Pressable>
+              <Pressable style={styles.chatToolBtn} onPress={() => undefined}>
+                <ToolImageIcon />
+              </Pressable>
+              <Pressable style={styles.chatToolBtn} onPress={() => undefined}>
+                <ToolCameraIcon />
+              </Pressable>
+              <Pressable style={styles.chatToolBtn} onPress={() => undefined}>
+                <ToolEmojiIcon />
+              </Pressable>
+              <Pressable style={styles.chatToolBtn} onPress={() => undefined}>
+                <ToolPlusIcon />
+              </Pressable>
+            </View>
           </View>
-        </>
+        </Animated.View>
       ) : null}
 
       {!activeChatUid && activeView !== 'found' ? (
@@ -1298,12 +2612,12 @@ export default function Home({ profile }: { profile: Profile }) {
           </View>
 
           <View style={styles.searchContainer}>
-            <View style={styles.searchBox}>
+            <Pressable style={styles.searchBox} onPress={openSearchPanel}>
               <Svg viewBox="0 0 24 24" width={16} height={16}>
                 <Path d="M15.5 14h-.79l-.28-.27C15.41 12.59 16 11.11 16 9.5 16 5.91 13.09 3 9.5 3S3 5.91 3 9.5 5.91 16 9.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19l-4.99-5zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14z" fill="#a0a0a0" />
               </Svg>
               <Text style={styles.searchText}>搜索</Text>
-            </View>
+            </Pressable>
           </View>
 
           {homeTab === 'messages' ? (
@@ -1313,27 +2627,44 @@ export default function Home({ profile }: { profile: Profile }) {
                 <Text style={styles.empty}>暂无消息</Text>
               ) : null}
               {!loadingFriends &&
-                messageItems.map(({ friend, latest, pinned, unread }) => (
+                messageItems.map((item) => (
                   <Pressable
-                    key={friend.uid}
-                    style={[styles.msgItem, pinned && styles.msgItemPinned]}
-                    onPress={() => openChat(friend)}
-                    onLongPress={(event) => openChatMenu(event, friend.uid)}
+                    key={`${item.targetType}:${item.uid}`}
+                    style={[styles.msgItem, item.pinned && styles.msgItemPinned]}
+                    onPress={() => {
+                      if (item.targetType === 'group') {
+                        openChatFromPayload(item.uid, undefined, {
+                          targetType: 'group',
+                          group: item.group,
+                        });
+                        return;
+                      }
+                      if (item.friend) {
+                        openChat(item.friend);
+                      }
+                    }}
+                    onLongPress={(event) => openChatMenu(event, item.uid, item.targetType)}
                   >
                     <View style={styles.avatarBox}>
-                      {normalizeImageUrl(friend.avatar) ? (
-                        <Image source={{ uri: normalizeImageUrl(friend.avatar) }} style={styles.msgAvatar} />
+                      {item.targetType === 'group' && item.group ? (
+                        <GroupAvatarGrid
+                          members={item.group.members}
+                          fallbackText={getAvatarText(item.title)}
+                          size={48}
+                        />
+                      ) : normalizeImageUrl(item.friend?.avatar) ? (
+                        <Image source={{ uri: normalizeImageUrl(item.friend?.avatar) }} style={styles.msgAvatar} />
                       ) : (
                         <View style={styles.msgAvatarFallback}>
                           <Text style={styles.msgAvatarText}>
-                            {getAvatarText(friend.nickname || friend.username)}
+                            {getAvatarText(item.friend?.nickname || item.friend?.username)}
                           </Text>
                         </View>
                       )}
-                      {unread > 0 ? (
+                      {item.unread > 0 ? (
                         <View style={styles.badge}>
                           <Text style={styles.badgeText}>
-                            {unread > 99 ? '99+' : unread}
+                            {item.unread > 99 ? '99+' : item.unread}
                           </Text>
                         </View>
                       ) : null}
@@ -1341,12 +2672,12 @@ export default function Home({ profile }: { profile: Profile }) {
                     <View style={styles.msgContentWrapper}>
                       <View style={styles.msgTopRow}>
                         <Text style={styles.msgNickname} numberOfLines={1}>
-                          {friend.nickname || friend.username || '联系人'}
+                          {item.title}
                         </Text>
-                        <Text style={styles.msgTime}>{latest?.time || ''}</Text>
+                        <Text style={styles.msgTime}>{item.latest?.time || ''}</Text>
                       </View>
                       <Text style={styles.msgPreview} numberOfLines={1}>
-                        {latest?.text || '暂无消息'}
+                        {item.preview}
                       </Text>
                     </View>
                   </Pressable>
@@ -1358,12 +2689,31 @@ export default function Home({ profile }: { profile: Profile }) {
               {!loadingFriends && friends.length === 0 ? (
                 <Text style={styles.empty}>暂无联系人</Text>
               ) : null}
+              <Pressable style={styles.newFriendItem} onPress={onOpenNewFriends}>
+                <View style={styles.newFriendIcon}>
+                  <Text style={styles.newFriendIconText}>新</Text>
+                </View>
+                <View style={styles.newFriendInfo}>
+                  <Text style={styles.newFriendTitle}>新朋友</Text>
+                  <Text style={styles.newFriendSub}>好友申请</Text>
+                </View>
+                {pendingRequestCount > 0 ? (
+                  <View style={styles.newFriendBadge}>
+                    <Text style={styles.newFriendBadgeText}>
+                      {pendingRequestCount > 99 ? '99+' : pendingRequestCount}
+                    </Text>
+                  </View>
+                ) : null}
+                <View style={styles.newFriendArrowIcon}>
+                  <ForwardIndicatorIcon />
+                </View>
+              </Pressable>
               {!loadingFriends && friends.length > 0
                 ? friends.map((friend) => (
                     <Pressable
                       key={friend.uid}
                       style={styles.contactItem}
-                      onPress={() => openChat(friend)}
+                      onPress={() => openContactProfile(friend)}
                     >
                       <View style={styles.contactAvatar}>
                         <Text style={styles.avatarText}>
@@ -1375,18 +2725,10 @@ export default function Home({ profile }: { profile: Profile }) {
                         <Text style={styles.contactName}>
                           {friend.nickname || friend.username || '联系人'}
                         </Text>
-                        <Text style={styles.contactSub}>
-                          {latestMap[friend.uid]?.text || '暂无消息'}
-                        </Text>
-                      </View>
-                      <View style={styles.contactMeta}>
-                        <Text style={styles.contactTime}>{latestMap[friend.uid]?.time || ''}</Text>
-                        {unreadMap[friend.uid] > 0 ? (
-                          <View style={styles.unreadBadge}>
-                            <Text style={styles.unreadText}>
-                              {unreadMap[friend.uid] > 99 ? '99+' : unreadMap[friend.uid]}
-                            </Text>
-                          </View>
+                        {friend.signature ? (
+                          <Text style={styles.contactSub} numberOfLines={1}>
+                            {friend.signature}
+                          </Text>
                         ) : null}
                       </View>
                     </Pressable>
@@ -1408,9 +2750,18 @@ export default function Home({ profile }: { profile: Profile }) {
               ]}
               onPress={() => setHomeTab('messages')}
             >
-              <Svg viewBox="0 0 24 24" width={28} height={28} fill={homeTab === 'messages' ? '#0099ff' : '#7d7d7d'}>
-                <Path d="M20 2H4c-1.1 0-2 .9-2 2v18l4-4h14c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2z" />
-              </Svg>
+              <View style={styles.navIconWrap}>
+                <Svg viewBox="0 0 24 24" width={28} height={28} fill={homeTab === 'messages' ? '#0099ff' : '#7d7d7d'}>
+                  <Path d="M20 2H4c-1.1 0-2 .9-2 2v18l4-4h14c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2z" />
+                </Svg>
+                {totalUnreadCount > 0 ? (
+                  <View style={styles.navBadge}>
+                    <Text style={styles.navBadgeText}>
+                      {totalUnreadCount > 99 ? '99+' : totalUnreadCount}
+                    </Text>
+                  </View>
+                ) : null}
+              </View>
               <Text style={[styles.navText, homeTab === 'messages' && styles.navTextActive]}>消息</Text>
             </Pressable>
             <Pressable
@@ -1420,13 +2771,150 @@ export default function Home({ profile }: { profile: Profile }) {
               ]}
               onPress={() => setHomeTab('contacts')}
             >
-              <Svg viewBox="0 0 24 24" width={28} height={28} fill={homeTab === 'contacts' ? '#0099ff' : '#7d7d7d'}>
-                <Path d="M12 12c2.21 0 4-1.79 4-4s-1.79-4-4-4-4 1.79-4 4 1.79 4 4 4zm0 2c-2.67 0-8 1.34-8 4v2h16v-2c0-2.66-5.33-4-8-4z" />
-              </Svg>
+              <View style={styles.navIconWrap}>
+                <Svg viewBox="0 0 24 24" width={28} height={28} fill={homeTab === 'contacts' ? '#0099ff' : '#7d7d7d'}>
+                  <Path d="M12 12c2.21 0 4-1.79 4-4s-1.79-4-4-4-4 1.79-4 4 1.79 4 4 4zm0 2c-2.67 0-8 1.34-8 4v2h16v-2c0-2.66-5.33-4-8-4z" />
+                </Svg>
+                {pendingRequestCount > 0 ? (
+                  <View style={styles.navBadge}>
+                    <Text style={styles.navBadgeText}>
+                      {pendingRequestCount > 99 ? '99+' : pendingRequestCount}
+                    </Text>
+                  </View>
+                ) : null}
+              </View>
               <Text style={[styles.navText, homeTab === 'contacts' && styles.navTextActive]}>联系人</Text>
             </Pressable>
           </View>
         </View>
+      ) : null}
+
+      {searchVisible && !activeChatUid && activeView !== 'found' ? (
+        <Animated.View
+          style={[
+            styles.searchOverlayPanel,
+            {
+              opacity: searchAnim,
+              transform: [{ translateY: searchTranslateY }],
+            },
+          ]}
+        >
+          <View style={[styles.searchOverlayHeader, { paddingTop: insets.top + 6 }]}>
+            <View style={styles.searchOverlayInputWrap}>
+              <Svg viewBox="0 0 24 24" width={18} height={18}>
+                <Path d="M15.5 14h-.79l-.28-.27C15.41 12.59 16 11.11 16 9.5 16 5.91 13.09 3 9.5 3S3 5.91 3 9.5 5.91 16 9.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19l-4.99-5zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14z" fill="#99a3b1" />
+              </Svg>
+              <TextInput
+                ref={searchInputRef}
+                value={searchQuery}
+                onChangeText={setSearchQuery}
+                placeholder="搜索用户名/昵称/UID/聊天记录/群昵称"
+                placeholderTextColor="#99a3b1"
+                style={[styles.searchOverlayInput, webInputNoOutline]}
+                returnKeyType="search"
+                autoCorrect={false}
+                autoCapitalize="none"
+              />
+            </View>
+            <Pressable style={styles.searchOverlayCancelBtn} onPress={() => closeSearchPanel()}>
+              <Text style={styles.searchOverlayCancelText}>取消</Text>
+            </Pressable>
+          </View>
+
+          <ScrollView style={styles.searchOverlayScroll} contentContainerStyle={styles.searchOverlayInner}>
+            {hasSearchQuery ? (
+              <>
+                <View style={styles.searchSection}>
+                  <Text style={styles.searchSectionTitle}>用户 ({searchFriends.length})</Text>
+                  {searchFriends.length === 0 ? (
+                    <Text style={styles.searchSectionEmpty}>没有匹配的用户</Text>
+                  ) : (
+                    searchFriends.map((friend) => (
+                      <Pressable
+                        key={`search-friend-${friend.uid}`}
+                        style={styles.searchResultRow}
+                        onPress={() => onSelectSearchFriend(friend)}
+                      >
+                        <View style={styles.searchResultAvatar}>
+                          <Text style={styles.searchResultAvatarText}>
+                            {getAvatarText(friend.nickname || friend.username)}
+                          </Text>
+                        </View>
+                        <View style={styles.searchResultInfo}>
+                          <Text style={styles.searchResultTitle}>
+                            {friend.nickname || friend.username || `用户${friend.uid}`}
+                          </Text>
+                          <Text style={styles.searchResultSub} numberOfLines={1}>
+                            @{friend.username || '-'}  UID:{friend.uid}
+                          </Text>
+                        </View>
+                      </Pressable>
+                    ))
+                  )}
+                </View>
+
+                <View style={styles.searchSection}>
+                  <Text style={styles.searchSectionTitle}>群聊 ({searchGroups.length})</Text>
+                  {searchGroups.length === 0 ? (
+                    <Text style={styles.searchSectionEmpty}>没有匹配的群昵称</Text>
+                  ) : (
+                    searchGroups.map((group) => (
+                      <Pressable
+                        key={`search-group-${group.id}`}
+                        style={styles.searchResultRow}
+                        onPress={() => onSelectSearchGroup(group)}
+                      >
+                        <GroupAvatarGrid
+                          members={group.members}
+                          fallbackText={getAvatarText(getGroupDisplayName(group))}
+                          size={36}
+                        />
+                        <View style={styles.searchResultInfo}>
+                          <Text style={styles.searchResultTitle}>{getGroupDisplayName(group)}</Text>
+                          <Text style={styles.searchResultSub}>群ID: {group.id}</Text>
+                        </View>
+                      </Pressable>
+                    ))
+                  )}
+                </View>
+
+                <View style={styles.searchSection}>
+                  <Text style={styles.searchSectionTitle}>聊天记录 ({searchChatHits.length})</Text>
+                  {searchChatHits.length === 0 ? (
+                    <Text style={styles.searchSectionEmpty}>没有匹配的聊天记录</Text>
+                  ) : (
+                    searchChatHits.map((hit) => (
+                      <Pressable
+                        key={hit.key}
+                        style={styles.searchResultRow}
+                        onPress={() => onSelectSearchChatHit(hit)}
+                      >
+                        <View style={styles.searchRecordBadge}>
+                          <Text style={styles.searchRecordBadgeText}>
+                            {hit.targetType === 'group' ? '群' : '聊'}
+                          </Text>
+                        </View>
+                        <View style={styles.searchResultInfo}>
+                          <View style={styles.searchRecordTopRow}>
+                            <Text style={styles.searchResultTitle} numberOfLines={1}>
+                              {hit.title}
+                            </Text>
+                            <Text style={styles.searchRecordTime}>
+                              {formatTime(hit.createdAt, hit.createdAtMs)}
+                            </Text>
+                          </View>
+                          <Text style={styles.searchResultSub} numberOfLines={2}>
+                            {hit.content}
+                          </Text>
+                        </View>
+                      </Pressable>
+                    ))
+                  )}
+                </View>
+              </>
+            ) : null}
+          </ScrollView>
+        </Animated.View>
       ) : null}
 
       {tourVisible && canShowMainHome && currentTourStep ? (
@@ -1461,10 +2949,12 @@ export default function Home({ profile }: { profile: Profile }) {
         </View>
       ) : null}
 
-      {quickMenuVisible && !activeChatUid && activeView !== 'found' ? (
-        <View style={styles.quickMenuOverlay}>
+      {quickMenuMounted && !activeChatUid && activeView !== 'found' ? (
+        <Animated.View style={[styles.quickMenuOverlay, { opacity: quickMenuAnim }]}>
           <Pressable style={styles.quickMenuBackdrop} onPress={closeQuickMenu} />
-          <View style={[styles.quickMenuPanel, styles.quickMenuPanelPosition]}>
+          <Animated.View
+            style={[styles.quickMenuPanel, styles.quickMenuPanelPosition, quickMenuPanelAnimatedStyle]}
+          >
             <Pressable style={styles.quickMenuItem} onPress={onQuickCreateGroup}>
               <View style={styles.quickMenuIcon}>
                 <QuickGroupIcon />
@@ -1485,8 +2975,8 @@ export default function Home({ profile }: { profile: Profile }) {
               </View>
               <Text style={styles.quickMenuText}>扫一扫</Text>
             </Pressable>
-          </View>
-        </View>
+          </Animated.View>
+        </Animated.View>
       ) : null}
 
       {chatMenuVisible && chatMenuTargetUid ? (
@@ -1517,6 +3007,10 @@ const styles = StyleSheet.create({
     backgroundColor: '#f5f6fa',
   },
   home: {
+    flex: 1,
+    minHeight: 0,
+  },
+  sceneContainer: {
     flex: 1,
     minHeight: 0,
   },
@@ -1587,6 +3081,141 @@ const styles = StyleSheet.create({
     fontSize: 15,
     color: '#8a8a8a',
   },
+  searchOverlayPanel: {
+    ...StyleSheet.absoluteFillObject,
+    zIndex: 170,
+    backgroundColor: '#f6f7fb',
+  },
+  searchOverlayHeader: {
+    paddingHorizontal: 14,
+    paddingBottom: 10,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    borderBottomWidth: 1,
+    borderBottomColor: '#e8edf4',
+    backgroundColor: '#f6f7fb',
+  },
+  searchOverlayInputWrap: {
+    flex: 1,
+    height: 40,
+    borderRadius: 12,
+    backgroundColor: '#ffffff',
+    borderWidth: 1,
+    borderColor: '#e3e9f2',
+    paddingHorizontal: 12,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  searchOverlayInput: {
+    flex: 1,
+    minHeight: 36,
+    fontSize: 15,
+    color: '#24364f',
+    paddingVertical: 0,
+  },
+  searchOverlayCancelBtn: {
+    height: 40,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 2,
+  },
+  searchOverlayCancelText: {
+    fontSize: 16,
+    color: '#4f84cf',
+    fontWeight: '500',
+  },
+  searchOverlayScroll: {
+    flex: 1,
+  },
+  searchOverlayInner: {
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+    gap: 10,
+    paddingBottom: 28,
+  },
+  searchSection: {
+    backgroundColor: '#ffffff',
+    borderWidth: 1,
+    borderColor: '#e4eaf3',
+    borderRadius: 12,
+    overflow: 'hidden',
+  },
+  searchSectionTitle: {
+    fontSize: 13,
+    color: '#5f728a',
+    fontWeight: '600',
+    paddingHorizontal: 12,
+    paddingTop: 10,
+    paddingBottom: 8,
+  },
+  searchSectionEmpty: {
+    fontSize: 13,
+    color: '#9aabc0',
+    paddingHorizontal: 12,
+    paddingBottom: 12,
+  },
+  searchResultRow: {
+    minHeight: 56,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    borderTopWidth: 1,
+    borderTopColor: '#edf2f8',
+  },
+  searchResultAvatar: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    backgroundColor: '#e6edf7',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  searchResultAvatarText: {
+    color: '#2f6bd9',
+    fontSize: 12,
+    fontWeight: '700',
+  },
+  searchResultInfo: {
+    flex: 1,
+    minWidth: 0,
+    gap: 2,
+  },
+  searchResultTitle: {
+    fontSize: 14,
+    color: '#203246',
+    fontWeight: '600',
+  },
+  searchResultSub: {
+    fontSize: 12,
+    color: '#7e90a6',
+  },
+  searchRecordBadge: {
+    width: 30,
+    height: 30,
+    borderRadius: 15,
+    backgroundColor: '#eaf1fb',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  searchRecordBadgeText: {
+    color: '#41699c',
+    fontSize: 12,
+    fontWeight: '700',
+  },
+  searchRecordTopRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 8,
+  },
+  searchRecordTime: {
+    fontSize: 11,
+    color: '#97a7bc',
+  },
   content: {
     flex: 1,
     minHeight: 0,
@@ -1626,6 +3255,33 @@ const styles = StyleSheet.create({
     resizeMode: 'cover',
     borderWidth: 1,
     borderColor: 'rgba(0,0,0,0.03)',
+  },
+  groupAvatarGrid: {
+    width: 48,
+    height: 48,
+    borderRadius: 8,
+    overflow: 'hidden',
+    backgroundColor: '#eef3fa',
+    borderWidth: 1,
+    borderColor: 'rgba(0,0,0,0.03)',
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+  },
+  groupAvatarCell: {
+    width: '50%',
+    height: '50%',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  groupAvatarImage: {
+    width: '100%',
+    height: '100%',
+    resizeMode: 'cover',
+  },
+  groupAvatarFallbackText: {
+    fontSize: 9,
+    color: '#2f6bd9',
+    fontWeight: '700',
   },
   msgAvatarFallback: {
     width: 48,
@@ -1701,6 +3357,32 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     gap: 3,
   },
+  navIconWrap: {
+    position: 'relative',
+    width: 30,
+    height: 30,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  navBadge: {
+    position: 'absolute',
+    top: -4,
+    right: -10,
+    minWidth: 16,
+    height: 16,
+    borderRadius: 8,
+    backgroundColor: '#ff4d4f',
+    paddingHorizontal: 4,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderWidth: 1,
+    borderColor: '#fff',
+  },
+  navBadgeText: {
+    color: '#fff',
+    fontSize: 10,
+    fontWeight: '700',
+  },
   navItemActive: {},
   navText: {
     fontSize: 10,
@@ -1709,6 +3391,63 @@ const styles = StyleSheet.create({
   },
   navTextActive: {
     color: '#0099ff',
+  },
+  newFriendItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#fff',
+    borderRadius: 12,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    marginBottom: 10,
+  },
+  newFriendIcon: {
+    width: 42,
+    height: 42,
+    borderRadius: 10,
+    backgroundColor: '#e8f2ff',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginRight: 12,
+  },
+  newFriendIconText: {
+    color: '#2f6bd9',
+    fontSize: 16,
+    fontWeight: '700',
+  },
+  newFriendInfo: {
+    flex: 1,
+    gap: 2,
+  },
+  newFriendTitle: {
+    fontSize: 15,
+    fontWeight: '600',
+    color: '#1a1a1a',
+  },
+  newFriendSub: {
+    fontSize: 12,
+    color: '#8a8a8a',
+  },
+  newFriendBadge: {
+    minWidth: 20,
+    height: 20,
+    borderRadius: 10,
+    backgroundColor: '#ff4d4f',
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 6,
+    marginRight: 8,
+  },
+  newFriendBadgeText: {
+    color: '#fff',
+    fontSize: 10,
+    fontWeight: '700',
+  },
+  newFriendArrowIcon: {
+    width: 18,
+    height: 18,
+    alignItems: 'center',
+    justifyContent: 'center',
   },
   contactItem: {
     flexDirection: 'row',
@@ -1758,25 +3497,6 @@ const styles = StyleSheet.create({
   contactSub: {
     fontSize: 12,
     color: '#8a8a8a',
-  },
-  contactMeta: {
-    alignItems: 'flex-end',
-    gap: 6,
-  },
-  contactTime: {
-    fontSize: 11,
-    color: '#9a9a9a',
-  },
-  unreadBadge: {
-    backgroundColor: '#ff4d4f',
-    borderRadius: 10,
-    paddingHorizontal: 6,
-    paddingVertical: 2,
-  },
-  unreadText: {
-    color: '#fff',
-    fontSize: 10,
-    fontWeight: '700',
   },
   empty: {
     textAlign: 'center',
@@ -1875,14 +3595,16 @@ const styles = StyleSheet.create({
   },
   quickMenuBackdrop: {
     ...StyleSheet.absoluteFillObject,
-    backgroundColor: 'transparent',
+    backgroundColor: 'rgba(21, 33, 51, 0.06)',
   },
   quickMenuPanel: {
     position: 'absolute',
-    width: 188,
-    backgroundColor: '#2f333a',
+    width: 196,
+    backgroundColor: '#ffffff',
     borderRadius: 14,
     overflow: 'hidden',
+    borderWidth: 1,
+    borderColor: '#e5ebf3',
     ...quickMenuShadowStyle,
   },
   quickMenuPanelPosition: {
@@ -1895,21 +3617,25 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     gap: 10,
+    backgroundColor: '#f7f9fc',
   },
   quickMenuIcon: {
-    width: 22,
+    width: 24,
+    height: 24,
+    borderRadius: 12,
+    backgroundColor: '#e9f0fb',
     alignItems: 'center',
     justifyContent: 'center',
   },
   quickMenuText: {
-    color: '#ffffff',
+    color: '#24364f',
     fontSize: 15,
-    fontWeight: '500',
+    fontWeight: '600',
   },
   quickMenuDivider: {
     height: 1,
-    backgroundColor: 'rgba(255,255,255,0.1)',
-    marginHorizontal: 14,
+    backgroundColor: '#e5ebf3',
+    marginHorizontal: 12,
   },
   menuOverlay: {
     ...StyleSheet.absoluteFillObject,
@@ -1945,20 +3671,52 @@ const styles = StyleSheet.create({
   chatHeader: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 12,
-    paddingHorizontal: 16,
-    paddingVertical: 12,
+    justifyContent: 'space-between',
+    paddingHorizontal: 12,
+    paddingVertical: 10,
     backgroundColor: '#f5f6fa',
+    borderBottomWidth: 1,
+    borderBottomColor: 'rgba(0,0,0,0.05)',
+  },
+  chatHeaderLeft: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  chatHeaderCenter: {
+    flex: 1,
+    minWidth: 0,
+    paddingHorizontal: 8,
+  },
+  chatHeaderUnread: {
+    height: 24,
+    borderRadius: 12,
+    paddingHorizontal: 10,
+    backgroundColor: '#ecf2fb',
+    borderWidth: 1,
+    borderColor: '#d3e1f5',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  chatHeaderUnreadText: {
+    color: '#45658f',
+    fontSize: 12,
+    fontWeight: '600',
+  },
+  chatHeaderMenu: {
+    width: 34,
+    height: 34,
+    borderRadius: 10,
+    alignItems: 'center',
+    justifyContent: 'center',
   },
   chatBack: {
     width: 32,
     height: 32,
+    borderRadius: 10,
+    backgroundColor: '#e8edf4',
     alignItems: 'center',
     justifyContent: 'center',
-  },
-  backChevron: {
-    fontSize: 26,
-    color: '#333',
   },
   chatName: {
     fontSize: 16,
@@ -1974,86 +3732,148 @@ const styles = StyleSheet.create({
   },
   chatBody: {
     flex: 1,
-    paddingHorizontal: 16,
-    paddingTop: 10,
+    backgroundColor: '#f5f6fa',
+    paddingHorizontal: 12,
+    paddingTop: 12,
   },
-  loadMore: {
-    textAlign: 'center',
-    fontSize: 11,
-    color: '#9a9a9a',
-    marginBottom: 10,
+  chatTimeDivider: {
+    alignSelf: 'center',
+    marginBottom: 8,
+    fontSize: 12,
+    color: '#8a8f96',
   },
   messageRow: {
     flexDirection: 'row',
-    alignItems: 'flex-end',
+    alignItems: 'flex-start',
+    width: '100%',
     gap: 8,
     marginBottom: 12,
   },
   selfRow: {
     flexDirection: 'row-reverse',
   },
+  bubbleWrap: {
+    maxWidth: '78%',
+    minWidth: 44,
+    alignItems: 'flex-start',
+    gap: 3,
+  },
+  selfBubbleWrap: {
+    alignItems: 'flex-end',
+  },
+  groupSenderName: {
+    fontSize: 11,
+    color: '#8391a6',
+    paddingHorizontal: 4,
+  },
+  msgAvatarWrap: {
+    width: 34,
+    height: 34,
+    borderRadius: 17,
+    overflow: 'hidden',
+    backgroundColor: '#dbe3ef',
+    borderWidth: 1,
+    borderColor: 'rgba(0,0,0,0.05)',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  selfMsgAvatarWrap: {
+    backgroundColor: '#d7e7ff',
+  },
+  msgAvatarImage: {
+    width: '100%',
+    height: '100%',
+    resizeMode: 'cover',
+  },
+  msgAvatarFallbackCircle: {
+    width: '100%',
+    height: '100%',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  msgAvatarFallbackText: {
+    color: '#2f6bd9',
+    fontSize: 12,
+    fontWeight: '700',
+  },
   bubble: {
-    maxWidth: '70%',
+    maxWidth: '100%',
     backgroundColor: '#fff',
-    borderRadius: 12,
-    padding: 10,
+    borderRadius: 14,
+    paddingHorizontal: 12,
+    paddingVertical: 9,
+    borderWidth: 1,
+    borderColor: 'rgba(0,0,0,0.06)',
   },
   selfBubble: {
     backgroundColor: '#4a9df8',
+    borderColor: '#4a9df8',
+  },
+  bubbleFocused: {
+    borderColor: '#f7b84b',
+    backgroundColor: '#fff8e8',
+  },
+  selfBubbleFocused: {
+    borderColor: '#ffd487',
   },
   messageText: {
     fontSize: 14,
     color: '#1a1a1a',
+    lineHeight: 20,
+    textAlign: 'left',
+    includeFontPadding: false,
   },
   selfText: {
     color: '#fff',
   },
-  meta: {
-    marginTop: 6,
-    flexDirection: 'row',
-    gap: 8,
-  },
-  metaText: {
-    fontSize: 10,
-    color: 'rgba(0,0,0,0.45)',
-  },
-  selfMeta: {
-    color: 'rgba(255,255,255,0.7)',
-  },
-  readState: {
-    fontSize: 10,
-    color: '#2f6bd9',
-    fontWeight: '600',
-  },
-  deleteBtn: {
-    fontSize: 11,
-    color: '#888',
-  },
-  selfDelete: {
-    color: 'rgba(255,255,255,0.7)',
-  },
-  chatInput: {
-    flexDirection: 'row',
-    gap: 8,
-    padding: 12,
+  chatComposer: {
     borderTopWidth: 1,
-    borderTopColor: 'rgba(0,0,0,0.05)',
-    backgroundColor: '#fff',
+    borderTopColor: 'rgba(0,0,0,0.06)',
+    backgroundColor: '#ffffff',
+    paddingHorizontal: 10,
+    paddingTop: 8,
+  },
+  chatInputRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    marginBottom: 8,
+  },
+  chatToolRow: {
+    height: 42,
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: '#edf0f6',
+    backgroundColor: '#f9fafc',
+    paddingHorizontal: 6,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+  chatToolBtn: {
+    width: 34,
+    height: 34,
+    borderRadius: 17,
+    alignItems: 'center',
+    justifyContent: 'center',
   },
   chatInputField: {
     flex: 1,
     borderWidth: 1,
     borderColor: '#e1e1e1',
-    borderRadius: 20,
+    borderRadius: 12,
     paddingHorizontal: 14,
-    paddingVertical: 6,
+    height: 40,
     fontSize: 14,
     color: '#333',
+    backgroundColor: '#f8f9fb',
   },
   sendBtn: {
     backgroundColor: '#4a9df8',
-    borderRadius: 16,
+    borderRadius: 12,
     paddingHorizontal: 14,
+    height: 40,
+    alignItems: 'center',
     justifyContent: 'center',
   },
   sendBtnDisabled: {
@@ -2066,12 +3886,48 @@ const styles = StyleSheet.create({
   },
 });
 
+function GroupAvatarGrid({
+  members,
+  fallbackText,
+  size = 48,
+}: {
+  members?: Friend[];
+  fallbackText: string;
+  size?: number;
+}) {
+  const list = Array.isArray(members) ? members.slice(0, 4) : [];
+  const cells = [...list];
+  while (cells.length < 4) {
+    cells.push(null as any);
+  }
+  return (
+    <View style={[styles.groupAvatarGrid, { width: size, height: size }]}>
+      {cells.map((member, index) => {
+        if (!member) {
+          return <View key={`empty-${index}`} style={styles.groupAvatarCell} />;
+        }
+        const avatarUrl = normalizeImageUrl(member.avatar);
+        const label = (member.nickname || member.username || fallbackText || '群').slice(0, 2);
+        return (
+          <View key={`${member.uid}-${index}`} style={styles.groupAvatarCell}>
+            {avatarUrl ? (
+              <Image source={{ uri: avatarUrl }} style={styles.groupAvatarImage} />
+            ) : (
+              <Text style={styles.groupAvatarFallbackText}>{label}</Text>
+            )}
+          </View>
+        );
+      })}
+    </View>
+  );
+}
+
 function BackIcon() {
   return (
     <Svg width={24} height={24} viewBox="0 0 24 24" fill="none">
       <Path
         d="M15 18L9 12L15 6"
-        stroke="currentColor"
+        stroke="#314458"
         strokeWidth={2}
         strokeLinecap="round"
         strokeLinejoin="round"
@@ -2080,16 +3936,105 @@ function BackIcon() {
   );
 }
 
+function ForwardIndicatorIcon() {
+  return (
+    <Svg width={18} height={18} viewBox="0 0 24 24" fill="none">
+      <Path
+        d="M15 18L9 12L15 6"
+        stroke="#9aa7b8"
+        strokeWidth={2}
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        transform="rotate(180 12 12)"
+      />
+    </Svg>
+  );
+}
+
+function ChatSettingsIcon() {
+  return (
+    <Svg width={22} height={22} viewBox="0 0 24 24" fill="none">
+      <Path d="M5 7H19" stroke="#314458" strokeWidth={2} strokeLinecap="round" />
+      <Path d="M5 12H19" stroke="#314458" strokeWidth={2} strokeLinecap="round" />
+      <Path d="M5 17H19" stroke="#314458" strokeWidth={2} strokeLinecap="round" />
+    </Svg>
+  );
+}
+
+function ToolMicIcon() {
+  return (
+    <Svg width={22} height={22} viewBox="0 0 24 24" fill="none">
+      <Path
+        d="M12 4a2 2 0 0 1 2 2v6a2 2 0 1 1-4 0V6a2 2 0 0 1 2-2Z"
+        stroke="#2f3a48"
+        strokeWidth={2}
+      />
+      <Path d="M7 11a5 5 0 1 0 10 0" stroke="#2f3a48" strokeWidth={2} strokeLinecap="round" />
+      <Path d="M12 16V20" stroke="#2f3a48" strokeWidth={2} strokeLinecap="round" />
+      <Path d="M9 20H15" stroke="#2f3a48" strokeWidth={2} strokeLinecap="round" />
+    </Svg>
+  );
+}
+
+function ToolImageIcon() {
+  return (
+    <Svg width={22} height={22} viewBox="0 0 24 24" fill="none">
+      <RectLikeFrame />
+      <Path d="M8 15L11 12L14 15L16 13L19 16" stroke="#2f3a48" strokeWidth={2} strokeLinecap="round" />
+      <Path d="M9 9.5H9.01" stroke="#2f3a48" strokeWidth={2.4} strokeLinecap="round" />
+    </Svg>
+  );
+}
+
+function ToolCameraIcon() {
+  return (
+    <Svg width={22} height={22} viewBox="0 0 24 24" fill="none">
+      <Path
+        d="M9 6L10.2 4.8A2 2 0 0 1 11.6 4H12.4A2 2 0 0 1 13.8 4.8L15 6H18A2 2 0 0 1 20 8V17A2 2 0 0 1 18 19H6A2 2 0 0 1 4 17V8A2 2 0 0 1 6 6H9Z"
+        stroke="#2f3a48"
+        strokeWidth={2}
+        strokeLinejoin="round"
+      />
+      <Path d="M12 15.5A3.5 3.5 0 1 0 12 8.5A3.5 3.5 0 0 0 12 15.5Z" stroke="#2f3a48" strokeWidth={2} />
+    </Svg>
+  );
+}
+
+function ToolEmojiIcon() {
+  return (
+    <Svg width={22} height={22} viewBox="0 0 24 24" fill="none">
+      <Path d="M12 20A8 8 0 1 0 12 4A8 8 0 0 0 12 20Z" stroke="#2f3a48" strokeWidth={2} />
+      <Path d="M9 10H9.01" stroke="#2f3a48" strokeWidth={2.6} strokeLinecap="round" />
+      <Path d="M15 10H15.01" stroke="#2f3a48" strokeWidth={2.6} strokeLinecap="round" />
+      <Path d="M8.5 14C9.3 15.2 10.5 16 12 16C13.5 16 14.7 15.2 15.5 14" stroke="#2f3a48" strokeWidth={2} strokeLinecap="round" />
+    </Svg>
+  );
+}
+
+function ToolPlusIcon() {
+  return (
+    <Svg width={22} height={22} viewBox="0 0 24 24" fill="none">
+      <Path d="M12 5V19" stroke="#2f3a48" strokeWidth={2} strokeLinecap="round" />
+      <Path d="M5 12H19" stroke="#2f3a48" strokeWidth={2} strokeLinecap="round" />
+      <Path d="M12 22A10 10 0 1 0 12 2A10 10 0 0 0 12 22Z" stroke="#2f3a48" strokeWidth={2} />
+    </Svg>
+  );
+}
+
+function RectLikeFrame() {
+  return <Path d="M5 6H19A2 2 0 0 1 21 8V16A2 2 0 0 1 19 18H5A2 2 0 0 1 3 16V8A2 2 0 0 1 5 6Z" stroke="#2f3a48" strokeWidth={2} strokeLinejoin="round" />;
+}
+
 function QuickGroupIcon() {
   return (
     <Svg width={18} height={18} viewBox="0 0 24 24" fill="none">
       <Path
         d="M4 7.5A2.5 2.5 0 0 1 6.5 5h8A2.5 2.5 0 0 1 17 7.5V12a2.5 2.5 0 0 1-2.5 2.5h-4l-3 3v-3A2.5 2.5 0 0 1 5 12V7.5Z"
-        stroke="#fff"
+        stroke="#31527f"
         strokeWidth={2}
         strokeLinejoin="round"
       />
-      <Path d="M19 7v4M17 9h4" stroke="#fff" strokeWidth={2} strokeLinecap="round" />
+      <Path d="M19 7v4M17 9h4" stroke="#31527f" strokeWidth={2} strokeLinecap="round" />
     </Svg>
   );
 }
@@ -2099,11 +4044,11 @@ function QuickAddIcon() {
     <Svg width={18} height={18} viewBox="0 0 24 24" fill="none">
       <Path
         d="M8.5 12a4 4 0 1 0 0-8 4 4 0 0 0 0 8ZM2.5 19a6 6 0 0 1 12 0"
-        stroke="#fff"
+        stroke="#31527f"
         strokeWidth={2}
         strokeLinecap="round"
       />
-      <Path d="M18 11v6M15 14h6" stroke="#fff" strokeWidth={2} strokeLinecap="round" />
+      <Path d="M18 11v6M15 14h6" stroke="#31527f" strokeWidth={2} strokeLinecap="round" />
     </Svg>
   );
 }
@@ -2111,8 +4056,8 @@ function QuickAddIcon() {
 function QuickScanIcon() {
   return (
     <Svg width={18} height={18} viewBox="0 0 24 24" fill="none">
-      <Path d="M7 4H4v3M17 4h3v3M4 17v3h3M20 17v3h-3" stroke="#fff" strokeWidth={2} strokeLinecap="round" />
-      <Path d="M7 12h10" stroke="#fff" strokeWidth={2} strokeLinecap="round" />
+      <Path d="M7 4H4v3M17 4h3v3M4 17v3h3M20 17v3h-3" stroke="#31527f" strokeWidth={2} strokeLinecap="round" />
+      <Path d="M7 12h10" stroke="#31527f" strokeWidth={2} strokeLinecap="round" />
     </Svg>
   );
 }

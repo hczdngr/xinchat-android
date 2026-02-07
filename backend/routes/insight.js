@@ -12,9 +12,11 @@ const DB_PATH = path.join(DATA_DIR, 'chat.sqlite');
 const MESSAGE_THRESHOLD = 100;
 const LOOKBACK_MS = 3 * 24 * 60 * 60 * 1000;
 const MAX_FETCH = 600;
+const HOURLY_WINDOW_MS = 60 * 60 * 1000;
 const DEFAULT_LOOP_INTERVAL_MS = 10 * 60 * 1000;
 const DEFAULT_COOLDOWN_HOURS = 12;
 const DEFAULT_MIN_NEW_MESSAGES = 30;
+const DEFAULT_HOURLY_SENT_THRESHOLD = 80;
 const HARDCODED_GEMINI_API_KEY_B64 =
   'QUl6YVN5QV81RndRNWFwZlpseG9kdHhRakRNNk92dlNYRFAwZURv';
 const SAMPLE_PLANS = [
@@ -378,7 +380,7 @@ const getDb = async () => {
   return new SQL.Database(new Uint8Array(file));
 };
 
-const loadMessageStatsMap = async () => {
+const loadMessageStatsMap = async ({ now = Date.now() } = {}) => {
   const db = await getDb();
   if (!db) return new Map();
   try {
@@ -399,9 +401,33 @@ const loadMessageStatsMap = async () => {
       stats.set(uid, {
         total: Number(row.total) || 0,
         latestAt: Number(row.latestAt) || 0,
+        totalSent: 0,
+        sentLastHour: 0,
       });
     }
     stmt.free();
+
+    const oneHourAgo = now - HOURLY_WINDOW_MS;
+    const sentStmt = db.prepare(`
+      SELECT senderUid AS uid,
+             COUNT(1) AS totalSent,
+             SUM(CASE WHEN createdAtMs >= ? THEN 1 ELSE 0 END) AS sentLastHour
+      FROM messages
+      GROUP BY senderUid
+    `);
+    sentStmt.bind([oneHourAgo]);
+    while (sentStmt.step()) {
+      const row = sentStmt.getAsObject();
+      const uid = Number(row.uid);
+      if (!Number.isInteger(uid)) continue;
+      const base = stats.get(uid) || { total: 0, latestAt: 0, totalSent: 0, sentLastHour: 0 };
+      stats.set(uid, {
+        ...base,
+        totalSent: Number(row.totalSent) || 0,
+        sentLastHour: Number(row.sentLastHour) || 0,
+      });
+    }
+    sentStmt.free();
     return stats;
   } finally {
     db.close();
@@ -410,7 +436,7 @@ const loadMessageStatsMap = async () => {
 
 const loadMessagesForUser = async (uid) => {
   const db = await getDb();
-  if (!db) return { totalCount: 0, rows: [] };
+  if (!db) return { totalCount: 0, totalSentCount: 0, rows: [] };
   try {
     const countStmt = db.prepare(
       `SELECT COUNT(1) AS total
@@ -423,6 +449,18 @@ const loadMessagesForUser = async (uid) => {
       totalCount = Number(countStmt.getAsObject().total) || 0;
     }
     countStmt.free();
+
+    const sentCountStmt = db.prepare(
+      `SELECT COUNT(1) AS total
+       FROM messages
+       WHERE senderUid = ?`
+    );
+    sentCountStmt.bind([uid]);
+    let totalSentCount = 0;
+    if (sentCountStmt.step()) {
+      totalSentCount = Number(sentCountStmt.getAsObject().total) || 0;
+    }
+    sentCountStmt.free();
 
     const listStmt = db.prepare(
       `SELECT id, type, senderUid, targetUid, targetType, data, createdAt, createdAtMs
@@ -437,13 +475,20 @@ const loadMessagesForUser = async (uid) => {
       rows.push(listStmt.getAsObject());
     }
     listStmt.free();
-    return { totalCount, rows };
+    return { totalCount, totalSentCount, rows };
   } finally {
     db.close();
   }
 };
 
-const shouldAnalyzeByCooldown = ({ user, stat, now, cooldownMs, minNewMessages }) => {
+const shouldAnalyzeByCooldown = ({
+  user,
+  stat,
+  now,
+  cooldownMs,
+  minNewMessages,
+  hourlySentThreshold,
+}) => {
   if (!stat || stat.total <= 0) return false;
 
   const meta = user?.aiProfile?.workerMeta || {};
@@ -451,14 +496,30 @@ const shouldAnalyzeByCooldown = ({ user, stat, now, cooldownMs, minNewMessages }
   const lastMessageCount = Number.isFinite(Number(meta.lastMessageCount))
     ? Number(meta.lastMessageCount)
     : Number(user?.aiProfile?.sampling?.totalCount || 0);
+  const lastSentMessageCount = Number.isFinite(Number(meta.lastSentMessageCount))
+    ? Number(meta.lastSentMessageCount)
+    : 0;
+  const totalSent = Number(stat.totalSent) || 0;
+  const sentLastHour = Number(stat.sentLastHour) || 0;
 
   if (!Number.isFinite(lastAnalyzedAtMs) || lastAnalyzedAtMs <= 0) return true;
+  if (sentLastHour > hourlySentThreshold && totalSent - lastSentMessageCount > 0) return true;
   if (stat.total - lastMessageCount >= minNewMessages) return true;
   if (now - lastAnalyzedAtMs >= cooldownMs) return true;
   return false;
 };
 
-const buildAiProfile = ({ previous, model, sampleMeta, totalCount, analysis, cooldownHours, minNewMessages }) => ({
+const buildAiProfile = ({
+  previous,
+  model,
+  sampleMeta,
+  totalCount,
+  totalSentCount,
+  analysis,
+  cooldownHours,
+  minNewMessages,
+  hourlySentThreshold,
+}) => ({
   ...(previous || {}),
   model,
   updatedAt: new Date().toISOString(),
@@ -473,8 +534,10 @@ const buildAiProfile = ({ previous, model, sampleMeta, totalCount, analysis, coo
   workerMeta: {
     lastAnalyzedAt: new Date().toISOString(),
     lastMessageCount: totalCount,
+    lastSentMessageCount: totalSentCount,
     cooldownHours,
     minNewMessages,
+    hourlySentThreshold,
     source: sampleMeta.source,
     downgradeLevel: sampleMeta.downgradeLevel,
   },
@@ -485,6 +548,10 @@ export const startInsightWorker = ({
   loopIntervalMs = toPositiveInt(process.env.INSIGHT_LOOP_INTERVAL_MS, DEFAULT_LOOP_INTERVAL_MS),
   cooldownHours = Math.min(toPositiveInt(process.env.INSIGHT_COOLDOWN_HOURS, DEFAULT_COOLDOWN_HOURS), 24),
   minNewMessages = toPositiveInt(process.env.INSIGHT_MIN_NEW_MESSAGES, DEFAULT_MIN_NEW_MESSAGES),
+  hourlySentThreshold = toPositiveInt(
+    process.env.INSIGHT_HOURLY_SENT_THRESHOLD,
+    DEFAULT_HOURLY_SENT_THRESHOLD
+  ),
   defaultModel = String(process.env.GEMINI_DEFAULT_MODEL || GEMINI_FLASH_PREVIEW_MODEL).trim(),
 } = {}) => {
   const apiKey = String(process.env.GEMINI_API_KEY || decodeHardcodedGeminiKey()).trim();
@@ -519,7 +586,7 @@ export const startInsightWorker = ({
     const index = users.findIndex((item) => item?.uid === uid);
     if (index < 0) return;
 
-    const { totalCount, rows } = await loadMessagesForUser(uid);
+    const { totalCount, totalSentCount, rows } = await loadMessagesForUser(uid);
     if (!rows.length || totalCount <= 0) return;
 
     const sampleMeta = buildSamples(rows, uid, totalCount);
@@ -545,9 +612,11 @@ export const startInsightWorker = ({
       model: result.model,
       sampleMeta,
       totalCount,
+      totalSentCount,
       analysis: result.analysis,
       cooldownHours,
       minNewMessages,
+      hourlySentThreshold,
     });
     freshUsers[freshIndex] = {
       ...freshUsers[freshIndex],
@@ -584,11 +653,11 @@ export const startInsightWorker = ({
 
   const scanAndEnqueue = async () => {
     const now = Date.now();
-    const [users, statsMap] = await Promise.all([readUsers(), loadMessageStatsMap()]);
+    const [users, statsMap] = await Promise.all([readUsers(), loadMessageStatsMap({ now })]);
     for (const user of users) {
       const uid = Number(user?.uid);
       if (!Number.isInteger(uid)) continue;
-      const stat = statsMap.get(uid) || { total: 0, latestAt: 0 };
+      const stat = statsMap.get(uid) || { total: 0, latestAt: 0, totalSent: 0, sentLastHour: 0 };
       if (
         shouldAnalyzeByCooldown({
           user,
@@ -596,6 +665,7 @@ export const startInsightWorker = ({
           now,
           cooldownMs,
           minNewMessages,
+          hourlySentThreshold,
         })
       ) {
         enqueue(uid);
@@ -604,7 +674,7 @@ export const startInsightWorker = ({
   };
 
   const bootstrapEnqueueMissingProfiles = async () => {
-    const [users, statsMap] = await Promise.all([readUsers(), loadMessageStatsMap()]);
+    const [users, statsMap] = await Promise.all([readUsers(), loadMessageStatsMap({ now: Date.now() })]);
     let queuedCount = 0;
     for (const user of users) {
       const uid = Number(user?.uid);
@@ -651,6 +721,8 @@ export const startInsightWorker = ({
     loopIntervalMs,
     cooldownHours,
     minNewMessages,
+    hourlySentThreshold,
+    hourlyWindowMs: HOURLY_WINDOW_MS,
     concurrency: 1,
   });
 

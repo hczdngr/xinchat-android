@@ -84,7 +84,7 @@ export default function QRScanWeb() {
       rafRef.current = null;
     }
     if (streamRef.current) {
-      streamRef.current.getTracks().forEach((track) => track.stop());
+      streamRef.current.getTracks().forEach((track: MediaStreamTrack) => track.stop());
       streamRef.current = null;
     }
     if (videoRef.current) {
@@ -241,7 +241,7 @@ export default function QRScanWeb() {
           audio: false,
         });
         if (cancelled) {
-          stream.getTracks().forEach((track) => track.stop());
+          stream.getTracks().forEach((track: MediaStreamTrack) => track.stop());
           return;
         }
         streamRef.current = stream;
