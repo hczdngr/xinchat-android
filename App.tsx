@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
-import { StatusBar, StyleSheet, View } from 'react-native';
+import { BackHandler, Platform, StatusBar, StyleSheet, View } from 'react-native';
 import { NavigationContainer } from '@react-navigation/native';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
@@ -7,9 +7,12 @@ import Home from './src/components/Home';
 import Login from './src/components/Login';
 import Register from './src/components/Register';
 import Profile from './src/components/Profile';
+import FriendProfile from './src/components/FriendProfile';
 import EditProfile from './src/components/EditProfile';
 import QRScan from './src/components/QRScan';
 import InAppBrowser from './src/components/InAppBrowser';
+import ChatSettings from './src/components/ChatSettings';
+import CreateGroup from './src/components/CreateGroup';
 import { API_BASE } from './src/config';
 import { STORAGE_KEYS } from './src/constants/storageKeys';
 import type { RootStackParamList } from './src/navigation/types';
@@ -74,6 +77,22 @@ function App() {
     };
     loadSession().catch(() => undefined);
   }, []);
+
+  useEffect(() => {
+    if (isAuthed) return;
+    const onBackPress = () => {
+      if (view === 'register') {
+        setRegisterError('');
+        setRegisterStatus('');
+        setRegisterConfirmPassword('');
+        setView('login');
+        return true;
+      }
+      return false;
+    };
+    const sub = BackHandler.addEventListener('hardwareBackPress', onBackPress);
+    return () => sub.remove();
+  }, [isAuthed, view]);
 
   const refreshProfile = useCallback(async () => {
     const authToken = token || (await storage.getString(STORAGE_KEYS.token)) || '';
@@ -234,7 +253,7 @@ function App() {
   };
 
   return (
-    <SafeAreaProvider style={styles.appRoot}>
+    <SafeAreaProvider>
       <View style={styles.appRoot}>
         <StatusBar barStyle={'dark-content'} />
         {!isAuthed && view === 'login' ? (
@@ -271,11 +290,14 @@ function App() {
         ) : null}
         {isAuthed ? (
           <View style={styles.appRoot}>
-            <NavigationContainer style={styles.appRoot}>
+            <NavigationContainer>
               <Stack.Navigator
                 screenOptions={{
                   headerShown: false,
                   contentStyle: { backgroundColor: '#f2f2f7' },
+                  animation: Platform.OS === 'ios' ? 'default' : 'slide_from_right',
+                  gestureEnabled: true,
+                  fullScreenGestureEnabled: true,
                 }}
               >
                 <Stack.Screen name="Home">
@@ -291,6 +313,9 @@ function App() {
                     />
                   )}
                 </Stack.Screen>
+                <Stack.Screen name="FriendProfile" component={FriendProfile} />
+                <Stack.Screen name="ChatSettings" component={ChatSettings} />
+                <Stack.Screen name="CreateGroup" component={CreateGroup} />
                 <Stack.Screen name="EditProfile">
                   {({ navigation }) => (
                     <EditProfile

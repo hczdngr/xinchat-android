@@ -77,8 +77,9 @@ function decodePixels(bytes: Uint8Array, mime: string): Pixels | null {
   if (isPng) {
     try {
       const png = decodePng(bytes);
+      const pngData = Uint8ClampedArray.from(png.data as ArrayLike<number>);
       return {
-        data: png.data,
+        data: pngData,
         width: png.width,
         height: png.height,
       };

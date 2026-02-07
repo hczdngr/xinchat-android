@@ -11,6 +11,7 @@ import authRouter, {
 } from './routes/auth.js';
 import chatRouter, { ensureChatStorage, setChatNotifier } from './routes/chat.js';
 import friendsRouter, { setFriendsNotifier } from './routes/friends.js';
+import groupsRouter, { ensureGroupStorage, getGroupMemberUids } from './routes/groups.js';
 import voiceRouter from './routes/voice.js';
 import { startInsightWorker } from './routes/insight.js';
 import {
@@ -302,6 +303,32 @@ const routeMeta = [
   },
   {
     method: 'GET',
+    path: '/api/groups/list',
+    label: 'Group list',
+    note: 'Return groups that current user has joined.',
+    templates: [
+      {
+        name: 'List groups',
+        body: null,
+        hint: 'Authorization: Bearer <token>',
+      },
+    ],
+  },
+  {
+    method: 'POST',
+    path: '/api/groups/create',
+    label: 'Create group',
+    note: 'Create a new group chat from selected friend uids.',
+    templates: [
+      {
+        name: 'Create group',
+        body: { memberUids: [100000001, 100000002] },
+        hint: 'Authorization: Bearer <token>',
+      },
+    ],
+  },
+  {
+    method: 'GET',
     path: '/api/voice/directory',
     label: 'Voice directory',
     note: 'Get voice contact directory.',
@@ -499,6 +526,7 @@ app.use('/admin', express.static(path.join(__dirname, 'index.html')));
 app.use('/api', authRouter);
 app.use('/api/chat', chatRouter);
 app.use('/api/friends', friendsRouter);
+app.use('/api/groups', groupsRouter);
 app.use('/api/voice', voiceRouter);
 
 app.use((err, req, res, next) => {
@@ -704,9 +732,21 @@ export function startServer(port = PORT) {
 
   setChatNotifier((entry) => {
     const payload = { type: 'chat', data: entry };
-    sendToUid(entry.senderUid, payload);
     if (entry.targetType === 'private') {
+      sendToUid(entry.senderUid, payload);
       sendToUid(entry.targetUid, payload);
+      return;
+    }
+    if (entry.targetType === 'group') {
+      getGroupMemberUids(entry.targetUid)
+        .then((memberUids) => {
+          const set = new Set(memberUids);
+          if (entry.senderUid) {
+            set.add(entry.senderUid);
+          }
+          set.forEach((uid) => sendToUid(uid, payload));
+        })
+        .catch(() => undefined);
     }
   });
   setFriendsNotifier((uids, payload) => {
@@ -714,7 +754,7 @@ export function startServer(port = PORT) {
   });
 
   return server.listen(port, '0.0.0.0', async () => {
-    await Promise.all([ensureStorage(), ensureChatStorage()]);
+    await Promise.all([ensureStorage(), ensureChatStorage(), ensureGroupStorage()]);
     await resetOnlineState();
     console.log(`Backend listening on http://0.0.0.0:${port}`);
   });

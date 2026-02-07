@@ -2,6 +2,8 @@ import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { ActivityIndicator, Pressable, StyleSheet, Text, View } from 'react-native';
 import { useNavigation, useRoute } from '@react-navigation/native';
 import { API_BASE } from '../config';
+import { STORAGE_KEYS } from '../constants/storageKeys';
+import type { FriendProfileRoute, RootNavigation } from '../navigation/types';
 import { storage } from '../storage';
 import Profile from './Profile';
 
@@ -18,29 +20,22 @@ type ProfileData = {
   region?: string;
 };
 
-type RouteParams = {
-  uid?: number;
-  friend?: Partial<ProfileData>;
-};
-
 export default function FriendProfile() {
-  const navigation = useNavigation<any>();
-  const route = useRoute<any>();
-  const pendingChatKey = 'xinchat.pendingOpenChat';
-  const params = (route.params || {}) as RouteParams;
-  const uid = useMemo(() => Number(params.uid), [params.uid]);
+  const navigation = useNavigation<RootNavigation>();
+  const route = useRoute<FriendProfileRoute>();
+  const uid = useMemo(() => Number(route.params?.uid), [route.params?.uid]);
   const [profile, setProfile] = useState<ProfileData>(() => ({
-    uid: params.friend?.uid || params.uid,
-    username: params.friend?.username,
-    nickname: params.friend?.nickname,
-    avatar: params.friend?.avatar,
+    uid: route.params?.friend?.uid || route.params?.uid,
+    username: route.params?.friend?.username,
+    nickname: route.params?.friend?.nickname,
+    avatar: route.params?.friend?.avatar,
   }));
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
 
   const handleSendMessage = useCallback(async () => {
     if (!profile?.uid) return;
-    await storage.setJson(pendingChatKey, {
+    await storage.setJson(STORAGE_KEYS.pendingOpenChat, {
       uid: profile.uid,
       friend: {
         uid: profile.uid,
@@ -54,7 +49,7 @@ export default function FriendProfile() {
     } else {
       navigation.navigate('Home');
     }
-  }, [navigation, pendingChatKey, profile]);
+  }, [navigation, profile]);
 
   const loadProfile = useCallback(async () => {
     if (!Number.isInteger(uid)) {
@@ -64,7 +59,7 @@ export default function FriendProfile() {
     }
     setLoading(true);
     setError('');
-    const token = (await storage.getString('xinchat.token')) || '';
+    const token = (await storage.getString(STORAGE_KEYS.token)) || '';
     if (!token) {
       setError('未登录');
       setLoading(false);
@@ -87,7 +82,7 @@ export default function FriendProfile() {
   }, [uid]);
 
   useEffect(() => {
-    void loadProfile();
+    loadProfile().catch(() => undefined);
   }, [loadProfile]);
 
   if (loading) {
@@ -120,7 +115,6 @@ export default function FriendProfile() {
       title="个人资料"
       onAction={handleSendMessage}
       actionLabel="发消息"
-      actionVariant="primary"
     />
   );
 }

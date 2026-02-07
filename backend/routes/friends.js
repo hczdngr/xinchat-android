@@ -220,6 +220,8 @@ router.get('/list', authenticate, async (req, res) => {
     .map((item) => ({
       uid: item.uid,
       username: item.username,
+      nickname: item.nickname || '',
+      signature: item.signature || '',
       avatar: item.avatar || '',
       online: isUserOnline(item),
     }));

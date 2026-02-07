@@ -893,7 +893,7 @@ export default function EditProfile({ onBack, onSaved, initialProfile }: Props) 
             <View style={styles.cropFrameWrap}>
               <View
                 style={[styles.cropFrame, { width: avatarCrop.frameSize, height: avatarCrop.frameSize }]}
-                onWheel={handleCropWheel}
+                {...(Platform.OS === 'web' ? ({ onWheel: handleCropWheel } as any) : {})}
                 {...cropPanResponder.panHandlers}
               >
                 <Image

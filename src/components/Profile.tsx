@@ -31,8 +31,11 @@ type ProfileData = {
 type Props = {
   profile: ProfileData;
   onBack: () => void;
-  onEdit: () => void;
+  onEdit?: () => void;
   onRefresh?: () => void;
+  title?: string;
+  onAction?: () => void;
+  actionLabel?: string;
 };
 
 const buttonShadowStyle =
@@ -46,8 +49,17 @@ const buttonShadowStyle =
         elevation: 1,
       };
 
-export default function Profile({ profile, onBack, onEdit, onRefresh }: Props) {
+export default function Profile({
+  profile,
+  onBack,
+  onEdit,
+  onRefresh,
+  title,
+  onAction,
+  actionLabel,
+}: Props) {
   const insets = useSafeAreaInsets();
+  const headerTitle = title || '我的资料';
   const displayValue = useCallback((value?: string | number) => {
     if (value === undefined || value === null) return "--";
     const text = String(value).trim();
@@ -166,7 +178,7 @@ export default function Profile({ profile, onBack, onEdit, onRefresh }: Props) {
         <Pressable style={styles.backBtn} onPress={runExit} hitSlop={10}>
           <BackIcon />
         </Pressable>
-        <Text style={styles.title}>{'\u6211\u7684\u8d44\u6599'}</Text>
+        <Text style={styles.title}>{headerTitle}</Text>
       </View>
 
       <View style={styles.profileContainer}>
@@ -234,11 +246,23 @@ export default function Profile({ profile, onBack, onEdit, onRefresh }: Props) {
         </View>
       </View>
 
-      <View style={styles.bottomBar}>
-        <Pressable style={styles.editBtn} onPress={onEdit}>
-          <Text style={styles.editText}>{'\u7f16\u8f91\u8d44\u6599'}</Text>
-        </Pressable>
-      </View>
+      {onEdit || onAction ? (
+        <View style={styles.bottomBar}>
+          {onAction ? (
+            <Pressable
+              style={[styles.actionBtn, onEdit ? styles.actionBtnSpacing : null]}
+              onPress={onAction}
+            >
+              <Text style={styles.actionText}>{actionLabel || '发消息'}</Text>
+            </Pressable>
+          ) : null}
+          {onEdit ? (
+            <Pressable style={styles.editBtn} onPress={onEdit}>
+              <Text style={styles.editText}>{'\u7f16\u8f91\u8d44\u6599'}</Text>
+            </Pressable>
+          ) : null}
+        </View>
+      ) : null}
     </Animated.View>
   );
 }
@@ -355,6 +379,22 @@ const styles = StyleSheet.create({
     paddingHorizontal: 20,
     paddingTop: 20,
     paddingBottom: 40,
+  },
+  actionBtn: {
+    height: 44,
+    borderRadius: 22,
+    backgroundColor: "#4a9df8",
+    alignItems: "center",
+    justifyContent: "center",
+    ...buttonShadowStyle,
+  },
+  actionBtnSpacing: {
+    marginBottom: 12,
+  },
+  actionText: {
+    fontSize: 16,
+    fontWeight: "600",
+    color: "#fff",
   },
   editBtn: {
     height: 44,
