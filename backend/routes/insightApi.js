@@ -10,8 +10,6 @@ const HARDCODED_GEMINI_API_KEY_B64 =
   'QUl6YVN5QV81RndRNWFwZlpseG9kdHhRakRNNk92dlNYRFAwZURv';
 const DEFAULT_WARM_TIP =
   '\u4f60\u5e76\u4e0d\u5b64\u5355\u3002\u8bf7\u5148\u7167\u987e\u597d\u81ea\u5df1\uff0c\u5fc5\u8981\u65f6\u53ca\u65f6\u8054\u7cfb\u5bb6\u4eba\u670b\u53cb\u6216\u4e13\u4e1a\u5fc3\u7406\u652f\u6301\u3002';
-const SUICIDE_INTENT_REGEX =
-  /(suicide|kill\s*myself|end\s*my\s*life|self[-\s]?harm|want\s*to\s*die|\u81ea\u6740|\u8f7b\u751f|\u60f3\u6b7b|\u538c\u4e16|\u4e0d\u60f3\u6d3b|\u7ed3\u675f\u751f\u547d|\u4e86\u7ed3\u81ea\u5df1)/i;
 const WARM_TIP_OUTPUT_TOKENS = 3000;
 const WARM_TIP_OUTPUT_TOKENS_FALLBACK = 3000;
 const WARM_TIP_MAX_RETRIES = (() => {
@@ -148,18 +146,11 @@ const isCompleteTip = ({ text, finishReason }) => {
   return true;
 };
 
-const hasSuicideIntent = (user) => {
+const hasDepressionTendency = (user) => {
   const analysis = user?.aiProfile?.analysis || {};
   const depression = analysis?.depressionTendency || {};
   const level = String(depression?.level || '').toLowerCase();
-  const riskSignals = Array.isArray(analysis?.riskSignals) ? analysis.riskSignals : [];
-  const pieces = [depression?.reason, analysis?.profileSummary, ...riskSignals]
-    .map((item) => String(item || '').trim())
-    .filter(Boolean);
-  if (pieces.some((text) => SUICIDE_INTENT_REGEX.test(text))) {
-    return true;
-  }
-  return level === 'high' && riskSignals.length > 0;
+  return level === 'medium' || level === 'high';
 };
 
 const buildLocalWarmTip = (user) => {
@@ -365,7 +356,7 @@ export const prewarmWarmTipCache = async ({ users, logger = console } = {}) => {
   const tasks = [];
 
   for (const user of list) {
-    if (!hasSuicideIntent(user)) {
+    if (!hasDepressionTendency(user)) {
       skipped += 1;
       continue;
     }
@@ -392,7 +383,7 @@ export const prewarmWarmTipCache = async ({ users, logger = console } = {}) => {
 router.get('/warm-tip', authenticate, async (req, res) => {
   try {
     const { user } = req.auth || {};
-    if (!hasSuicideIntent(user)) {
+    if (!hasDepressionTendency(user)) {
       res.json({ success: true, shouldShow: false, tip: '' });
       return;
     }
@@ -427,7 +418,9 @@ router.get('/warm-tip', authenticate, async (req, res) => {
       cause: errorBase.cause || null,
       detail: detail || null,
     });
-    res.json({ success: true, shouldShow: true, tip: DEFAULT_WARM_TIP });
+    const { user } = req.auth || {};
+    const shouldShow = hasDepressionTendency(user);
+    res.json({ success: true, shouldShow, tip: shouldShow ? DEFAULT_WARM_TIP : '' });
   }
 });
 

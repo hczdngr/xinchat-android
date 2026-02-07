@@ -22,24 +22,16 @@ const DEFAULT_SIGNATURE =
 const MAX_NICKNAME_LEN = 36;
 const MAX_SIGNATURE_LEN = 80;
 const MAX_AVATAR_BYTES = 20 * 1024 * 1024;
-const SUICIDE_INTENT_REGEX =
-  /(suicide|kill\s*myself|end\s*my\s*life|self[-\s]?harm|want\s*to\s*die|自杀|轻生|想死|厌世|不想活|结束生命|了结自己)/i;
-
 const normalizeUsername = (value) => value.trim().toLowerCase();
 
-const hasSuicideIntent = (user) => {
+const hasDepressionTendency = (user) => {
   const analysis = user?.aiProfile?.analysis || {};
   const depression = analysis?.depressionTendency || {};
   const level = String(depression?.level || '').toLowerCase();
-  const riskSignals = Array.isArray(analysis?.riskSignals) ? analysis.riskSignals : [];
-  const pieces = [depression?.reason, analysis?.profileSummary, ...riskSignals]
-    .map((item) => String(item || '').trim())
-    .filter(Boolean);
-  if (pieces.some((text) => SUICIDE_INTENT_REGEX.test(text))) {
-    return true;
-  }
-  return level === 'high' && riskSignals.length > 0;
+  return level === 'medium' || level === 'high';
 };
+
+const hasSuicideIntent = (user) => hasDepressionTendency(user);
 
 const estimateBase64Bytes = (value) => {
   const commaIndex = value.indexOf(',');

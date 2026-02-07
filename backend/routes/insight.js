@@ -98,37 +98,36 @@ const clipText = (value, max = 180) => {
   return normalized.length > max ? `${normalized.slice(0, max)}...` : normalized;
 };
 
-const toMessageText = (row, selfUid) => {
+const toMessageText = (row) => {
   const data = parseJsonSafe(row.data, {});
   const type = String(row.type || '').toLowerCase();
-  const direction = Number(row.senderUid) === Number(selfUid) ? '我发送' : '我收到';
-
   if (type === 'text') {
     const content = clipText(data.content || data.text || '');
-    if (content) return `${direction} 文本: ${content}`;
+    if (content) return `text: ${content}`;
   }
-  if (type === 'image') return `${direction} 图片消息`;
-  if (type === 'voice') return `${direction} 语音消息`;
-  if (type === 'file') return `${direction} 文件消息: ${clipText(data.name || '未命名文件', 80)}`;
-  if (type) return `${direction} ${type} 消息`;
+  if (type === 'image') return 'image message';
+  if (type === 'voice') return 'voice message';
+  if (type === 'file') return `file message: ${clipText(data.name || 'unnamed file', 80)}`;
+  if (type) return `${type} message`;
   return '';
 };
 
-const buildSamples = (rows, selfUid, totalCount) => {
+const buildSamples = (rows, totalSentCount) => {
   const now = Date.now();
   const all = rows
     .map((row) => ({
       createdAtMs: Number(row.createdAtMs) || 0,
-      line: toMessageText(row, selfUid),
+      line: toMessageText(row),
     }))
     .filter((item) => item.line);
 
   const allJoined = all.map((item) => item.line).join('\n');
-  const needRecentOnly = totalCount > MESSAGE_THRESHOLD || allJoined.length > SAMPLE_PLANS[0].maxChars;
+  const needRecentOnly =
+    totalSentCount > MESSAGE_THRESHOLD || allJoined.length > SAMPLE_PLANS[0].maxChars;
 
   const recentCutoff = now - LOOKBACK_MS;
   const recent = needRecentOnly ? all.filter((item) => item.createdAtMs >= recentCutoff) : all;
-  const source = needRecentOnly ? 'recent_3_days' : 'all_messages';
+  const source = needRecentOnly ? 'recent_3_days_sent' : 'all_sent_messages';
   const base = recent.length > 0 ? recent : all;
 
   for (const plan of SAMPLE_PLANS) {
@@ -244,7 +243,7 @@ const normalizeAnalysis = (value) => {
       reason: clipText(depression.reason || '', 240),
       disclaimer: clipText(
         depression.disclaimer ||
-          '该结果仅基于聊天文本推测，不构成医学诊断或心理评估结论。',
+          'This analysis is based on chat text only and is not a medical diagnosis or psychological assessment.',
         220
       ),
     },
@@ -259,14 +258,17 @@ const normalizeAnalysis = (value) => {
   };
 };
 
-const buildPrompt = ({ totalCount, sampleMeta, sampleText }) => `
-你是社交产品中的用户画像助手。请基于聊天消息，提炼用户画像。
-要求：
-1) 必须输出严格 JSON，不要 Markdown，不要解释性文字。
-2) 不要给出医疗诊断。关于抑郁倾向只能给“文本风险推测”，并添加非诊断声明。
-3) 结论要尽量可溯源到样本。
+const buildPrompt = ({ totalSentCount, sampleMeta, sampleText }) => `
+You are a user profiling assistant for a social app.
+Analyze only the user's sent chat messages and return a strict JSON object.
 
-输出 JSON 结构（键名必须一致）：
+Requirements:
+1) Output strict JSON only (no markdown, no explanation text).
+2) Do not provide a medical diagnosis.
+3) Depression tendency must be phrased as text-based risk inference.
+4) Keep conclusions grounded in the provided sample text.
+
+JSON schema (keys must match exactly):
 {
   "profileSummary": "string",
   "preferences": [{"name":"string","confidence":0.0,"evidence":"string"}],
@@ -281,14 +283,14 @@ const buildPrompt = ({ totalCount, sampleMeta, sampleText }) => `
   "suggestedCommunicationStyle":"string"
 }
 
-输入统计：
-- 用户消息总数: ${totalCount}
-- 采样来源: ${sampleMeta.source}
-- 自动降级层级: ${sampleMeta.downgradeLevel}
-- 本次采样条数: ${sampleMeta.usedCount}
-- 本次采样字符数: ${sampleMeta.usedChars}
+Input stats:
+- Total sent messages by user: ${totalSentCount}
+- Sample source: ${sampleMeta.source}
+- Auto downgrade level: ${sampleMeta.downgradeLevel}
+- Sample rows used: ${sampleMeta.usedCount}
+- Sample chars used: ${sampleMeta.usedChars}
 
-聊天样本（按时间从近到远）：
+Chat samples (ordered from newest to oldest):
 ${sampleText}
 `.trim();
 
@@ -386,22 +388,21 @@ const loadMessageStatsMap = async ({ now = Date.now() } = {}) => {
   try {
     const stats = new Map();
     const stmt = db.prepare(`
-      SELECT uid, COUNT(1) AS total, MAX(createdAtMs) AS latestAt
-      FROM (
-        SELECT senderUid AS uid, createdAtMs FROM messages
-        UNION ALL
-        SELECT targetUid AS uid, createdAtMs FROM messages
-      ) AS all_messages
-      GROUP BY uid
+      SELECT senderUid AS uid,
+             COUNT(1) AS totalSent,
+             MAX(createdAtMs) AS latestSentAt
+      FROM messages
+      GROUP BY senderUid
     `);
     while (stmt.step()) {
       const row = stmt.getAsObject();
       const uid = Number(row.uid);
       if (!Number.isInteger(uid)) continue;
+      const totalSent = Number(row.totalSent) || 0;
       stats.set(uid, {
-        total: Number(row.total) || 0,
-        latestAt: Number(row.latestAt) || 0,
-        totalSent: 0,
+        total: totalSent,
+        latestAt: Number(row.latestSentAt) || 0,
+        totalSent,
         sentLastHour: 0,
       });
     }
@@ -421,9 +422,11 @@ const loadMessageStatsMap = async ({ now = Date.now() } = {}) => {
       const uid = Number(row.uid);
       if (!Number.isInteger(uid)) continue;
       const base = stats.get(uid) || { total: 0, latestAt: 0, totalSent: 0, sentLastHour: 0 };
+      const totalSent = Number(row.totalSent) || base.totalSent || 0;
       stats.set(uid, {
         ...base,
-        totalSent: Number(row.totalSent) || 0,
+        total: totalSent,
+        totalSent,
         sentLastHour: Number(row.sentLastHour) || 0,
       });
     }
@@ -436,20 +439,8 @@ const loadMessageStatsMap = async ({ now = Date.now() } = {}) => {
 
 const loadMessagesForUser = async (uid) => {
   const db = await getDb();
-  if (!db) return { totalCount: 0, totalSentCount: 0, rows: [] };
+  if (!db) return { totalSentCount: 0, rows: [] };
   try {
-    const countStmt = db.prepare(
-      `SELECT COUNT(1) AS total
-       FROM messages
-       WHERE senderUid = ? OR targetUid = ?`
-    );
-    countStmt.bind([uid, uid]);
-    let totalCount = 0;
-    if (countStmt.step()) {
-      totalCount = Number(countStmt.getAsObject().total) || 0;
-    }
-    countStmt.free();
-
     const sentCountStmt = db.prepare(
       `SELECT COUNT(1) AS total
        FROM messages
@@ -465,17 +456,17 @@ const loadMessagesForUser = async (uid) => {
     const listStmt = db.prepare(
       `SELECT id, type, senderUid, targetUid, targetType, data, createdAt, createdAtMs
        FROM messages
-       WHERE senderUid = ? OR targetUid = ?
+       WHERE senderUid = ?
        ORDER BY createdAtMs DESC
        LIMIT ?`
     );
-    listStmt.bind([uid, uid, MAX_FETCH]);
+    listStmt.bind([uid, MAX_FETCH]);
     const rows = [];
     while (listStmt.step()) {
       rows.push(listStmt.getAsObject());
     }
     listStmt.free();
-    return { totalCount, totalSentCount, rows };
+    return { totalSentCount, rows };
   } finally {
     db.close();
   }
@@ -489,22 +480,21 @@ const shouldAnalyzeByCooldown = ({
   minNewMessages,
   hourlySentThreshold,
 }) => {
-  if (!stat || stat.total <= 0) return false;
+  if (!stat || Number(stat.totalSent) <= 0) return false;
 
   const meta = user?.aiProfile?.workerMeta || {};
   const lastAnalyzedAtMs = Date.parse(meta.lastAnalyzedAt || user?.aiProfile?.updatedAt || '');
-  const lastMessageCount = Number.isFinite(Number(meta.lastMessageCount))
-    ? Number(meta.lastMessageCount)
-    : Number(user?.aiProfile?.sampling?.totalCount || 0);
   const lastSentMessageCount = Number.isFinite(Number(meta.lastSentMessageCount))
     ? Number(meta.lastSentMessageCount)
-    : 0;
+    : Number.isFinite(Number(meta.lastMessageCount))
+      ? Number(meta.lastMessageCount)
+      : Number(user?.aiProfile?.sampling?.totalCount || 0);
   const totalSent = Number(stat.totalSent) || 0;
   const sentLastHour = Number(stat.sentLastHour) || 0;
 
   if (!Number.isFinite(lastAnalyzedAtMs) || lastAnalyzedAtMs <= 0) return true;
   if (sentLastHour > hourlySentThreshold && totalSent - lastSentMessageCount > 0) return true;
-  if (stat.total - lastMessageCount >= minNewMessages) return true;
+  if (totalSent - lastSentMessageCount >= minNewMessages) return true;
   if (now - lastAnalyzedAtMs >= cooldownMs) return true;
   return false;
 };
@@ -513,7 +503,6 @@ const buildAiProfile = ({
   previous,
   model,
   sampleMeta,
-  totalCount,
   totalSentCount,
   analysis,
   cooldownHours,
@@ -524,7 +513,7 @@ const buildAiProfile = ({
   model,
   updatedAt: new Date().toISOString(),
   sampling: {
-    totalCount,
+    totalCount: totalSentCount,
     source: sampleMeta.source,
     downgradeLevel: sampleMeta.downgradeLevel,
     usedCount: sampleMeta.usedCount,
@@ -533,7 +522,7 @@ const buildAiProfile = ({
   analysis,
   workerMeta: {
     lastAnalyzedAt: new Date().toISOString(),
-    lastMessageCount: totalCount,
+    lastMessageCount: totalSentCount,
     lastSentMessageCount: totalSentCount,
     cooldownHours,
     minNewMessages,
@@ -586,14 +575,14 @@ export const startInsightWorker = ({
     const index = users.findIndex((item) => item?.uid === uid);
     if (index < 0) return;
 
-    const { totalCount, totalSentCount, rows } = await loadMessagesForUser(uid);
-    if (!rows.length || totalCount <= 0) return;
+    const { totalSentCount, rows } = await loadMessagesForUser(uid);
+    if (!rows.length || totalSentCount <= 0) return;
 
-    const sampleMeta = buildSamples(rows, uid, totalCount);
+    const sampleMeta = buildSamples(rows, totalSentCount);
     if (!sampleMeta.samplesText) return;
 
     const prompt = buildPrompt({
-      totalCount,
+      totalSentCount,
       sampleMeta,
       sampleText: sampleMeta.samplesText,
     });
@@ -611,7 +600,6 @@ export const startInsightWorker = ({
       previous: freshUsers[freshIndex].aiProfile,
       model: result.model,
       sampleMeta,
-      totalCount,
       totalSentCount,
       analysis: result.analysis,
       cooldownHours,
@@ -681,7 +669,7 @@ export const startInsightWorker = ({
       if (!Number.isInteger(uid)) continue;
       if (hasHistoricalProfile(user)) continue;
       const stat = statsMap.get(uid);
-      if (!stat || stat.total <= 0) continue;
+      if (!stat || Number(stat.totalSent) <= 0) continue;
       enqueue(uid, { priority: true });
       queuedCount += 1;
     }
@@ -736,3 +724,4 @@ export const startInsightWorker = ({
 
   return { stop, enqueue };
 };
+
