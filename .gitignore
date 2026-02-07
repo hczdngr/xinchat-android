@@ -88,6 +88,8 @@ tmp/
 # Backend runtime data (local only)
 backend/data/*
 !backend/data/.gitkeep
+backend/data/stickers/
+backend/data/images/
 backend/*.sqlite
 backend/**/*.sqlite
 backend/.env

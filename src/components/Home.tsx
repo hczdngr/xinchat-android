@@ -28,6 +28,7 @@ import {
 import { STORAGE_KEYS } from '../constants/storageKeys';
 import { storage } from '../storage';
 import FoundFriends from './FoundFriends';
+import { pickImageForPlatform } from '../utils/pickImage';
 
 type Profile = {
   uid?: number;
@@ -67,10 +68,12 @@ type Group = {
 
 type Message = {
   id: number | string;
+  type: string;
   senderUid: number;
   targetUid: number;
   targetType: string;
   content: string;
+  imageUrl?: string;
   createdAt: string;
   createdAtMs: number;
   raw?: any;
@@ -111,6 +114,26 @@ type HomeTourStep = {
   spotlightStyle: ViewStyle;
   cardStyle: ViewStyle;
 };
+type EmojiSection = {
+  key: string;
+  title: string;
+  emojis: string[];
+};
+type EmojiCategoryKey = 'recent' | 'super' | 'face' | 'fun' | 'custom';
+type EmojiTabItem = {
+  key: EmojiCategoryKey;
+  label: string;
+  icon: string;
+};
+type CustomSticker = {
+  hash: string;
+  url: string;
+  mime: string;
+  ext?: string;
+  size?: number;
+  createdAt?: string;
+  updatedAt?: string;
+};
 
 const PAGE_LIMIT = 30;
 const HEARTBEAT_MS = 20000;
@@ -127,6 +150,68 @@ const SEARCH_MAX_CHAT_HITS = 120;
 const EDGE_BACK_HIT_WIDTH = 28;
 const EDGE_BACK_DISTANCE = 96;
 const EDGE_BACK_VELOCITY = 0.55;
+const MAX_RECENT_EMOJIS = 14;
+const MAX_CUSTOM_STICKERS_LOCAL = 300;
+const DEFAULT_RECENT_EMOJIS = ['🥹', '😭', '😱', '🥺', '😂', '😍', '👍', '🤔', '😎', '🙏', '🥰', '🤗', '😆', '🤭'];
+const SUPER_EMOJIS = [
+  '🤣',
+  '😵',
+  '🤯',
+  '🥳',
+  '🤩',
+  '😤',
+  '🤭',
+  '🥲',
+  '😮',
+  '😴',
+  '🥰',
+  '🫶',
+  '😫',
+  '🤪',
+  '😬',
+  '🤠',
+  '🫣',
+  '🫠',
+  '😇',
+  '🤓',
+];
+const FACE_EMOJIS = [
+  '😀',
+  '🙂',
+  '😄',
+  '😉',
+  '😊',
+  '😋',
+  '😅',
+  '😢',
+  '😡',
+  '😮',
+  '🤐',
+  '🙃',
+  '😌',
+  '😔',
+  '😏',
+  '🤨',
+  '😤',
+  '🤤',
+  '🥴',
+  '🤧',
+];
+const FUN_EMOJIS = ['🎉', '🎈', '🎁', '🍰', '🍕', '🍗', '🍜', '🍓', '🍉', '⚽', '🏀', '🎮', '🚀', '🌈', '⭐', '💥'];
+const EMOJI_TAB_ITEMS: EmojiTabItem[] = [
+  { key: 'recent', label: '最近', icon: '🕘' },
+  { key: 'super', label: '超级', icon: '✨' },
+  { key: 'face', label: '小黄脸', icon: '🙂' },
+  { key: 'fun', label: '趣味', icon: '🎉' },
+  { key: 'custom', label: '自定义', icon: '🧩' },
+];
+const ALLOWED_STICKER_MIME = new Set([
+  'image/png',
+  'image/jpeg',
+  'image/jpg',
+  'image/gif',
+  'image/webp',
+]);
 const surfaceShadowStyle =
   Platform.OS === 'web'
     ? { boxShadow: '0px 1px 2px rgba(0, 0, 0, 0.08)' }
@@ -236,6 +321,30 @@ const sanitizeGroups = (list: any[]): Group[] => {
   return next;
 };
 
+const sanitizeCustomStickers = (list: any): CustomSticker[] => {
+  if (!Array.isArray(list)) return [];
+  const next: CustomSticker[] = [];
+  const seen = new Set<string>();
+  for (const item of list) {
+    const hash = String(item?.hash || '').trim();
+    const url = typeof item?.url === 'string' ? normalizeImageUrl(item.url) : '';
+    if (!hash || !url || seen.has(hash)) continue;
+    const mime = String(item?.mime || '').trim().toLowerCase();
+    const safeMime = ALLOWED_STICKER_MIME.has(mime) ? mime : 'image/png';
+    seen.add(hash);
+    next.push({
+      hash,
+      url,
+      mime: safeMime,
+      ext: typeof item?.ext === 'string' ? item.ext : '',
+      size: Number(item?.size) || 0,
+      createdAt: typeof item?.createdAt === 'string' ? item.createdAt : '',
+      updatedAt: typeof item?.updatedAt === 'string' ? item.updatedAt : '',
+    });
+  }
+  return next;
+};
+
 const sanitizeCachedMessages = (input: any): BucketMap => {
   if (!input || typeof input !== 'object') return {};
   const next: BucketMap = {};
@@ -245,10 +354,12 @@ const sanitizeCachedMessages = (input: any): BucketMap => {
     const list: Message[] = rawList
       .map((entry: any) => ({
         id: entry?.id,
+        type: String(entry?.type || 'text'),
         senderUid: Number(entry?.senderUid),
         targetUid: Number(entry?.targetUid),
         targetType: String(entry?.targetType || ''),
         content: String(entry?.content || ''),
+        imageUrl: typeof entry?.imageUrl === 'string' ? normalizeImageUrl(entry.imageUrl) : '',
         createdAt: String(entry?.createdAt || ''),
         createdAtMs: Number(entry?.createdAtMs),
         raw: entry?.raw,
@@ -377,6 +488,11 @@ export default function Home({ profile }: { profile: Profile }) {
 
   const [activeChatUid, setActiveChatUid] = useState<number | null>(null);
   const [draftMessage, setDraftMessage] = useState('');
+  const [emojiPanelVisible, setEmojiPanelVisible] = useState(false);
+  const [emojiActiveCategory, setEmojiActiveCategory] = useState<EmojiCategoryKey>('recent');
+  const [recentEmojis, setRecentEmojis] = useState<string[]>(DEFAULT_RECENT_EMOJIS);
+  const [customStickers, setCustomStickers] = useState<CustomSticker[]>([]);
+  const [customStickerUploading, setCustomStickerUploading] = useState(false);
   const [activeView, setActiveView] = useState<'list' | 'found'>('list');
   const [foundFriendsInitialTab, setFoundFriendsInitialTab] = useState<'search' | 'requests'>(
     'search'
@@ -501,6 +617,8 @@ export default function Home({ profile }: { profile: Profile }) {
   const cacheWriteTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const homeRefreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const homeCacheHydratedRef = useRef(false);
+  const recentEmojisRef = useRef<string[]>(DEFAULT_RECENT_EMOJIS);
+  const pendingRecentEmojisRef = useRef<string[] | null>(null);
 
   useEffect(() => {
     if (!activeChatUid) {
@@ -623,6 +741,20 @@ export default function Home({ profile }: { profile: Profile }) {
     };
     loadReadAt().catch(() => undefined);
   }, []);
+
+  useEffect(() => {
+    const uid = Number(profileData.uid) || 0;
+    if (!uid) {
+      setCustomStickers([]);
+      return;
+    }
+    const loadCachedCustomStickers = async () => {
+      const cacheKey = `${STORAGE_KEYS.customStickersPrefix}${uid}`;
+      const cached = await storage.getJson<CustomSticker[]>(cacheKey);
+      setCustomStickers(sanitizeCustomStickers(cached));
+    };
+    loadCachedCustomStickers().catch(() => undefined);
+  }, [profileData.uid]);
 
   useEffect(() => {
     const loadPinned = async () => {
@@ -767,7 +899,26 @@ export default function Home({ profile }: { profile: Profile }) {
     if (!activeChatUid) return [];
     return messagesByUid[activeChatUid] || [];
   }, [activeChatUid, messagesByUid]);
+  const isPrivateChat = useMemo(() => Boolean(activeChatUid && !activeChatGroup), [activeChatGroup, activeChatUid]);
+  useEffect(() => {
+    if (isPrivateChat) return;
+    setEmojiPanelVisible(false);
+  }, [isPrivateChat]);
+  useEffect(() => {
+    recentEmojisRef.current = recentEmojis;
+  }, [recentEmojis]);
+  useEffect(() => {
+    if (emojiPanelVisible) return;
+    const pending = pendingRecentEmojisRef.current;
+    if (!pending) return;
+    pendingRecentEmojisRef.current = null;
+    setRecentEmojis(pending);
+  }, [emojiPanelVisible]);
   const selfUid = useMemo(() => profileData.uid, [profileData.uid]);
+  const customStickerStorageKey = useMemo(
+    () => `${STORAGE_KEYS.customStickersPrefix}${Number(selfUid) || 0}`,
+    [selfUid]
+  );
   const canSend = useMemo(() => draftMessage.trim().length > 0, [draftMessage]);
   const activeChatTitle = useMemo(() => {
     if (activeChatGroup) return getGroupDisplayName(activeChatGroup);
@@ -832,6 +983,38 @@ export default function Home({ profile }: { profile: Profile }) {
     const token = tokenRef.current;
     return token ? { Authorization: `Bearer ${token}` } : {};
   }, []);
+
+  const persistCustomStickers = useCallback(
+    async (stickers: CustomSticker[]) => {
+      if (!selfUid) return;
+      await storage.setJson(customStickerStorageKey, stickers);
+    },
+    [customStickerStorageKey, selfUid]
+  );
+
+  const syncCustomStickersFromServer = useCallback(async () => {
+    if (!tokenRef.current || !selfUid) return;
+    try {
+      const response = await fetch(`${API_BASE}/api/chat/stickers/list`, {
+        headers: { ...authHeaders() },
+      });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok || !data?.success) return;
+      const next = sanitizeCustomStickers(data?.data);
+      setCustomStickers(next);
+      await persistCustomStickers(next);
+    } catch {}
+  }, [authHeaders, persistCustomStickers, selfUid]);
+
+  useEffect(() => {
+    if (!tokenReady || !selfUid) return;
+    syncCustomStickersFromServer().catch(() => undefined);
+  }, [selfUid, syncCustomStickersFromServer, tokenReady]);
+
+  useEffect(() => {
+    if (!emojiPanelVisible || emojiActiveCategory !== 'custom') return;
+    syncCustomStickersFromServer().catch(() => undefined);
+  }, [emojiActiveCategory, emojiPanelVisible, syncCustomStickersFromServer]);
 
   const hydrateHomeCache = useCallback(async () => {
     const [
@@ -921,12 +1104,22 @@ export default function Home({ profile }: { profile: Profile }) {
       : Number.isFinite(Date.parse(createdAt))
         ? Date.parse(createdAt)
         : Date.now();
+    const type = String(entry?.type || 'text');
+    const directUrl = typeof entry?.data?.url === 'string' ? entry.data.url : '';
+    const firstUrl =
+      Array.isArray(entry?.data?.urls) && typeof entry.data.urls[0] === 'string'
+        ? entry.data.urls[0]
+        : '';
+    const imageUrl = type === 'image' ? normalizeImageUrl(directUrl || firstUrl) : '';
+    const textContent = entry?.data?.content || entry?.data?.text || '';
     return {
       id: entry.id,
+      type,
       senderUid: entry.senderUid,
       targetUid: entry.targetUid,
       targetType: entry.targetType,
-      content: entry?.data?.content || entry?.data?.text || '',
+      content: textContent || (type === 'image' ? '[图片]' : ''),
+      imageUrl,
       createdAt,
       createdAtMs: parsedMs,
       raw: entry,
@@ -1400,6 +1593,7 @@ export default function Home({ profile }: { profile: Profile }) {
     if (activeChatUidRef.current) {
       markChatRead(activeChatUidRef.current);
     }
+    setEmojiPanelVisible(false);
     setActiveChatUid(null);
   }, [markChatRead]);
 
@@ -1793,12 +1987,16 @@ export default function Home({ profile }: { profile: Profile }) {
         closeTour(true);
         return true;
       }
+      if (emojiPanelVisible && activeChatUidRef.current) {
+        setEmojiPanelVisible(false);
+        return true;
+      }
       if (!quickMenuVisible) return false;
       closeQuickMenu();
       return true;
     });
     return () => sub.remove();
-  }, [closeQuickMenu, closeTour, quickMenuVisible, searchAnim, searchVisible, tourVisible]);
+  }, [closeQuickMenu, closeTour, emojiPanelVisible, quickMenuVisible, searchAnim, searchVisible, tourVisible]);
 
   const onChatScroll = useCallback(
     async (event: any) => {
@@ -1819,6 +2017,97 @@ export default function Home({ profile }: { profile: Profile }) {
       }, 0);
     },
     [historyHasMore, historyLoading, loadHistory]
+  );
+
+  const appendEmojiToDraft = useCallback(
+    (emoji: string) => {
+      if (!emoji) return;
+      setDraftMessage((prev) => `${prev}${emoji}`.slice(0, CHAT_INPUT_MAX_LENGTH));
+      const base = pendingRecentEmojisRef.current || recentEmojisRef.current;
+      pendingRecentEmojisRef.current = [emoji, ...base.filter((item) => item !== emoji)].slice(
+        0,
+        MAX_RECENT_EMOJIS
+      );
+      focusChatInput();
+    },
+    [focusChatInput]
+  );
+
+  const emojiSectionMap = useMemo<Record<Exclude<EmojiCategoryKey, 'custom'>, EmojiSection>>(
+    () => ({
+      recent: { key: 'recent', title: '最近使用', emojis: recentEmojis },
+      super: { key: 'super', title: '超级表情', emojis: SUPER_EMOJIS },
+      face: { key: 'face', title: '小黄脸表情', emojis: FACE_EMOJIS },
+      fun: { key: 'fun', title: '趣味表情', emojis: FUN_EMOJIS },
+    }),
+    [recentEmojis]
+  );
+  const activeEmojiSection = useMemo(() => {
+    if (emojiActiveCategory === 'custom') return null;
+    return emojiSectionMap[emojiActiveCategory];
+  }, [emojiActiveCategory, emojiSectionMap]);
+
+  const uploadCustomSticker = useCallback(async () => {
+    if (customStickerUploading || !selfUid || !tokenRef.current) return;
+    setCustomStickerUploading(true);
+    try {
+      const picked = await pickImageForPlatform();
+      if (!picked?.data) return;
+      const mime = String(picked.mime || '').toLowerCase();
+      if (!ALLOWED_STICKER_MIME.has(mime)) return;
+      const dataUrl = `data:${mime};base64,${picked.data}`;
+      const response = await fetch(`${API_BASE}/api/chat/stickers/upload`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...authHeaders() },
+        body: JSON.stringify({ dataUrl, mime }),
+      });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok || !data?.success) return;
+      const next = sanitizeCustomStickers(data?.data?.stickers);
+      setCustomStickers(next);
+      await persistCustomStickers(next);
+    } catch {}
+    finally {
+      setCustomStickerUploading(false);
+    }
+  }, [authHeaders, customStickerUploading, persistCustomStickers, selfUid]);
+
+  const sendCustomSticker = useCallback(
+    async (sticker: CustomSticker) => {
+      if (!sticker?.url || !activeChatUidRef.current || !selfUid) return;
+      const targetType = groupsRef.current.some((group) => group.id === activeChatUidRef.current)
+        ? 'group'
+        : 'private';
+      const payload = {
+        senderUid: selfUid,
+        targetUid: activeChatUidRef.current,
+        targetType,
+        type: 'image',
+        url: sticker.url,
+        hash: sticker.hash,
+      };
+      try {
+        const response = await fetch(`${API_BASE}/api/chat/send`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', ...authHeaders() },
+          body: JSON.stringify(payload),
+        });
+        const data = await response.json().catch(() => ({}));
+        if (response.ok && data?.success && data?.data) {
+          insertMessages(activeChatUidRef.current, [data.data]);
+          setTimeout(scrollToBottom, 0);
+          setCustomStickers((prev) => {
+            const next = [sticker, ...prev.filter((item) => item.hash !== sticker.hash)].slice(
+              0,
+              MAX_CUSTOM_STICKERS_LOCAL
+            );
+            persistCustomStickers(next).catch(() => undefined);
+            return next;
+          });
+        }
+      } catch {}
+    },
+    [authHeaders, insertMessages, persistCustomStickers, scrollToBottom, selfUid]
   );
 
   const sendText = useCallback(async () => {
@@ -2523,11 +2812,16 @@ export default function Home({ profile }: { profile: Profile }) {
                           isSelf && styles.selfBubble,
                           isFocused && !isSelf && styles.bubbleFocused,
                           isFocused && isSelf && styles.selfBubbleFocused,
+                          item.type === 'image' && styles.imageBubble,
                         ]}
                       >
-                        <Text style={[styles.messageText, isSelf && styles.selfText]}>
-                          {item.content}
-                        </Text>
+                        {item.type === 'image' && item.imageUrl ? (
+                          <Image source={{ uri: item.imageUrl }} style={styles.chatImageMessage} />
+                        ) : (
+                          <Text style={[styles.messageText, isSelf && styles.selfText]}>
+                            {item.content}
+                          </Text>
+                        )}
                       </View>
                     </View>
                   </View>
@@ -2559,22 +2853,119 @@ export default function Home({ profile }: { profile: Profile }) {
               </Pressable>
             </View>
             <View style={styles.chatToolRow}>
-              <Pressable style={styles.chatToolBtn} onPress={() => undefined}>
+              <Pressable
+                style={styles.chatToolBtn}
+                onPress={() => {
+                  setEmojiPanelVisible(false);
+                }}
+              >
                 <ToolMicIcon />
               </Pressable>
-              <Pressable style={styles.chatToolBtn} onPress={() => undefined}>
+              <Pressable
+                style={styles.chatToolBtn}
+                onPress={() => {
+                  setEmojiPanelVisible(false);
+                }}
+              >
                 <ToolImageIcon />
               </Pressable>
-              <Pressable style={styles.chatToolBtn} onPress={() => undefined}>
+              <Pressable
+                style={styles.chatToolBtn}
+                onPress={() => {
+                  setEmojiPanelVisible(false);
+                }}
+              >
                 <ToolCameraIcon />
               </Pressable>
-              <Pressable style={styles.chatToolBtn} onPress={() => undefined}>
-                <ToolEmojiIcon />
+              <Pressable
+                style={[styles.chatToolBtn, isPrivateChat && emojiPanelVisible && styles.chatToolBtnActive]}
+                onPress={() => {
+                  if (!isPrivateChat) return;
+                  setEmojiPanelVisible((prev) => !prev);
+                  focusChatInput();
+                }}
+              >
+                <ToolEmojiIcon active={isPrivateChat && emojiPanelVisible} />
               </Pressable>
-              <Pressable style={styles.chatToolBtn} onPress={() => undefined}>
+              <Pressable
+                style={styles.chatToolBtn}
+                onPress={() => {
+                  setEmojiPanelVisible(false);
+                }}
+              >
                 <ToolPlusIcon />
               </Pressable>
             </View>
+            {isPrivateChat && emojiPanelVisible ? (
+              <View style={styles.emojiPanel}>
+                <View style={styles.emojiPanelContent}>
+                  {emojiActiveCategory === 'custom' ? (
+                    <ScrollView
+                      style={styles.emojiPanelScroll}
+                      contentContainerStyle={styles.emojiPanelInner}
+                      keyboardShouldPersistTaps="always"
+                    >
+                      <Text style={styles.emojiSectionTitle}>自定义表情</Text>
+                      <View style={styles.customStickerGrid}>
+                        <Pressable
+                          style={[styles.customStickerItem, styles.customStickerAdd]}
+                          onPress={uploadCustomSticker}
+                          disabled={customStickerUploading}
+                        >
+                          <Text style={styles.customStickerAddText}>{customStickerUploading ? '...' : '+'}</Text>
+                        </Pressable>
+                        {customStickers.map((sticker) => (
+                          <Pressable
+                            key={`custom-${sticker.hash}`}
+                            style={styles.customStickerItem}
+                            onPress={() => sendCustomSticker(sticker)}
+                          >
+                            <Image source={{ uri: sticker.url }} style={styles.customStickerImage} />
+                          </Pressable>
+                        ))}
+                      </View>
+                    </ScrollView>
+                  ) : activeEmojiSection ? (
+                    <ScrollView
+                      style={styles.emojiPanelScroll}
+                      contentContainerStyle={styles.emojiPanelInner}
+                      keyboardShouldPersistTaps="always"
+                    >
+                      <Text style={styles.emojiSectionTitle}>{activeEmojiSection.title}</Text>
+                      <View style={styles.emojiGrid}>
+                        {activeEmojiSection.emojis.map((emoji) => (
+                          <Pressable
+                            key={`${activeEmojiSection.key}-${emoji}`}
+                            style={styles.emojiItem}
+                            onPress={() => appendEmojiToDraft(emoji)}
+                          >
+                            <Text style={styles.emojiText}>{emoji}</Text>
+                          </Pressable>
+                        ))}
+                      </View>
+                    </ScrollView>
+                  ) : null}
+                </View>
+                <ScrollView
+                  horizontal
+                  showsHorizontalScrollIndicator={false}
+                  contentContainerStyle={styles.emojiTabBar}
+                >
+                  {EMOJI_TAB_ITEMS.map((tab) => (
+                    <Pressable
+                      key={tab.key}
+                      style={[styles.emojiTabBtn, emojiActiveCategory === tab.key && styles.emojiTabBtnActive]}
+                      onPress={() => setEmojiActiveCategory(tab.key)}
+                    >
+                      <Text style={styles.emojiTabIcon}>{tab.icon}</Text>
+                      <Text style={[styles.emojiTabLabel, emojiActiveCategory === tab.key && styles.emojiTabLabelActive]}>
+                        {tab.label}
+                      </Text>
+                    </Pressable>
+                  ))}
+                </ScrollView>
+              </View>
+            ) : null}
           </View>
         </Animated.View>
       ) : null}
@@ -3805,6 +4196,19 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: 'rgba(0,0,0,0.06)',
   },
+  imageBubble: {
+    paddingHorizontal: 4,
+    paddingVertical: 4,
+    backgroundColor: '#eef4ff',
+    borderColor: '#d9e6fb',
+  },
+  chatImageMessage: {
+    width: 138,
+    height: 138,
+    borderRadius: 10,
+    resizeMode: 'cover',
+    backgroundColor: '#e9edf5',
+  },
   selfBubble: {
     backgroundColor: '#4a9df8',
     borderColor: '#4a9df8',
@@ -3856,6 +4260,125 @@ const styles = StyleSheet.create({
     borderRadius: 17,
     alignItems: 'center',
     justifyContent: 'center',
+  },
+  chatToolBtnActive: {
+    backgroundColor: '#e9f3ff',
+    borderWidth: 1,
+    borderColor: '#b7d8ff',
+  },
+  emojiPanel: {
+    marginTop: 8,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: '#e7eef8',
+    backgroundColor: '#f8fbff',
+    maxHeight: 258,
+  },
+  emojiPanelContent: {
+    flex: 1,
+    minHeight: 158,
+  },
+  emojiPanelScroll: {
+    flexGrow: 0,
+  },
+  emojiPanelInner: {
+    paddingHorizontal: 10,
+    paddingVertical: 10,
+    gap: 10,
+  },
+  emojiSection: {
+    gap: 6,
+  },
+  emojiSectionTitle: {
+    fontSize: 13,
+    color: '#617087',
+    fontWeight: '600',
+    marginBottom: 2,
+  },
+  emojiGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 6,
+  },
+  emojiItem: {
+    width: '13.4%',
+    minWidth: 34,
+    height: 36,
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: '#e7edf6',
+    backgroundColor: '#ffffff',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  emojiText: {
+    fontSize: 22,
+  },
+  customStickerGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 8,
+  },
+  customStickerItem: {
+    width: '18.4%',
+    minWidth: 56,
+    aspectRatio: 1,
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: '#dfe8f5',
+    backgroundColor: '#fff',
+    alignItems: 'center',
+    justifyContent: 'center',
+    overflow: 'hidden',
+  },
+  customStickerAdd: {
+    borderStyle: 'dashed',
+    backgroundColor: '#f4f8ff',
+  },
+  customStickerAddText: {
+    fontSize: 30,
+    lineHeight: 32,
+    color: '#7d8fa8',
+    fontWeight: '300',
+  },
+  customStickerImage: {
+    width: '100%',
+    height: '100%',
+    resizeMode: 'cover',
+  },
+  emojiTabBar: {
+    borderTopWidth: 1,
+    borderTopColor: '#e4ecf9',
+    paddingVertical: 6,
+    paddingHorizontal: 6,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+  },
+  emojiTabBtn: {
+    minWidth: 66,
+    height: 46,
+    borderRadius: 10,
+    paddingHorizontal: 10,
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 1,
+  },
+  emojiTabBtnActive: {
+    backgroundColor: '#e9f3ff',
+    borderWidth: 1,
+    borderColor: '#c0dbff',
+  },
+  emojiTabIcon: {
+    fontSize: 17,
+  },
+  emojiTabLabel: {
+    fontSize: 11,
+    color: '#7b8799',
+  },
+  emojiTabLabelActive: {
+    color: '#2b88ff',
+    fontWeight: '600',
   },
   chatInputField: {
     flex: 1,
@@ -4000,13 +4523,14 @@ function ToolCameraIcon() {
   );
 }
 
-function ToolEmojiIcon() {
+function ToolEmojiIcon({ active = false }: { active?: boolean }) {
+  const stroke = active ? '#2b88ff' : '#2f3a48';
   return (
     <Svg width={22} height={22} viewBox="0 0 24 24" fill="none">
-      <Path d="M12 20A8 8 0 1 0 12 4A8 8 0 0 0 12 20Z" stroke="#2f3a48" strokeWidth={2} />
-      <Path d="M9 10H9.01" stroke="#2f3a48" strokeWidth={2.6} strokeLinecap="round" />
-      <Path d="M15 10H15.01" stroke="#2f3a48" strokeWidth={2.6} strokeLinecap="round" />
-      <Path d="M8.5 14C9.3 15.2 10.5 16 12 16C13.5 16 14.7 15.2 15.5 14" stroke="#2f3a48" strokeWidth={2} strokeLinecap="round" />
+      <Path d="M12 20A8 8 0 1 0 12 4A8 8 0 0 0 12 20Z" stroke={stroke} strokeWidth={2} />
+      <Path d="M9 10H9.01" stroke={stroke} strokeWidth={2.6} strokeLinecap="round" />
+      <Path d="M15 10H15.01" stroke={stroke} strokeWidth={2.6} strokeLinecap="round" />
+      <Path d="M8.5 14C9.3 15.2 10.5 16 12 16C13.5 16 14.7 15.2 15.5 14" stroke={stroke} strokeWidth={2} strokeLinecap="round" />
     </Svg>
   );
 }

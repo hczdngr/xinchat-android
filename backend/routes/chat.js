@@ -14,6 +14,8 @@ const DATA_DIR = path.join(__dirname, '..', 'data');
 const IMAGE_DIR = path.join(DATA_DIR, 'images');
 const USERFILE_DIR = path.join(DATA_DIR, 'userfile');
 const USERFILE_INDEX_PATH = path.join(USERFILE_DIR, 'index.json');
+const STICKER_DIR = path.join(DATA_DIR, 'stickers');
+const STICKER_INDEX_PATH = path.join(STICKER_DIR, 'index.json');
 const CHAT_JSON_PATH = path.join(DATA_DIR, 'chat.json');
 const DB_PATH = path.join(DATA_DIR, 'chat.sqlite');
 const DB_TMP_PATH = path.join(DATA_DIR, 'chat.sqlite.tmp');
@@ -36,6 +38,9 @@ const MAX_FILE_BYTES = 20 * 1024 * 1024;
 const FILE_TTL_MS = 3 * 24 * 60 * 60 * 1000;
 const CLEANUP_INTERVAL_MS = 60 * 60 * 1000;
 let lastCleanupAt = 0;
+const MAX_STICKER_BYTES = 20 * 1024 * 1024;
+const MAX_STICKERS_PER_USER = 300;
+const ALLOWED_STICKER_EXTS = new Set(['png', 'jpg', 'jpeg', 'gif', 'webp']);
 
 let sqlModule = null;
 let db = null;
@@ -44,6 +49,14 @@ let flushInFlight = false;
 let pendingFlush = false;
 let chatStorageReady = false;
 let chatStoragePromise = null;
+let stickerStoreLoaded = false;
+let stickerStoreCache = {
+  version: 1,
+  byHash: {},
+  users: {},
+  updatedAt: '',
+};
+let stickerStoreWriteChain = Promise.resolve();
 
 const parseImageDataUrl = (value) => {
   if (typeof value !== 'string') return null;
@@ -100,6 +113,147 @@ const readUserfileIndex = async () => {
 const writeUserfileIndex = async (index) => {
   await fs.mkdir(USERFILE_DIR, { recursive: true });
   await fs.writeFile(USERFILE_INDEX_PATH, JSON.stringify(index || {}, null, 2));
+};
+
+const normalizeStickerStore = (input) => {
+  const source = input && typeof input === 'object' ? input : {};
+  const byHashSource = source.byHash && typeof source.byHash === 'object' ? source.byHash : {};
+  const usersSource = source.users && typeof source.users === 'object' ? source.users : {};
+  const byHash = {};
+  Object.entries(byHashSource).forEach(([hash, item]) => {
+    if (typeof hash !== 'string' || hash.trim().length < 10) return;
+    const safeHash = hash.trim();
+    const safeUrl = typeof item?.url === 'string' ? item.url.trim() : '';
+    const safeMime = typeof item?.mime === 'string' ? item.mime.trim() : '';
+    const safeExt = typeof item?.ext === 'string' ? item.ext.trim().toLowerCase() : '';
+    if (!safeUrl || !safeExt || !ALLOWED_STICKER_EXTS.has(safeExt)) return;
+    byHash[safeHash] = {
+      hash: safeHash,
+      url: safeUrl,
+      mime: safeMime || `image/${safeExt === 'jpg' ? 'jpeg' : safeExt}`,
+      ext: safeExt,
+      size: Number(item?.size) || 0,
+      createdAt:
+        typeof item?.createdAt === 'string' && item.createdAt
+          ? item.createdAt
+          : new Date().toISOString(),
+      updatedAt:
+        typeof item?.updatedAt === 'string' && item.updatedAt
+          ? item.updatedAt
+          : new Date().toISOString(),
+    };
+  });
+
+  const users = {};
+  Object.entries(usersSource).forEach(([rawUid, entry]) => {
+    const uid = Number(rawUid);
+    if (!Number.isInteger(uid) || uid <= 0) return;
+    const items = Array.isArray(entry?.items) ? entry.items : [];
+    const deduped = [];
+    const seen = new Set();
+    for (const hash of items) {
+      const safeHash = typeof hash === 'string' ? hash.trim() : '';
+      if (!safeHash || !byHash[safeHash] || seen.has(safeHash)) continue;
+      seen.add(safeHash);
+      deduped.push(safeHash);
+      if (deduped.length >= MAX_STICKERS_PER_USER) break;
+    }
+    users[String(uid)] = {
+      items: deduped,
+      updatedAt:
+        typeof entry?.updatedAt === 'string' && entry.updatedAt
+          ? entry.updatedAt
+          : new Date().toISOString(),
+    };
+  });
+  return {
+    version: 1,
+    byHash,
+    users,
+    updatedAt: typeof source.updatedAt === 'string' ? source.updatedAt : '',
+  };
+};
+
+const ensureStickerStore = async () => {
+  if (stickerStoreLoaded) return stickerStoreCache;
+  try {
+    const raw = await fs.readFile(STICKER_INDEX_PATH, 'utf-8');
+    stickerStoreCache = normalizeStickerStore(JSON.parse(raw));
+  } catch {
+    stickerStoreCache = normalizeStickerStore(null);
+  }
+  stickerStoreLoaded = true;
+  return stickerStoreCache;
+};
+
+const persistStickerStore = async () => {
+  await fs.mkdir(STICKER_DIR, { recursive: true });
+  const next = {
+    ...stickerStoreCache,
+    updatedAt: new Date().toISOString(),
+  };
+  stickerStoreCache = next;
+  const tempPath = `${STICKER_INDEX_PATH}.tmp`;
+  await fs.writeFile(tempPath, JSON.stringify(next, null, 2), 'utf-8');
+  await fs.rename(tempPath, STICKER_INDEX_PATH);
+};
+
+const queueStickerStorePersist = async () => {
+  stickerStoreWriteChain = stickerStoreWriteChain
+    .catch(() => undefined)
+    .then(() => persistStickerStore());
+  await stickerStoreWriteChain;
+};
+
+const getUserStickerList = (uid) => {
+  const store = stickerStoreCache;
+  const userEntry = store.users[String(uid)];
+  const hashes = Array.isArray(userEntry?.items) ? userEntry.items : [];
+  const list = [];
+  for (const hash of hashes) {
+    const item = store.byHash[hash];
+    if (item) list.push(item);
+  }
+  return list;
+};
+
+const upsertUserSticker = async ({ uid, hash, ext, mime, size, url }) => {
+  await ensureStickerStore();
+  const now = new Date().toISOString();
+  const safeExt = String(ext || '').trim().toLowerCase();
+  const safeMime = String(mime || '').trim().toLowerCase();
+  const safeHash = String(hash || '').trim();
+  const safeUrl = String(url || '').trim();
+  if (!safeHash || !safeUrl || !ALLOWED_STICKER_EXTS.has(safeExt)) {
+    throw new Error('贴纸格式无效。');
+  }
+  const existing = stickerStoreCache.byHash[safeHash];
+  stickerStoreCache.byHash[safeHash] = {
+    hash: safeHash,
+    ext: safeExt,
+    mime: safeMime || `image/${safeExt === 'jpg' ? 'jpeg' : safeExt}`,
+    size: Number(size) || 0,
+    url: safeUrl,
+    createdAt: existing?.createdAt || now,
+    updatedAt: now,
+  };
+
+  const uidKey = String(uid);
+  const entry =
+    stickerStoreCache.users[uidKey] && typeof stickerStoreCache.users[uidKey] === 'object'
+      ? stickerStoreCache.users[uidKey]
+      : { items: [], updatedAt: now };
+  const hashes = Array.isArray(entry.items) ? entry.items : [];
+  const nextItems = [safeHash, ...hashes.filter((item) => item !== safeHash)].slice(
+    0,
+    MAX_STICKERS_PER_USER
+  );
+  stickerStoreCache.users[uidKey] = {
+    items: nextItems,
+    updatedAt: now,
+  };
+  await queueStickerStorePersist();
+  return stickerStoreCache.byHash[safeHash];
 };
 
 const pruneUserfileIndex = async (index) => {
@@ -486,6 +640,7 @@ const ensureChatStorage = async () => {
     await openDb();
     await migrateChatJson();
     await maybeCleanupUserFiles();
+    await ensureStickerStore();
     chatStorageReady = true;
   })();
   try {
@@ -785,6 +940,58 @@ router.post('/send', authenticate, async (req, res) => {
   } catch (error) {
     console.error('Chat send error:', error);
     res.status(500).json({ success: false, message: '请求失败。' });
+  }
+});
+
+router.get('/stickers/list', authenticate, async (req, res) => {
+  try {
+    await ensureChatStorage();
+    const { user } = req.auth;
+    const list = getUserStickerList(user.uid);
+    res.json({ success: true, data: list });
+  } catch (error) {
+    console.error('Sticker list error:', error);
+    res.status(500).json({ success: false, message: '获取贴纸失败。' });
+  }
+});
+
+router.post('/stickers/upload', authenticate, async (req, res) => {
+  try {
+    await ensureChatStorage();
+    const body = req.body || {};
+    const rawDataUrl = typeof body.dataUrl === 'string' ? body.dataUrl.trim() : '';
+    const rawMime = typeof body.mime === 'string' ? body.mime.trim().toLowerCase() : '';
+    const rawBase64 = typeof body.base64 === 'string' ? body.base64.trim() : '';
+    let parsed = rawDataUrl ? parseImageDataUrl(rawDataUrl) : null;
+    if (!parsed && rawBase64 && rawMime) {
+      parsed = parseImageDataUrl(`data:${rawMime};base64,${rawBase64}`);
+    }
+    if (!parsed) {
+      res.status(400).json({ success: false, message: '贴纸格式无效。' });
+      return;
+    }
+    if (parsed.buffer.length <= 0 || parsed.buffer.length > MAX_STICKER_BYTES) {
+      res.status(400).json({ success: false, message: '贴纸大小无效。' });
+      return;
+    }
+
+    const stored = await storeImageBuffer(parsed.buffer, parsed.ext);
+    const baseUrl = `${req.protocol}://${req.get('host')}`;
+    const url = `${baseUrl}/uploads/images/${stored.filename}`;
+    const sticker = await upsertUserSticker({
+      uid: req.auth.user.uid,
+      hash: stored.hash,
+      ext: parsed.ext,
+      mime: parsed.mime,
+      size: parsed.buffer.length,
+      url,
+    });
+    const list = getUserStickerList(req.auth.user.uid);
+    res.json({ success: true, data: { sticker, stickers: list } });
+  } catch (error) {
+    console.error('Sticker upload error:', error);
+    const message = error?.message === '贴纸格式无效。' ? error.message : '贴纸上传失败。';
+    res.status(400).json({ success: false, message });
   }
 });
 

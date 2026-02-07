@@ -14,6 +14,7 @@ export const STORAGE_KEYS = {
   homePendingRequestsCache: 'xinchat.homePendingRequestsCache',
   chatMuted: 'xinchat.chatMuted',
   chatBackground: 'xinchat.chatBackground',
+  customStickersPrefix: 'xinchat.customStickers.',
   groupRemarks: 'xinchat.groupRemarks',
   pendingChatSettingsAction: 'xinchat.pendingChatSettingsAction',
 } as const;
