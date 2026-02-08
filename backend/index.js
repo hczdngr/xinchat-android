@@ -436,6 +436,37 @@ const routeMeta = [
   },
   {
     method: 'GET',
+    path: '/api/insight/encyclopedia',
+    label: 'Encyclopedia',
+    note: 'Search encyclopedia summary from network by keyword.',
+    templates: [
+      {
+        name: 'Search encyclopedia',
+        body: { query: '猫' },
+        hint: 'Authorization: Bearer <token>',
+      },
+    ],
+  },
+  {
+    method: 'POST',
+    path: '/api/insight/object-detect',
+    label: 'Object detect',
+    note: 'Detect objects in an image through Gemini multimodal API.',
+    templates: [
+      {
+        name: 'Detect from data URL',
+        body: { image: 'data:image/jpeg;base64,...' },
+        hint: 'Authorization: Bearer <token>',
+      },
+      {
+        name: 'Detect from base64',
+        body: { mimeType: 'image/jpeg', base64: '...' },
+        hint: 'Authorization: Bearer <token>',
+      },
+    ],
+  },
+  {
+    method: 'GET',
     path: '/api/routes',
     label: 'Routes',
     note: 'List backend routes and templates.',

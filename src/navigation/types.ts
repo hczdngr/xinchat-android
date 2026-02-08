@@ -29,6 +29,13 @@ type ProfilePreview = {
   signature?: string;
 };
 
+type DetectObjectPreview = {
+  name?: string;
+  confidence?: number;
+  attributes?: string;
+  position?: string;
+};
+
 export type RootStackParamList = {
   Home:
     | {
@@ -70,6 +77,13 @@ export type RootStackParamList = {
     | undefined;
   EditProfile: undefined;
   QRScan: undefined;
+  ObjectInsight: {
+    query: string;
+    imageUri?: string;
+    detectSummary?: string;
+    detectScene?: string;
+    detectObjects?: DetectObjectPreview[];
+  };
   InAppBrowser: {
     url: string;
     title?: string;
@@ -85,4 +99,5 @@ export type ChatSettingsRoute = RouteProp<RootStackParamList, 'ChatSettings'>;
 export type GroupChatSettingsRoute = RouteProp<RootStackParamList, 'GroupChatSettings'>;
 export type GroupChatSearchRoute = RouteProp<RootStackParamList, 'GroupChatSearch'>;
 export type CreateGroupRoute = RouteProp<RootStackParamList, 'CreateGroup'>;
+export type ObjectInsightRoute = RouteProp<RootStackParamList, 'ObjectInsight'>;
 export type InAppBrowserRoute = RouteProp<RootStackParamList, 'InAppBrowser'>;
