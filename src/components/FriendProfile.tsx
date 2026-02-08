@@ -58,20 +58,19 @@ export default function FriendProfile() {
 
   const handleSendMessage = useCallback(async () => {
     if (!profile?.uid) return;
-    await storage.setJson(STORAGE_KEYS.pendingOpenChat, {
-      uid: profile.uid,
-      friend: {
+    navigation.push('Home', {
+      openChatUid: profile.uid,
+      openChatTargetType: 'private',
+      openChatFriend: {
         uid: profile.uid,
         username: profile.username,
         nickname: profile.nickname,
         avatar: profile.avatar,
+        signature: profile.signature,
       },
+      // Opened from FriendProfile: closing chat should return to previous screen.
+      openChatReturnToPrevious: true,
     });
-    if (navigation.canGoBack()) {
-      navigation.goBack();
-    } else {
-      navigation.navigate('Home');
-    }
   }, [navigation, profile]);
 
   const loadProfile = useCallback(async () => {

@@ -37,6 +37,7 @@ export type RootStackParamList = {
         openChatFriend?: FriendPreview;
         openChatGroup?: GroupPreview;
         openChatFocusMessageId?: string;
+        openChatReturnToPrevious?: boolean;
       }
     | undefined;
   UserCenter:
