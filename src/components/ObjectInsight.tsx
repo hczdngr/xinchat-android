@@ -15,6 +15,7 @@ import { API_BASE } from '../config';
 import { STORAGE_KEYS } from '../constants/storageKeys';
 import type { ObjectInsightRoute, RootNavigation } from '../navigation/types';
 import { storage } from '../storage';
+import { normalizeObjectDetectPayload } from '../utils/objectDetectNormalize';
 
 type EncyclopediaData = {
   query?: string;
@@ -26,27 +27,48 @@ type EncyclopediaData = {
   source?: string;
 };
 
+const toQueryFromPayload = (value: string) => {
+  const payload = normalizeObjectDetectPayload(value);
+  const firstObject = String(payload.objects?.[0]?.name || '').trim();
+  if (firstObject) return firstObject;
+  const summary = String(payload.summary || '')
+    .replace(/[.!?].*$/, '')
+    .trim();
+  if (summary && summary !== value) return summary.slice(0, 48);
+  return value;
+};
+
 export default function ObjectInsight() {
   const navigation = useNavigation<RootNavigation>();
   const route = useRoute<ObjectInsightRoute>();
   const insets = useSafeAreaInsets();
 
-  const query = String(route.params?.query || '')
+  const rawQuery = String(route.params?.query || '')
     .replace(/\s+/g, ' ')
     .trim();
+  const query = useMemo(() => toQueryFromPayload(rawQuery), [rawQuery]);
   const imageUri = String(route.params?.imageUri || '').trim();
-  const detectSummary = String(route.params?.detectSummary || '').trim();
-  const detectScene = String(route.params?.detectScene || '').trim();
+  const normalizedDetect = useMemo(
+    () =>
+      normalizeObjectDetectPayload({
+        summary: route.params?.detectSummary,
+        scene: route.params?.detectScene,
+        objects: route.params?.detectObjects,
+      }),
+    [route.params?.detectSummary, route.params?.detectScene, route.params?.detectObjects]
+  );
+  const detectSummary = String(normalizedDetect.summary || '').trim();
+  const detectScene = String(normalizedDetect.scene || '').trim();
   const detectObjects = useMemo(
     () =>
-      (Array.isArray(route.params?.detectObjects) ? route.params.detectObjects : [])
+      (Array.isArray(normalizedDetect.objects) ? normalizedDetect.objects : [])
         .map((item) => ({
           name: String(item?.name || '').trim(),
           confidence: Number(item?.confidence || 0),
         }))
         .filter((item) => item.name)
         .slice(0, 8),
-    [route.params?.detectObjects]
+    [normalizedDetect.objects]
   );
 
   const [loading, setLoading] = useState(false);
@@ -58,13 +80,19 @@ export default function ObjectInsight() {
     [query]
   );
   const summaryText = useMemo(() => {
-    const remoteSummary = String(encyclopedia?.summary || '').trim();
+    const remoteRaw = String(encyclopedia?.summary || '').trim();
+    const remoteSummary = normalizeObjectDetectPayload(remoteRaw).summary || remoteRaw;
     if (remoteSummary) return remoteSummary;
     if (detectSummary) return detectSummary;
     return `${query} 暂无可展示的百科摘要。`;
   }, [detectSummary, encyclopedia?.summary, query]);
 
-  const sourceTitle = String(encyclopedia?.title || query || '识别结果').trim();
+  const sourceTitle = String(
+    normalizeObjectDetectPayload(String(encyclopedia?.title || '')).summary ||
+      encyclopedia?.title ||
+      query ||
+      '识别结果'
+  ).trim();
   const sourceUrl = String(encyclopedia?.url || fallbackUrl).trim();
   const sourceLabel = String(encyclopedia?.source || '网络百科').trim();
   const thumbnail = String(encyclopedia?.thumbnail || '').trim();

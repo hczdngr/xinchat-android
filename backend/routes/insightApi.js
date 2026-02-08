@@ -1,17 +1,23 @@
 import express from 'express';
+import crypto from 'crypto';
 import { GoogleGenAI } from '@google/genai';
 import { createAuthenticateMiddleware } from './session.js';
 
 const router = express.Router();
 const authenticate = createAuthenticateMiddleware({ scope: 'Insight' });
 
-const GEMINI_FLASH_PREVIEW_MODEL = 'gemini-3-pro-image-preview';
+const readPositiveInt = (value, fallback, min = 1) => {
+  const parsed = Number.parseInt(String(value || ''), 10);
+  return Number.isFinite(parsed) && parsed >= min ? parsed : fallback;
+};
+
+const GEMINI_FLASH_PREVIEW_MODEL = 'gemini-2.5-flash';
 const GEMINI_VISION_MODEL_FALLBACKS = [
-  'gemini-3-pro-image-preview',
-  'gemini-3-pro-preview',
-  'gemini-3-flash-preview',
   'gemini-2.5-flash',
   'gemini-2.0-flash',
+  'gemini-3-flash-preview',
+  'gemini-3-pro-image-preview',
+  'gemini-3-pro-preview',
 ];
 const HARDCODED_GEMINI_API_KEY_B64 =
   'QUl6YVN5QV81RndRNWFwZlpseG9kdHhRakRNNk92dlNYRFAwZURv';
@@ -34,8 +40,56 @@ const WARM_TIP_REQUEST_TIMEOUT_MS = (() => {
 const WARM_TIP_MAX_PARALLEL = 6;
 const WARM_TIP_INPUT_TOKENS = 3000;
 const WARM_TIP_APPROX_CHARS_PER_TOKEN = 3;
-const OBJECT_DETECT_MAX_BYTES = 8 * 1024 * 1024;
-const OBJECT_DETECT_OUTPUT_TOKENS = 1200;
+const OBJECT_DETECT_MAX_BYTES = readPositiveInt(
+  process.env.OBJECT_DETECT_MAX_BYTES,
+  8 * 1024 * 1024,
+  64 * 1024
+);
+const OBJECT_DETECT_OUTPUT_TOKENS = readPositiveInt(process.env.OBJECT_DETECT_OUTPUT_TOKENS, 2700, 600);
+const OBJECT_DETECT_REQUEST_TIMEOUT_MS = readPositiveInt(
+  process.env.OBJECT_DETECT_REQUEST_TIMEOUT_MS,
+  Math.min(WARM_TIP_REQUEST_TIMEOUT_MS, 18000),
+  1000
+);
+const OBJECT_DETECT_MAX_PARALLEL = readPositiveInt(process.env.OBJECT_DETECT_MAX_PARALLEL, 8, 1);
+const OBJECT_DETECT_CACHE_TTL_MS = readPositiveInt(
+  process.env.OBJECT_DETECT_CACHE_TTL_MS,
+  5 * 60 * 1000,
+  1000
+);
+const OBJECT_DETECT_CACHE_MAX_ITEMS = readPositiveInt(
+  process.env.OBJECT_DETECT_CACHE_MAX_ITEMS,
+  800,
+  10
+);
+const OBJECT_DETECT_MAX_MODEL_CANDIDATES = readPositiveInt(
+  process.env.OBJECT_DETECT_MAX_MODEL_CANDIDATES,
+  3,
+  1
+);
+const OBJECT_DETECT_RETRIES = readPositiveInt(process.env.OBJECT_DETECT_RETRIES, 1, 0);
+const OBJECT_DETECT_RETRY_DELAY_MS = readPositiveInt(process.env.OBJECT_DETECT_RETRY_DELAY_MS, 450, 100);
+const OBJECT_DETECT_RETRYABLE_STATUSES = new Set([404, 408, 429, 500, 502, 503, 504]);
+const OBJECT_DETECT_NETWORK_ERROR_CODES = new Set([
+  'ETIMEDOUT',
+  'ECONNRESET',
+  'ECONNABORTED',
+  'ENOTFOUND',
+  'EAI_AGAIN',
+  'EHOSTUNREACH',
+  'ECONNREFUSED',
+]);
+const OBJECT_DETECT_PROMPT = [
+  '\u4f60\u662f\u56fe\u50cf\u8bc6\u522b\u52a9\u624b\u3002',
+  '\u8bf7\u8bc6\u522b\u8fd9\u5f20\u56fe\u7247\u4e2d\u7684\u4e3b\u8981\u7269\u4f53\uff0c\u8f93\u51fa\u4e25\u683c JSON\uff0c\u4e0d\u8981 markdown \u3002',
+  '\u8f93\u51fa schema:',
+  '{"summary":"string","scene":"string","objects":[{"name":"string","confidence":0.0,"attributes":"string","position":"string"}]}',
+  '\u8981\u6c42\uff1a',
+  '1) summary \u7528\u4e2d\u6587\u4e00\u53e5\u8bdd\u6982\u62ec',
+  '2) objects \u53ea\u4fdd\u7559 1-8 \u4e2a\u4e3b\u8981\u7269\u4f53',
+  '3) confidence \u8303\u56f4 0-1\uff0c\u4e0d\u786e\u5b9a\u65f6\u8981\u964d\u4f4e',
+  '4) \u5982\u679c\u96be\u4ee5\u5224\u65ad\uff0c\u5728 summary \u4e2d\u660e\u786e\u8bf4\u660e',
+].join('\n');
 const ENCYCLOPEDIA_QUERY_MAX_LENGTH = 72;
 const ENCYCLOPEDIA_REQUEST_TIMEOUT_MS = 15000;
 
@@ -43,6 +97,10 @@ const warmTipCache = new Map();
 const warmTipInFlight = new Map();
 let warmTipActive = 0;
 const warmTipQueue = [];
+const objectDetectCache = new Map();
+const objectDetectInFlight = new Map();
+let objectDetectActive = 0;
+const objectDetectQueue = [];
 let aiClient = null;
 let aiClientKey = '';
 
@@ -116,8 +174,55 @@ const parseModelJson = (text) => {
     }
   };
 
+  const extractBalancedObject = (value) => {
+    const textValue = String(value || '');
+    let start = -1;
+    let depth = 0;
+    let inString = false;
+    let escaped = false;
+    for (let i = 0; i < textValue.length; i += 1) {
+      const char = textValue[i];
+      if (escaped) {
+        escaped = false;
+        continue;
+      }
+      if (char === '\\') {
+        escaped = true;
+        continue;
+      }
+      if (char === '"') {
+        inString = !inString;
+        continue;
+      }
+      if (inString) continue;
+      if (char === '{') {
+        if (depth === 0) start = i;
+        depth += 1;
+        continue;
+      }
+      if (char === '}') {
+        if (depth <= 0) continue;
+        depth -= 1;
+        if (depth === 0 && start >= 0) {
+          return textValue.slice(start, i + 1);
+        }
+      }
+    }
+    return '';
+  };
+
   const direct = tryParse(noFence);
   if (direct && typeof direct === 'object') return direct;
+  if (typeof direct === 'string') {
+    const parsedDirectString = tryParse(direct);
+    if (parsedDirectString && typeof parsedDirectString === 'object') return parsedDirectString;
+  }
+
+  const balanced = extractBalancedObject(noFence);
+  if (balanced) {
+    const parsedBalanced = tryParse(balanced);
+    if (parsedBalanced && typeof parsedBalanced === 'object') return parsedBalanced;
+  }
 
   const start = noFence.indexOf('{');
   const end = noFence.lastIndexOf('}');
@@ -129,6 +234,12 @@ const parseModelJson = (text) => {
   return null;
 };
 
+const normalizeBase64String = (value) => {
+  const text = String(value || '');
+  if (!text) return '';
+  return /\s/.test(text) ? text.replace(/\s+/g, '') : text;
+};
+
 const parseImageInput = (body = {}) => {
   const fromDataUrl = String(body?.image || body?.imageDataUrl || '').trim();
   if (fromDataUrl.startsWith('data:')) {
@@ -136,12 +247,12 @@ const parseImageInput = (body = {}) => {
     if (matched) {
       return {
         mimeType: String(matched[1] || '').trim().toLowerCase(),
-        base64: String(matched[2] || '').replace(/\s+/g, ''),
+        base64: normalizeBase64String(matched[2]),
       };
     }
   }
 
-  const base64 = String(body?.base64 || body?.imageBase64 || '').replace(/\s+/g, '');
+  const base64 = normalizeBase64String(body?.base64 || body?.imageBase64 || '');
   const mimeType = String(body?.mimeType || body?.mime || 'image/jpeg').trim().toLowerCase();
   if (!base64) return null;
   return { mimeType, base64 };
@@ -175,10 +286,12 @@ const normalizeObjectDetectResult = (parsed, fallbackSummary = '') => {
   };
 };
 
-const buildVisionModelCandidates = (requestedModel) => {
+const buildVisionModelCandidates = (requestedModel, maxCount = OBJECT_DETECT_MAX_MODEL_CANDIDATES) => {
   const preferred = String(requestedModel || '').trim();
   const list = [preferred, ...GEMINI_VISION_MODEL_FALLBACKS].filter(Boolean);
-  return Array.from(new Set(list));
+  const unique = Array.from(new Set(list));
+  const safeMax = Number.isFinite(Number(maxCount)) ? Math.max(1, Math.floor(Number(maxCount))) : unique.length;
+  return unique.slice(0, safeMax);
 };
 
 const stripHtml = (value) =>
@@ -336,6 +449,172 @@ const withWarmTipConcurrency = async (task) =>
     }
     warmTipQueue.push(run);
   });
+
+const buildObjectDetectCacheKey = ({ mimeType, base64 }) => {
+  const hash = crypto.createHash('sha256');
+  hash.update(String(mimeType || 'image/jpeg'));
+  hash.update('|');
+  hash.update(String(base64 || ''));
+  return hash.digest('hex');
+};
+
+const getObjectDetectCacheEntry = (cacheKey) => {
+  const entry = objectDetectCache.get(cacheKey);
+  if (!entry) return null;
+  if (!entry.expiresAtMs || entry.expiresAtMs <= Date.now()) {
+    objectDetectCache.delete(cacheKey);
+    return null;
+  }
+  objectDetectCache.delete(cacheKey);
+  objectDetectCache.set(cacheKey, entry);
+  return entry;
+};
+
+const setObjectDetectCacheEntry = (cacheKey, data) => {
+  objectDetectCache.set(cacheKey, {
+    data,
+    expiresAtMs: Date.now() + OBJECT_DETECT_CACHE_TTL_MS,
+  });
+  while (objectDetectCache.size > OBJECT_DETECT_CACHE_MAX_ITEMS) {
+    const firstKey = objectDetectCache.keys().next().value;
+    if (!firstKey) break;
+    objectDetectCache.delete(firstKey);
+  }
+};
+
+const cleanupObjectDetectCache = () => {
+  const now = Date.now();
+  for (const [cacheKey, entry] of objectDetectCache.entries()) {
+    if (!entry || entry.expiresAtMs <= now) {
+      objectDetectCache.delete(cacheKey);
+    }
+  }
+};
+
+const withObjectDetectConcurrency = async (task) =>
+  new Promise((resolve, reject) => {
+    const run = () => {
+      objectDetectActive += 1;
+      Promise.resolve()
+        .then(task)
+        .then(resolve)
+        .catch(reject)
+        .finally(() => {
+          objectDetectActive = Math.max(0, objectDetectActive - 1);
+          const next = objectDetectQueue.shift();
+          if (next) next();
+        });
+    };
+
+    if (objectDetectActive < OBJECT_DETECT_MAX_PARALLEL) {
+      run();
+      return;
+    }
+    objectDetectQueue.push(run);
+  });
+
+const isObjectDetectRetryableError = (error) => {
+  const status = Number(error?.status || error?.statusCode || 0);
+  if (OBJECT_DETECT_RETRYABLE_STATUSES.has(status)) return true;
+
+  const message = String(error?.message || '').toLowerCase();
+  if (
+    /timeout|fetch failed|sending request|network|socket|temporar|connection/i.test(message)
+  ) {
+    return true;
+  }
+
+  const code = String(error?.code || '').toUpperCase();
+  if (OBJECT_DETECT_NETWORK_ERROR_CODES.has(code)) return true;
+  const causeCode = String(error?.cause?.code || '').toUpperCase();
+  if (OBJECT_DETECT_NETWORK_ERROR_CODES.has(causeCode)) return true;
+  return false;
+};
+
+const mapObjectDetectError = (error) => {
+  const status = Number(error?.status || error?.statusCode || 0);
+  const message = String(error?.message || '');
+  const lower = message.toLowerCase();
+  if (status === 401 || status === 403 || /permission|unauth|api key|credential/i.test(lower)) {
+    return { statusCode: 502, publicMessage: '\u8bc6\u56fe\u670d\u52a1\u8ba4\u8bc1\u5931\u8d25\u3002' };
+  }
+  if (status === 429) {
+    return { statusCode: 503, publicMessage: '\u8bc6\u56fe\u670d\u52a1\u5fd9\uff0c\u8bf7\u7a0d\u540e\u91cd\u8bd5\u3002' };
+  }
+  if (isObjectDetectRetryableError(error)) {
+    return { statusCode: 504, publicMessage: '\u8bc6\u56fe\u670d\u52a1\u7f51\u7edc\u5f02\u5e38\uff0c\u8bf7\u7a0d\u540e\u91cd\u8bd5\u3002' };
+  }
+  return { statusCode: 502, publicMessage: '\u56fe\u50cf\u8bc6\u522b\u670d\u52a1\u4e0d\u53ef\u7528\u3002' };
+};
+
+const detectObjectsByModelCandidates = async ({ ai, modelCandidates, input }) => {
+  let lastError = null;
+
+  for (const model of modelCandidates) {
+    let modelError = null;
+    for (let attempt = 0; attempt <= OBJECT_DETECT_RETRIES; attempt += 1) {
+      try {
+        const response = await withTimeout(
+          ai.models.generateContent({
+            model,
+            contents: [
+              {
+                role: 'user',
+                parts: [
+                  { text: OBJECT_DETECT_PROMPT },
+                  {
+                    inlineData: {
+                      mimeType: input.mimeType,
+                      data: input.base64,
+                    },
+                  },
+                ],
+              },
+            ],
+            config: {
+              temperature: 0.2,
+              maxOutputTokens: OBJECT_DETECT_OUTPUT_TOKENS,
+            },
+          }),
+          OBJECT_DETECT_REQUEST_TIMEOUT_MS,
+          `object-detect generation (${model})`
+        );
+
+        const text = String(response?.text || '').trim() || extractGeminiText(response);
+        const parsed = parseModelJson(text);
+        const data = normalizeObjectDetectResult(parsed || {}, text);
+        return {
+          ...data,
+          model,
+        };
+      } catch (error) {
+        modelError = error;
+        lastError = error;
+        const status = Number(error?.status || 0);
+        const message = String(error?.message || '');
+        const retryable = isObjectDetectRetryableError(error);
+        console.warn('[object-detect] model failed', {
+          model,
+          attempt: attempt + 1,
+          status: status || null,
+          message: message || 'unknown',
+          retryable,
+        });
+        if (!retryable || attempt >= OBJECT_DETECT_RETRIES) {
+          break;
+        }
+        await sleep(OBJECT_DETECT_RETRY_DELAY_MS * (attempt + 1));
+      }
+    }
+    if (modelError && !isObjectDetectRetryableError(modelError)) {
+      break;
+    }
+  }
+
+  throw lastError || new Error('object detect failed');
+};
+
+setInterval(cleanupObjectDetectCache, 60 * 1000).unref?.();
 
 const sanitizeTip = (value) =>
   String(value || '')
@@ -713,82 +992,72 @@ router.post('/object-detect', authenticate, async (req, res) => {
       return;
     }
 
-    const requestedModel = String(process.env.GEMINI_VISION_MODEL || GEMINI_FLASH_PREVIEW_MODEL).trim();
-    const modelCandidates = buildVisionModelCandidates(requestedModel);
-    const prompt = [
-      '\u4f60\u662f\u56fe\u50cf\u8bc6\u522b\u52a9\u624b\u3002',
-      '\u8bf7\u8bc6\u522b\u8fd9\u5f20\u56fe\u7247\u4e2d\u7684\u4e3b\u8981\u7269\u4f53\uff0c\u8f93\u51fa\u4e25\u683c JSON\uff0c\u4e0d\u8981 markdown \u3002',
-      '\u8f93\u51fa schema:',
-      '{"summary":"string","scene":"string","objects":[{"name":"string","confidence":0.0,"attributes":"string","position":"string"}]}',
-      '\u8981\u6c42\uff1a',
-      '1) summary \u7528\u4e2d\u6587\u4e00\u53e5\u8bdd\u6982\u62ec',
-      '2) objects \u53ea\u4fdd\u7559 1-8 \u4e2a\u4e3b\u8981\u7269\u4f53',
-      '3) confidence \u8303\u56f4 0-1\uff0c\u4e0d\u786e\u5b9a\u65f6\u8981\u964d\u4f4e',
-      '4) \u5982\u679c\u96be\u4ee5\u5224\u65ad\uff0c\u5728 summary \u4e2d\u660e\u786e\u8bf4\u660e',
-    ].join('\n');
-    const ai = getAiClient(apiKey);
-    const retryableStatuses = new Set([404, 408, 429, 500, 502, 503, 504]);
-    let lastError = null;
+    const cacheKey = buildObjectDetectCacheKey(input);
+    const cachedEntry = getObjectDetectCacheEntry(cacheKey);
+    if (cachedEntry?.data) {
+      res.json({
+        success: true,
+        data: cachedEntry.data,
+      });
+      return;
+    }
 
-    for (const model of modelCandidates) {
+    const runDetectOnce = async () => {
+      const requestedModel = String(process.env.GEMINI_VISION_MODEL || GEMINI_FLASH_PREVIEW_MODEL).trim();
+      const modelCandidates = buildVisionModelCandidates(requestedModel);
+      const ai = getAiClient(apiKey);
+      return detectObjectsByModelCandidates({
+        ai,
+        modelCandidates,
+        input,
+      });
+    };
+
+    const inFlightTask = objectDetectInFlight.get(cacheKey);
+    if (inFlightTask) {
       try {
-        const response = await withTimeout(
-          ai.models.generateContent({
-            model,
-            contents: [
-              {
-                role: 'user',
-                parts: [
-                  { text: prompt },
-                  {
-                    inlineData: {
-                      mimeType: input.mimeType,
-                      data: input.base64,
-                    },
-                  },
-                ],
-              },
-            ],
-            config: {
-              temperature: 0.2,
-              maxOutputTokens: OBJECT_DETECT_OUTPUT_TOKENS,
-            },
-          }),
-          WARM_TIP_REQUEST_TIMEOUT_MS,
-          `object-detect generation (${model})`
-        );
-
-        const text = String(response?.text || '').trim() || extractGeminiText(response);
-        const parsed = parseModelJson(text);
-        const data = normalizeObjectDetectResult(parsed || {}, text);
+        const dedupData = await inFlightTask;
         res.json({
           success: true,
-          data: {
-            ...data,
-            model,
-          },
+          data: dedupData,
         });
         return;
       } catch (error) {
-        lastError = error;
-        const status = Number(error?.status || 0);
-        const message = String(error?.message || '');
-        console.warn('[object-detect] model failed', {
-          model,
-          status: status || null,
-          message: message || 'unknown',
+        const mapped = mapObjectDetectError(error);
+        res.status(mapped.statusCode).json({
+          success: false,
+          message: mapped.publicMessage,
         });
-        if (!retryableStatuses.has(status)) {
-          break;
-        }
+        return;
       }
     }
 
-    const finalMessage = toShortText(lastError?.message || '', 200);
-    res.status(502).json({
-      success: false,
-      message: finalMessage || '\u56fe\u50cf\u8bc6\u522b\u670d\u52a1\u4e0d\u53ef\u7528\u3002',
-    });
+    const task = withObjectDetectConcurrency(runDetectOnce)
+      .then((data) => {
+        setObjectDetectCacheEntry(cacheKey, data);
+        return data;
+      })
+      .finally(() => {
+        objectDetectInFlight.delete(cacheKey);
+      });
+    objectDetectInFlight.set(cacheKey, task);
+
+    try {
+      const data = await task;
+      res.json({
+        success: true,
+        data,
+      });
+      return;
+    } catch (error) {
+      const mapped = mapObjectDetectError(error);
+      res.status(mapped.statusCode).json({
+        success: false,
+        message: mapped.publicMessage,
+      });
+      return;
+    }
+
   } catch (error) {
     const errorBase = toErrorDetail(error);
     const detail = error && typeof error === 'object' ? error.detail : null;

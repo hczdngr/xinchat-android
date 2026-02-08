@@ -17,22 +17,13 @@ import { pickQrImageForPlatform } from '../utils/pickQrImage';
 import { API_BASE } from '../config';
 import { STORAGE_KEYS } from '../constants/storageKeys';
 import { storage } from '../storage';
+import {
+  normalizeObjectDetectPayload,
+  type ObjectDetectItem,
+  type ObjectDetectPayload,
+} from '../utils/objectDetectNormalize';
 import { normalizeScannedUrl } from './qrUtils';
 import { QR_SCAN_MODE_ITEMS, QR_SCAN_TEXT, type ScanMode } from './qrScanShared';
-
-type ObjectDetectItem = {
-  name?: string;
-  confidence?: number;
-  attributes?: string;
-  position?: string;
-};
-
-type ObjectDetectPayload = {
-  summary?: string;
-  scene?: string;
-  objects?: ObjectDetectItem[];
-  model?: string;
-};
 
 const normalizeBase64 = (value: string) => String(value || '').replace(/\s+/g, '');
 const toFileUri = (value: string) => {
@@ -73,9 +64,12 @@ export default function QRScan() {
   const [arObjects, setArObjects] = useState<ObjectDetectItem[]>([]);
   const [scanMode, setScanMode] = useState<ScanMode>('scan');
   const scanLineAnim = useRef(new Animated.Value(0)).current;
+  const techSpinAnim = useRef(new Animated.Value(0)).current;
+  const techPulseAnim = useRef(new Animated.Value(0)).current;
   const lastTapAtRef = useRef(0);
   const scannedRef = useRef(false);
   const cameraRef = useRef<Camera>(null);
+  const arPending = arRecognizing || (scanMode === 'ar' && albumDecoding);
 
   useEffect(() => {
     if (!hasPermission) {
@@ -107,6 +101,43 @@ export default function QRScan() {
     return () => loop.stop();
   }, [scanLineAnim]);
 
+  useEffect(() => {
+    if (!arPending) {
+      techSpinAnim.stopAnimation();
+      techPulseAnim.stopAnimation();
+      techSpinAnim.setValue(0);
+      techPulseAnim.setValue(0);
+      return undefined;
+    }
+    const spinLoop = Animated.loop(
+      Animated.timing(techSpinAnim, {
+        toValue: 1,
+        duration: 2200,
+        useNativeDriver: true,
+      })
+    );
+    const pulseLoop = Animated.loop(
+      Animated.sequence([
+        Animated.timing(techPulseAnim, {
+          toValue: 1,
+          duration: 900,
+          useNativeDriver: true,
+        }),
+        Animated.timing(techPulseAnim, {
+          toValue: 0,
+          duration: 900,
+          useNativeDriver: true,
+        }),
+      ])
+    );
+    spinLoop.start();
+    pulseLoop.start();
+    return () => {
+      spinLoop.stop();
+      pulseLoop.stop();
+    };
+  }, [arPending, techPulseAnim, techSpinAnim]);
+
   const lineTranslateY = useMemo(
     () =>
       scanLineAnim.interpolate({
@@ -114,6 +145,46 @@ export default function QRScan() {
         outputRange: [0, Math.max(scanAreaHeight - 2, 1)],
       }),
     [scanAreaHeight, scanLineAnim]
+  );
+  const techRotate = useMemo(
+    () =>
+      techSpinAnim.interpolate({
+        inputRange: [0, 1],
+        outputRange: ['0deg', '360deg'],
+      }),
+    [techSpinAnim]
+  );
+  const techRotateReverse = useMemo(
+    () =>
+      techSpinAnim.interpolate({
+        inputRange: [0, 1],
+        outputRange: ['360deg', '0deg'],
+      }),
+    [techSpinAnim]
+  );
+  const techSweepTranslateX = useMemo(
+    () =>
+      techSpinAnim.interpolate({
+        inputRange: [0, 1],
+        outputRange: [-120, 120],
+      }),
+    [techSpinAnim]
+  );
+  const techPulseScale = useMemo(
+    () =>
+      techPulseAnim.interpolate({
+        inputRange: [0, 1],
+        outputRange: [0.86, 1.24],
+      }),
+    [techPulseAnim]
+  );
+  const techPulseOpacity = useMemo(
+    () =>
+      techPulseAnim.interpolate({
+        inputRange: [0, 1],
+        outputRange: [0.32, 0.68],
+      }),
+    [techPulseAnim]
   );
 
   const effectiveZoom = useMemo(() => {
@@ -162,13 +233,14 @@ export default function QRScan() {
     if (!response.ok || !data?.success || !data?.data) {
       throw new Error(String(data?.message || QR_SCAN_TEXT.arRecognizeFailed));
     }
-    return data.data as ObjectDetectPayload;
+    return normalizeObjectDetectPayload(data.data);
   }, []);
 
-  const applyArResult = useCallback((result: ObjectDetectPayload) => {
-    const summary = String(result?.summary || '').trim();
-    const scene = String(result?.scene || '').trim();
-    const objects = Array.isArray(result?.objects) ? result.objects : [];
+  const applyArResult = useCallback((rawResult: ObjectDetectPayload) => {
+    const result = normalizeObjectDetectPayload(rawResult);
+    const summary = String(result.summary || '').trim();
+    const scene = String(result.scene || '').trim();
+    const objects = Array.isArray(result.objects) ? result.objects : [];
     setArSummary(summary);
     setArScene(scene);
     setArObjects(objects);
@@ -179,18 +251,20 @@ export default function QRScan() {
     setStatusText('');
   }, []);
 
-  const buildInsightQuery = useCallback((result: ObjectDetectPayload) => {
-    const firstObjectName = (Array.isArray(result?.objects) ? result.objects : [])
+  const buildInsightQuery = useCallback((rawResult: ObjectDetectPayload) => {
+    const result = normalizeObjectDetectPayload(rawResult);
+    const firstObjectName = (Array.isArray(result.objects) ? result.objects : [])
       .map((item) => String(item?.name || '').trim())
       .find(Boolean);
     if (firstObjectName) return firstObjectName;
-    const summary = String(result?.summary || '').replace(/\s+/g, ' ').trim();
+    const summary = String(result.summary || '').replace(/\s+/g, ' ').trim();
     if (!summary) return '';
     return summary.replace(/[。！？.!?].*$/, '').slice(0, 48).trim();
   }, []);
 
   const openInsightPage = useCallback(
-    (result: ObjectDetectPayload, imageUri: string) => {
+    (rawResult: ObjectDetectPayload, imageUri: string) => {
+      const result = normalizeObjectDetectPayload(rawResult);
       const query = buildInsightQuery(result);
       if (!query) {
         setStatusText(QR_SCAN_TEXT.albumNoObjectDetected);
@@ -199,9 +273,9 @@ export default function QRScan() {
       navigation.navigate('ObjectInsight', {
         query,
         imageUri: String(imageUri || '').trim(),
-        detectSummary: String(result?.summary || ''),
-        detectScene: String(result?.scene || ''),
-        detectObjects: Array.isArray(result?.objects) ? result.objects : [],
+        detectSummary: String(result.summary || ''),
+        detectScene: String(result.scene || ''),
+        detectObjects: Array.isArray(result.objects) ? result.objects : [],
       });
     },
     [buildInsightQuery, navigation]
@@ -431,6 +505,53 @@ export default function QRScan() {
           </Text>
         </Pressable>
       </View>
+
+      {arPending ? (
+        <View style={styles.pendingOverlay} pointerEvents="auto">
+          <View style={styles.pendingGrid} />
+          <View style={styles.pendingVignette} />
+          <View style={styles.pendingCenterWrap}>
+            <View style={styles.pendingRadar}>
+              <Animated.View
+                style={[
+                  styles.pendingPulse,
+                  {
+                    opacity: techPulseOpacity,
+                    transform: [{ scale: techPulseScale }],
+                  },
+                ]}
+              />
+              <Animated.View
+                style={[
+                  styles.pendingRingOuter,
+                  {
+                    transform: [{ rotate: techRotate }],
+                  },
+                ]}
+              />
+              <Animated.View
+                style={[
+                  styles.pendingRingInner,
+                  {
+                    transform: [{ rotate: techRotateReverse }],
+                  },
+                ]}
+              />
+              <Animated.View
+                style={[
+                  styles.pendingSweep,
+                  {
+                    transform: [{ translateX: techSweepTranslateX }, { rotate: '25deg' }],
+                  },
+                ]}
+              />
+              <View style={styles.pendingCore} />
+            </View>
+            <Text style={styles.pendingTitle}>AI Vision Scanning</Text>
+            <Text style={styles.pendingSubtitle}>{QR_SCAN_TEXT.arRecognizing}</Text>
+          </View>
+        </View>
+      ) : null}
     </View>
   );
 }
@@ -621,6 +742,94 @@ const styles = StyleSheet.create({
     color: '#fff',
     fontSize: 14,
     fontWeight: '600',
+  },
+  pendingOverlay: {
+    ...StyleSheet.absoluteFillObject,
+    zIndex: 40,
+    backgroundColor: 'rgba(3, 10, 20, 0.84)',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  pendingGrid: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: 'rgba(16, 63, 112, 0.14)',
+  },
+  pendingVignette: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: 'rgba(0, 0, 0, 0.34)',
+  },
+  pendingCenterWrap: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 10,
+  },
+  pendingRadar: {
+    width: 196,
+    height: 196,
+    borderRadius: 98,
+    borderWidth: 1,
+    borderColor: 'rgba(111, 194, 255, 0.42)',
+    backgroundColor: 'rgba(7, 28, 53, 0.78)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    overflow: 'hidden',
+  },
+  pendingPulse: {
+    position: 'absolute',
+    width: 176,
+    height: 176,
+    borderRadius: 88,
+    borderWidth: 1,
+    borderColor: 'rgba(99, 202, 255, 0.7)',
+    backgroundColor: 'rgba(79, 169, 255, 0.08)',
+  },
+  pendingRingOuter: {
+    position: 'absolute',
+    width: 162,
+    height: 162,
+    borderRadius: 81,
+    borderWidth: 2,
+    borderColor: 'rgba(94, 211, 255, 0.86)',
+    borderStyle: 'dashed',
+  },
+  pendingRingInner: {
+    position: 'absolute',
+    width: 122,
+    height: 122,
+    borderRadius: 61,
+    borderWidth: 1,
+    borderColor: 'rgba(110, 169, 255, 0.76)',
+    borderStyle: 'dashed',
+  },
+  pendingSweep: {
+    position: 'absolute',
+    width: 120,
+    height: 200,
+    backgroundColor: 'rgba(109, 226, 255, 0.13)',
+  },
+  pendingCore: {
+    width: 22,
+    height: 22,
+    borderRadius: 11,
+    backgroundColor: '#8ddfff',
+    borderWidth: 1,
+    borderColor: 'rgba(219, 246, 255, 0.95)',
+    shadowColor: '#6ed6ff',
+    shadowOpacity: 0.75,
+    shadowRadius: 14,
+    elevation: 8,
+  },
+  pendingTitle: {
+    marginTop: 8,
+    color: '#bdeeff',
+    fontSize: 18,
+    fontWeight: '700',
+    letterSpacing: 0.6,
+  },
+  pendingSubtitle: {
+    color: '#8cc7e8',
+    fontSize: 13,
+    letterSpacing: 0.4,
   },
 });
 

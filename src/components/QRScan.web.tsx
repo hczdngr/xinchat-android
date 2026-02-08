@@ -6,6 +6,11 @@ import { pickQrImageForPlatform } from '../utils/pickQrImage';
 import { API_BASE } from '../config';
 import { STORAGE_KEYS } from '../constants/storageKeys';
 import { storage } from '../storage';
+import {
+  normalizeObjectDetectPayload,
+  type ObjectDetectItem,
+  type ObjectDetectPayload,
+} from '../utils/objectDetectNormalize';
 import { normalizeScannedUrl } from './qrUtils';
 import { QR_SCAN_MODE_ITEMS, QR_SCAN_TEXT, type ScanMode } from './qrScanShared';
 
@@ -48,20 +53,6 @@ const ALBUM_STEPS: readonly DecodeStep[] = [
   },
 ];
 
-type ObjectDetectItem = {
-  name?: string;
-  confidence?: number;
-  attributes?: string;
-  position?: string;
-};
-
-type ObjectDetectPayload = {
-  summary?: string;
-  scene?: string;
-  objects?: ObjectDetectItem[];
-  model?: string;
-};
-
 type InsightImage = {
   mimeType: string;
   base64: string;
@@ -88,6 +79,7 @@ export default function QRScanWeb() {
   const [arScene, setArScene] = useState('');
   const [arObjects, setArObjects] = useState<ObjectDetectItem[]>([]);
   const [scanMode, setScanMode] = useState<ScanMode>('scan');
+  const arPending = arRecognizing || (scanMode === 'ar' && albumDecoding);
 
   const scanFrameStyle = useMemo(
     () => ({
@@ -155,13 +147,14 @@ export default function QRScanWeb() {
     if (!response.ok || !data?.success || !data?.data) {
       throw new Error(String(data?.message || QR_SCAN_TEXT.arRecognizeFailed));
     }
-    return data.data as ObjectDetectPayload;
+    return normalizeObjectDetectPayload(data.data);
   }, []);
 
-  const applyArResult = useCallback((result: ObjectDetectPayload) => {
-    const summary = String(result?.summary || '').trim();
-    const scene = String(result?.scene || '').trim();
-    const objects = Array.isArray(result?.objects) ? result.objects : [];
+  const applyArResult = useCallback((rawResult: ObjectDetectPayload) => {
+    const result = normalizeObjectDetectPayload(rawResult);
+    const summary = String(result.summary || '').trim();
+    const scene = String(result.scene || '').trim();
+    const objects = Array.isArray(result.objects) ? result.objects : [];
     setArSummary(summary);
     setArScene(scene);
     setArObjects(objects);
@@ -172,18 +165,20 @@ export default function QRScanWeb() {
     setStatusText('');
   }, []);
 
-  const buildInsightQuery = useCallback((result: ObjectDetectPayload) => {
-    const firstObjectName = (Array.isArray(result?.objects) ? result.objects : [])
+  const buildInsightQuery = useCallback((rawResult: ObjectDetectPayload) => {
+    const result = normalizeObjectDetectPayload(rawResult);
+    const firstObjectName = (Array.isArray(result.objects) ? result.objects : [])
       .map((item) => String(item?.name || '').trim())
       .find(Boolean);
     if (firstObjectName) return firstObjectName;
-    const summary = String(result?.summary || '').replace(/\s+/g, ' ').trim();
+    const summary = String(result.summary || '').replace(/\s+/g, ' ').trim();
     if (!summary) return '';
     return summary.replace(/[。！？.!?].*$/, '').slice(0, 48).trim();
   }, []);
 
   const openInsightPage = useCallback(
-    (result: ObjectDetectPayload, image: InsightImage | null) => {
+    (rawResult: ObjectDetectPayload, image: InsightImage | null) => {
+      const result = normalizeObjectDetectPayload(rawResult);
       const query = buildInsightQuery(result);
       if (!query) {
         setStatusText(QR_SCAN_TEXT.albumNoObjectDetected);
@@ -196,9 +191,9 @@ export default function QRScanWeb() {
       navigation.navigate('ObjectInsight', {
         query,
         imageUri,
-        detectSummary: String(result?.summary || ''),
-        detectScene: String(result?.scene || ''),
-        detectObjects: Array.isArray(result?.objects) ? result.objects : [],
+        detectSummary: String(result.summary || ''),
+        detectScene: String(result.scene || ''),
+        detectObjects: Array.isArray(result.objects) ? result.objects : [],
       });
     },
     [buildInsightQuery, navigation]
@@ -554,6 +549,24 @@ export default function QRScanWeb() {
           </div>
         </button>
       </div>
+
+      {arPending ? (
+        <div style={styles.pendingOverlay}>
+          <div style={styles.pendingGrid} />
+          <div style={styles.pendingVignette} />
+          <div style={styles.pendingCenter}>
+            <div style={styles.pendingPulse} />
+            <div style={styles.pendingRingOuter} />
+            <div style={styles.pendingRingInner} />
+            <div style={styles.pendingSweepWrap}>
+              <div style={styles.pendingSweepLine} />
+            </div>
+            <div style={styles.pendingCore} />
+          </div>
+          <div style={styles.pendingTitle}>AI Vision Scanning</div>
+          <div style={styles.pendingSubtitle}>{QR_SCAN_TEXT.arRecognizing}</div>
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -754,6 +767,103 @@ const styles: Record<string, React.CSSProperties> = {
   hiddenCanvas: {
     display: 'none',
   },
+  pendingOverlay: {
+    position: 'absolute',
+    inset: 0,
+    zIndex: 60,
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    background: 'rgba(3, 10, 20, 0.84)',
+    pointerEvents: 'auto',
+  },
+  pendingGrid: {
+    position: 'absolute',
+    inset: 0,
+    background:
+      'linear-gradient(rgba(74, 154, 220, 0.08) 1px, transparent 1px), linear-gradient(90deg, rgba(74, 154, 220, 0.08) 1px, transparent 1px)',
+    backgroundSize: '28px 28px',
+  },
+  pendingVignette: {
+    position: 'absolute',
+    inset: 0,
+    background:
+      'radial-gradient(circle at center, rgba(10, 27, 48, 0.08) 0%, rgba(1, 6, 14, 0.65) 70%, rgba(0, 0, 0, 0.84) 100%)',
+  },
+  pendingCenter: {
+    position: 'relative',
+    width: 208,
+    height: 208,
+    borderRadius: 104,
+    border: '1px solid rgba(111, 194, 255, 0.42)',
+    background: 'rgba(7, 28, 53, 0.78)',
+    overflow: 'hidden',
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  pendingPulse: {
+    position: 'absolute',
+    width: 186,
+    height: 186,
+    borderRadius: 93,
+    border: '1px solid rgba(99, 202, 255, 0.72)',
+    background: 'rgba(79, 169, 255, 0.08)',
+    animation: 'xinchat-ar-pulse 1.8s ease-in-out infinite',
+  },
+  pendingRingOuter: {
+    position: 'absolute',
+    width: 168,
+    height: 168,
+    borderRadius: 84,
+    border: '2px dashed rgba(94, 211, 255, 0.86)',
+    animation: 'xinchat-ar-spin 2.2s linear infinite',
+  },
+  pendingRingInner: {
+    position: 'absolute',
+    width: 126,
+    height: 126,
+    borderRadius: 63,
+    border: '1px dashed rgba(110, 169, 255, 0.76)',
+    animation: 'xinchat-ar-spin-reverse 2s linear infinite',
+  },
+  pendingSweepWrap: {
+    position: 'absolute',
+    inset: 0,
+    overflow: 'hidden',
+  },
+  pendingSweepLine: {
+    position: 'absolute',
+    top: -20,
+    left: 50,
+    width: 120,
+    height: 260,
+    background: 'rgba(109, 226, 255, 0.13)',
+    transform: 'rotate(25deg)',
+    animation: 'xinchat-ar-sweep 1.75s linear infinite',
+  },
+  pendingCore: {
+    width: 22,
+    height: 22,
+    borderRadius: 11,
+    background: '#8ddfff',
+    border: '1px solid rgba(219, 246, 255, 0.95)',
+    boxShadow: '0 0 18px rgba(110, 214, 255, 0.8)',
+    zIndex: 2,
+  },
+  pendingTitle: {
+    marginTop: 18,
+    color: '#bdeeff',
+    fontSize: 18,
+    fontWeight: 700,
+    letterSpacing: '0.6px',
+  },
+  pendingSubtitle: {
+    marginTop: 7,
+    color: '#8cc7e8',
+    fontSize: 13,
+    letterSpacing: '0.4px',
+  },
 };
 
 function MyQrIcon() {
@@ -804,6 +914,23 @@ if (typeof document !== 'undefined') {
       @keyframes xinchat-scanline {
         0% { transform: translateY(0); }
         100% { transform: translateY(258px); }
+      }
+      @keyframes xinchat-ar-spin {
+        0% { transform: rotate(0deg); }
+        100% { transform: rotate(360deg); }
+      }
+      @keyframes xinchat-ar-spin-reverse {
+        0% { transform: rotate(360deg); }
+        100% { transform: rotate(0deg); }
+      }
+      @keyframes xinchat-ar-pulse {
+        0% { transform: scale(0.86); opacity: 0.32; }
+        50% { transform: scale(1.24); opacity: 0.68; }
+        100% { transform: scale(0.86); opacity: 0.32; }
+      }
+      @keyframes xinchat-ar-sweep {
+        0% { transform: translateX(-120px) rotate(25deg); }
+        100% { transform: translateX(120px) rotate(25deg); }
       }
     `;
     document.head.appendChild(style);
