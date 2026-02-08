@@ -129,6 +129,7 @@ export default function GroupChatSettings() {
     normalizeGroup(route.params?.group)
   );
   const [qrVisible, setQrVisible] = useState(false);
+  const [leaveConfirmVisible, setLeaveConfirmVisible] = useState(false);
   const [editorVisible, setEditorVisible] = useState(false);
   const [editorTitle, setEditorTitle] = useState('');
   const [editorPlaceholder, setEditorPlaceholder] = useState('');
@@ -472,8 +473,13 @@ export default function GroupChatSettings() {
     ]);
   }, [deleteChatHistory, ready, uid]);
 
-  const onLeaveGroup = useCallback(async () => {
-    if (!ready || leaving || uid <= 0) return;
+  const confirmLeaveGroup = useCallback(async () => {
+    if (leaving) return;
+    if (!Number.isInteger(uid) || uid <= 0) {
+      Alert.alert('退出失败', '群ID无效。');
+      return;
+    }
+    setLeaveConfirmVisible(false);
     const commitLeave = async () => {
       await clearLocalGroupCaches();
       await storage.setJson(STORAGE_KEYS.pendingChatSettingsAction, {
@@ -483,43 +489,43 @@ export default function GroupChatSettings() {
       });
       navigation.goBack();
     };
-    Alert.alert('退出该群', '确认退出当前群聊？', [
-      { text: '取消', style: 'cancel' },
-      {
-        text: '退出',
-        style: 'destructive',
-        onPress: async () => {
-          const token = (await storage.getString(STORAGE_KEYS.token)) || '';
-          if (!token) {
-            Alert.alert('操作失败', '请先登录后再试。');
-            return;
-          }
-          setLeaving(true);
-          try {
-            const response = await fetch(`${API_BASE}/api/groups/leave`, {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-              body: JSON.stringify({ groupId: uid }),
-            });
-            const data = await response.json().catch(() => ({}));
-            if (!response.ok || !data?.success) {
-              if (response.status === 404 || response.status === 403) {
-                await commitLeave();
-                return;
-              }
-              Alert.alert('退出失败', data?.message || '请稍后重试。');
-              return;
-            }
-            await commitLeave();
-          } catch {
-            Alert.alert('退出失败', '网络异常，请稍后重试。');
-          } finally {
-            setLeaving(false);
-          }
-        },
-      },
-    ]);
-  }, [clearLocalGroupCaches, leaving, navigation, ready, uid]);
+    const token = (await storage.getString(STORAGE_KEYS.token)) || '';
+    if (!token) {
+      Alert.alert('操作失败', '请先登录后再试。');
+      return;
+    }
+    setLeaving(true);
+    try {
+      const response = await fetch(`${API_BASE}/api/groups/leave`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ groupId: uid }),
+      });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok || !data?.success) {
+        if (response.status === 404 || response.status === 403) {
+          await commitLeave();
+          return;
+        }
+        Alert.alert('退出失败', data?.message || '请稍后重试。');
+        return;
+      }
+      await commitLeave();
+    } catch {
+      Alert.alert('退出失败', '网络异常，请稍后重试。');
+    } finally {
+      setLeaving(false);
+    }
+  }, [clearLocalGroupCaches, leaving, navigation, uid]);
+
+  const onLeaveGroup = useCallback(() => {
+    if (leaving) return;
+    if (!Number.isInteger(uid) || uid <= 0) {
+      Alert.alert('退出失败', '群ID无效。');
+      return;
+    }
+    setLeaveConfirmVisible(true);
+  }, [leaving, uid]);
 
   return (
     <View style={[styles.page, { paddingTop: insets.top }]}>
@@ -711,6 +717,47 @@ export default function GroupChatSettings() {
             <Pressable style={styles.qrCloseBtn} onPress={() => setQrVisible(false)}>
               <Text style={styles.qrCloseText}>关闭</Text>
             </Pressable>
+          </Pressable>
+        </Pressable>
+      </Modal>
+
+      <Modal
+        transparent
+        visible={leaveConfirmVisible}
+        animationType="fade"
+        onRequestClose={() => {
+          if (leaving) return;
+          setLeaveConfirmVisible(false);
+        }}
+      >
+        <Pressable
+          style={styles.modalMask}
+          onPress={() => {
+            if (leaving) return;
+            setLeaveConfirmVisible(false);
+          }}
+        >
+          <Pressable style={styles.leaveConfirmCard} onPress={() => undefined}>
+            <Text style={styles.leaveConfirmTitle}>退出该群</Text>
+            <Text style={styles.leaveConfirmDesc}>确认退出当前群聊？</Text>
+            <View style={styles.leaveConfirmActions}>
+              <Pressable
+                style={styles.leaveConfirmBtn}
+                onPress={() => setLeaveConfirmVisible(false)}
+                disabled={leaving}
+              >
+                <Text style={styles.leaveConfirmBtnText}>取消</Text>
+              </Pressable>
+              <Pressable
+                style={[styles.leaveConfirmBtn, styles.leaveConfirmDangerBtn]}
+                onPress={() => {
+                  confirmLeaveGroup().catch(() => undefined);
+                }}
+                disabled={leaving}
+              >
+                <Text style={styles.leaveConfirmDangerText}>{leaving ? '退出中...' : '确认'}</Text>
+              </Pressable>
+            </View>
           </Pressable>
         </Pressable>
       </Modal>
@@ -1035,6 +1082,60 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
     paddingHorizontal: 18,
+  },
+  leaveConfirmCard: {
+    width: '100%',
+    maxWidth: 340,
+    borderRadius: 14,
+    backgroundColor: '#f8fbff',
+    borderWidth: 1,
+    borderColor: '#dce9f8',
+    paddingHorizontal: 16,
+    paddingTop: 14,
+    paddingBottom: 12,
+    gap: 10,
+  },
+  leaveConfirmTitle: {
+    fontSize: 17,
+    color: '#24364a',
+    fontWeight: '700',
+  },
+  leaveConfirmDesc: {
+    fontSize: 14,
+    color: '#5e6f84',
+    lineHeight: 20,
+  },
+  leaveConfirmActions: {
+    flexDirection: 'row',
+    justifyContent: 'flex-end',
+    alignItems: 'center',
+    gap: 8,
+    marginTop: 2,
+  },
+  leaveConfirmBtn: {
+    minWidth: 72,
+    height: 34,
+    borderRadius: 9,
+    paddingHorizontal: 12,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#edf3fb',
+    borderWidth: 1,
+    borderColor: '#d5e1f0',
+  },
+  leaveConfirmBtnText: {
+    fontSize: 14,
+    color: '#49607a',
+    fontWeight: '500',
+  },
+  leaveConfirmDangerBtn: {
+    backgroundColor: '#eaf4ff',
+    borderColor: '#bddaff',
+  },
+  leaveConfirmDangerText: {
+    fontSize: 14,
+    color: '#2e86f6',
+    fontWeight: '600',
   },
   qrCard: {
     width: '100%',

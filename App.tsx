@@ -7,6 +7,7 @@ import Home from './src/components/Home';
 import Login from './src/components/Login';
 import Register from './src/components/Register';
 import Profile from './src/components/Profile';
+import UserCenter from './src/components/UserCenter';
 import FriendProfile from './src/components/FriendProfile';
 import EditProfile from './src/components/EditProfile';
 import QRScan from './src/components/QRScan';
@@ -424,6 +425,15 @@ function App() {
               >
                 <Stack.Screen name="Home">
                   {() => <Home profile={profile} />}
+                </Stack.Screen>
+                <Stack.Screen name="UserCenter">
+                  {({ navigation, route }) => (
+                    <UserCenter
+                      profile={{ ...profile, ...(route.params?.profile || {}) }}
+                      onBack={() => navigation.goBack()}
+                      onOpenProfile={() => navigation.navigate('Profile')}
+                    />
+                  )}
                 </Stack.Screen>
                 <Stack.Screen name="Profile">
                   {({ navigation }) => (

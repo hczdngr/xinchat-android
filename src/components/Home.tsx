@@ -1,5 +1,6 @@
 ﻿import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
+  Alert,
   AppState,
   Animated,
   BackHandler,
@@ -13,6 +14,7 @@ import {
   StyleSheet,
   Text,
   TextInput,
+  useWindowDimensions,
   View,
   type ViewStyle,
 } from 'react-native';
@@ -36,6 +38,19 @@ import {
   ensureSystemNotificationPermission,
   notifyIncomingSystemMessage,
 } from '../utils/systemNotification';
+import {
+  cancelVoiceRecording,
+  isVoiceRecordingSupported,
+  revokeVoiceRecordingUri,
+  startVoiceRecording,
+  stopVoiceRecording,
+  type VoiceRecordingResult,
+} from '../utils/voiceRecorder';
+import {
+  isVoicePlaybackSupported,
+  playVoicePlayback,
+  stopVoicePlayback,
+} from '../utils/voicePlayer';
 
 type Profile = {
   uid?: number;
@@ -81,6 +96,8 @@ type Message = {
   targetType: string;
   content: string;
   imageUrl?: string;
+  voiceUrl?: string;
+  voiceDurationSec?: number;
   createdAt: string;
   createdAtMs: number;
   raw?: any;
@@ -132,6 +149,7 @@ type EmojiTabItem = {
   label: string;
   icon: string;
 };
+type VoiceGestureAction = 'send' | 'transcribe' | 'cancel';
 type CustomSticker = {
   hash: string;
   url: string;
@@ -157,6 +175,10 @@ const SEARCH_MAX_CHAT_HITS = 120;
 const EDGE_BACK_HIT_WIDTH = 28;
 const EDGE_BACK_DISTANCE = 96;
 const EDGE_BACK_VELOCITY = 0.55;
+const VOICE_SWIPE_THRESHOLD = 62;
+const MIN_VOICE_DURATION_MS = 500;
+const VOICE_PLAYBACK_DEFAULT_MS = 6000;
+const VOICE_PLAYBACK_BUFFER_MS = 420;
 const MAX_RECENT_EMOJIS = 14;
 const MAX_STICKER_BATCH_PICK = 9;
 const MAX_CHAT_IMAGE_PICK = 9;
@@ -808,6 +830,7 @@ const getGroupDisplayName = (group?: Partial<Group> | null) => {
 
 export default function Home({ profile }: { profile: Profile }) {
   const insets = useSafeAreaInsets();
+  const { height: windowHeight } = useWindowDimensions();
   const navPad = Math.min(insets.bottom, 6);
   const tokenRef = useRef<string>('');
   const [tokenReady, setTokenReady] = useState(false);
@@ -856,6 +879,13 @@ export default function Home({ profile }: { profile: Profile }) {
   const [customStickers, setCustomStickers] = useState<CustomSticker[]>([]);
   const [customStickerUploading, setCustomStickerUploading] = useState(false);
   const [chatImageSending, setChatImageSending] = useState(false);
+  const [voicePanelVisible, setVoicePanelVisible] = useState(false);
+  const [voiceRecording, setVoiceRecording] = useState(false);
+  const [voiceProcessing, setVoiceProcessing] = useState(false);
+  const [voiceGestureAction, setVoiceGestureAction] = useState<VoiceGestureAction>('send');
+  const [voiceElapsedSec, setVoiceElapsedSec] = useState(0);
+  const [voiceStatusText, setVoiceStatusText] = useState('按住开始录制语音');
+  const [playingVoiceMessageId, setPlayingVoiceMessageId] = useState<string>('');
   const [activeView, setActiveView] = useState<'list' | 'found'>('list');
   const [foundFriendsInitialTab, setFoundFriendsInitialTab] = useState<'search' | 'requests'>(
     'search'
@@ -984,6 +1014,17 @@ export default function Home({ profile }: { profile: Profile }) {
   const homeCacheHydratedRef = useRef(false);
   const recentEmojisRef = useRef<string[]>(DEFAULT_RECENT_EMOJIS);
   const pendingRecentEmojisRef = useRef<string[] | null>(null);
+  const voicePanelVisibleRef = useRef(false);
+  const voiceHoldStartXRef = useRef<number | null>(null);
+  const voiceRecordingStartedAtMsRef = useRef(0);
+  const voiceRecordingTickerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const voiceFinishInFlightRef = useRef(false);
+  const voiceKeyboardHoldingRef = useRef(false);
+  const voiceRecordingRef = useRef(false);
+  const voiceGestureActionRef = useRef<VoiceGestureAction>('send');
+  const playingVoiceMessageIdRef = useRef('');
+  const voicePlaybackSessionRef = useRef(0);
+  const voicePlaybackTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
     if (!activeChatUid) {
@@ -1189,6 +1230,10 @@ export default function Home({ profile }: { profile: Profile }) {
     return encodeURI(`${avatarUrl}${joiner}v=${encodeURIComponent(avatarVersion)}`);
   }, [avatarUrl, avatarVersion]);
   const avatarText = useMemo(() => displayName.slice(0, 2), [displayName]);
+  const voicePanelHeight = useMemo(() => {
+    const ideal = Math.round(windowHeight * 0.42);
+    return Math.max(260, Math.min(390, ideal));
+  }, [windowHeight]);
   const canShowMainHome = !activeChatUid && activeView !== 'found';
   const currentTourStep = tourSteps[tourStepIndex] || null;
   const quickMenuPanelAnimatedStyle = useMemo(
@@ -1288,6 +1333,22 @@ export default function Home({ profile }: { profile: Profile }) {
   useEffect(() => {
     recentEmojisRef.current = recentEmojis;
   }, [recentEmojis]);
+
+  useEffect(() => {
+    voicePanelVisibleRef.current = voicePanelVisible;
+  }, [voicePanelVisible]);
+
+  useEffect(() => {
+    voiceRecordingRef.current = voiceRecording;
+  }, [voiceRecording]);
+
+  useEffect(() => {
+    voiceGestureActionRef.current = voiceGestureAction;
+  }, [voiceGestureAction]);
+
+  useEffect(() => {
+    playingVoiceMessageIdRef.current = playingVoiceMessageId;
+  }, [playingVoiceMessageId]);
   useEffect(() => {
     if (emojiPanelVisible) return;
     const pending = pendingRecentEmojisRef.current;
@@ -1492,15 +1553,27 @@ export default function Home({ profile }: { profile: Profile }) {
         ? entry.data.urls[0]
         : '';
     const imageUrl = type === 'image' ? normalizeImageUrl(directUrl || firstUrl) : '';
+    const voiceUrl = type === 'voice' ? normalizeImageUrl(directUrl || firstUrl) : '';
+    const rawVoiceDurationMs = Number(entry?.data?.durationMs || entry?.data?.duration || 0);
     const textContent = entry?.data?.content || entry?.data?.text || '';
+    const contentDurationMatch = String(textContent).match(/(\d+)\s*s/i);
+    const durationFromContent = contentDurationMatch ? Number(contentDurationMatch[1]) : 0;
+    const voiceDurationSec = Number.isFinite(rawVoiceDurationMs) && rawVoiceDurationMs > 0
+      ? Math.max(0, Math.round(rawVoiceDurationMs / 1000))
+      : Number.isFinite(durationFromContent)
+        ? Math.max(0, Math.round(durationFromContent))
+        : 0;
+    const defaultVoiceText = voiceDurationSec > 0 ? `[语音 ${voiceDurationSec}s]` : '[语音]';
     return {
       id: entry.id,
       type,
       senderUid: entry.senderUid,
       targetUid: entry.targetUid,
       targetType: entry.targetType,
-      content: textContent || (type === 'image' ? '[图片]' : ''),
+      content: textContent || (type === 'image' ? '[图片]' : type === 'voice' ? defaultVoiceText : ''),
       imageUrl,
+      voiceUrl,
+      voiceDurationSec,
       createdAt,
       createdAtMs: parsedMs,
       raw: entry,
@@ -1757,7 +1830,6 @@ export default function Home({ profile }: { profile: Profile }) {
         const params = new URLSearchParams({
           targetType,
           targetUid: String(uid),
-          type: 'text',
           limit: String(PAGE_LIMIT),
         });
         if (beforeId) {
@@ -1967,10 +2039,53 @@ export default function Home({ profile }: { profile: Profile }) {
     [navigation]
   );
 
+  const openUserCenter = useCallback(() => {
+    navigation.navigate('UserCenter', {
+      profile: {
+        uid: profileData.uid,
+        username: profileData.username,
+        nickname: profileData.nickname,
+        avatar: profileData.avatar,
+        signature: profileData.signature,
+      },
+    });
+  }, [
+    navigation,
+    profileData.avatar,
+    profileData.nickname,
+    profileData.signature,
+    profileData.uid,
+    profileData.username,
+  ]);
+
   const closeChat = useCallback(() => {
     if (activeChatUidRef.current) {
       markChatRead(activeChatUidRef.current);
     }
+    if (voiceRecordingTickerRef.current) {
+      clearInterval(voiceRecordingTickerRef.current);
+      voiceRecordingTickerRef.current = null;
+    }
+    cancelVoiceRecording().catch(() => undefined);
+    voiceFinishInFlightRef.current = false;
+    voiceRecordingRef.current = false;
+    voiceGestureActionRef.current = 'send';
+    voiceHoldStartXRef.current = null;
+    voiceRecordingStartedAtMsRef.current = 0;
+    voiceKeyboardHoldingRef.current = false;
+    voicePlaybackSessionRef.current += 1;
+    if (voicePlaybackTimerRef.current) {
+      clearTimeout(voicePlaybackTimerRef.current);
+      voicePlaybackTimerRef.current = null;
+    }
+    stopVoicePlayback().catch(() => undefined);
+    setPlayingVoiceMessageId('');
+    playingVoiceMessageIdRef.current = '';
+    setVoicePanelVisible(false);
+    setVoiceRecording(false);
+    setVoiceProcessing(false);
+    setVoiceElapsedSec(0);
+    setVoiceGestureAction('send');
     setEmojiPanelVisible(false);
     setActiveChatUid(null);
   }, [markChatRead]);
@@ -2392,6 +2507,26 @@ export default function Home({ profile }: { profile: Profile }) {
         closeTour(true);
         return true;
       }
+      if (voicePanelVisible && activeChatUidRef.current) {
+        if (voiceRecordingTickerRef.current) {
+          clearInterval(voiceRecordingTickerRef.current);
+          voiceRecordingTickerRef.current = null;
+        }
+        cancelVoiceRecording().catch(() => undefined);
+        voiceFinishInFlightRef.current = false;
+        voiceRecordingRef.current = false;
+        voiceGestureActionRef.current = 'send';
+        voiceHoldStartXRef.current = null;
+        voiceRecordingStartedAtMsRef.current = 0;
+        voiceKeyboardHoldingRef.current = false;
+        setVoicePanelVisible(false);
+        setVoiceRecording(false);
+        setVoiceProcessing(false);
+        setVoiceGestureAction('send');
+        setVoiceElapsedSec(0);
+        setVoiceStatusText('按住开始录制语音');
+        return true;
+      }
       if (emojiPanelVisible && activeChatUidRef.current) {
         setEmojiPanelVisible(false);
         return true;
@@ -2401,7 +2536,16 @@ export default function Home({ profile }: { profile: Profile }) {
       return true;
     });
     return () => sub.remove();
-  }, [closeQuickMenu, closeTour, emojiPanelVisible, quickMenuVisible, searchAnim, searchVisible, tourVisible]);
+  }, [
+    closeQuickMenu,
+    closeTour,
+    emojiPanelVisible,
+    quickMenuVisible,
+    searchAnim,
+    searchVisible,
+    tourVisible,
+    voicePanelVisible,
+  ]);
 
   const onChatScroll = useCallback(
     async (event: any) => {
@@ -2593,6 +2737,396 @@ export default function Home({ profile }: { profile: Profile }) {
       }
     } catch {}
   }, [authHeaders, canSend, draftMessage, focusChatInput, insertMessages, scrollToBottom, selfUid]);
+
+  const clearVoiceTicker = useCallback(() => {
+    if (!voiceRecordingTickerRef.current) return;
+    clearInterval(voiceRecordingTickerRef.current);
+    voiceRecordingTickerRef.current = null;
+  }, []);
+
+  const clearVoicePlaybackTimer = useCallback(() => {
+    if (!voicePlaybackTimerRef.current) return;
+    clearTimeout(voicePlaybackTimerRef.current);
+    voicePlaybackTimerRef.current = null;
+  }, []);
+
+  const stopPlayingVoice = useCallback(async () => {
+    voicePlaybackSessionRef.current += 1;
+    clearVoicePlaybackTimer();
+    try {
+      await stopVoicePlayback();
+    } catch {}
+    setPlayingVoiceMessageId('');
+    playingVoiceMessageIdRef.current = '';
+  }, [clearVoicePlaybackTimer]);
+
+  const onPressVoiceMessage = useCallback(
+    async (message: Message) => {
+      const voiceUrl = String(message.voiceUrl || '').trim();
+      if (!voiceUrl) {
+        Alert.alert('语音不可播放', '该语音缺少播放地址。');
+        return;
+      }
+      if (!isVoicePlaybackSupported()) {
+        Alert.alert('暂不支持', '当前设备暂不支持语音播放。');
+        return;
+      }
+
+      const messageId = String(message.id || '');
+      if (!messageId) return;
+      if (playingVoiceMessageIdRef.current === messageId) {
+        await stopPlayingVoice();
+        return;
+      }
+
+      await stopPlayingVoice();
+      const currentSession = voicePlaybackSessionRef.current + 1;
+      voicePlaybackSessionRef.current = currentSession;
+
+      const finishPlaying = () => {
+        if (voicePlaybackSessionRef.current !== currentSession) return;
+        clearVoicePlaybackTimer();
+        setPlayingVoiceMessageId('');
+        playingVoiceMessageIdRef.current = '';
+      };
+
+      setPlayingVoiceMessageId(messageId);
+      playingVoiceMessageIdRef.current = messageId;
+
+      const durationMs = Math.max(
+        VOICE_PLAYBACK_DEFAULT_MS,
+        Math.round(Math.max(0, Number(message.voiceDurationSec) || 0) * 1000) + VOICE_PLAYBACK_BUFFER_MS
+      );
+      voicePlaybackTimerRef.current = setTimeout(finishPlaying, durationMs);
+
+      try {
+        await playVoicePlayback(voiceUrl, { onEnded: finishPlaying });
+      } catch (error) {
+        finishPlaying();
+        const errMsg = error instanceof Error ? error.message : '语音播放失败，请稍后重试。';
+        Alert.alert('播放失败', errMsg || '语音播放失败，请稍后重试。');
+      }
+    },
+    [clearVoicePlaybackTimer, stopPlayingVoice]
+  );
+
+  const updateVoiceGestureByDx = useCallback((dx: number) => {
+    const action: VoiceGestureAction =
+      dx <= -VOICE_SWIPE_THRESHOLD ? 'transcribe' : dx >= VOICE_SWIPE_THRESHOLD ? 'cancel' : 'send';
+    if (voiceGestureActionRef.current === action) return;
+    voiceGestureActionRef.current = action;
+    setVoiceGestureAction(action);
+    if (action === 'transcribe') {
+      setVoiceStatusText('松手转文字');
+      return;
+    }
+    if (action === 'cancel') {
+      setVoiceStatusText('松手取消发送');
+      return;
+    }
+    setVoiceStatusText('松开发送，左滑转文字，右滑取消');
+  }, []);
+
+  const uploadVoiceFile = useCallback(
+    async (recorded: VoiceRecordingResult) => {
+      let blob: Blob | null = null;
+      if ((recorded as any)?.blob) {
+        blob = (recorded as any).blob as Blob;
+      } else if (recorded.uri) {
+        const localResponse = await fetch(recorded.uri);
+        blob = await localResponse.blob();
+      }
+      if (!blob || blob.size <= 0) {
+        throw new Error('语音文件无效。');
+      }
+      const uploadResponse = await fetch(`${API_BASE}/api/chat/upload/file`, {
+        method: 'POST',
+        headers: {
+          ...authHeaders(),
+          'x-file-name': recorded.fileName || `voice-${Date.now()}.m4a`,
+          'x-file-type': recorded.mimeType || 'audio/mp4',
+        },
+        body: blob as any,
+      });
+      const uploadData = await uploadResponse.json().catch(() => ({}));
+      if (!uploadResponse.ok || !uploadData?.success || !uploadData?.data?.url) {
+        throw new Error(uploadData?.message || '语音上传失败。');
+      }
+      return String(uploadData.data.url);
+    },
+    [authHeaders]
+  );
+
+  const sendVoiceMessage = useCallback(
+    async (recorded: VoiceRecordingResult) => {
+      const targetUid = activeChatUidRef.current;
+      if (!targetUid || !selfUid) return;
+      const targetType = groupsRef.current.some((group) => group.id === targetUid) ? 'group' : 'private';
+      const durationMs = Number(recorded.durationMs) || 0;
+      const durationSec = Math.max(1, Math.round(durationMs / 1000));
+      const voiceUrl = await uploadVoiceFile(recorded);
+      const payload = {
+        senderUid: selfUid,
+        targetUid,
+        targetType,
+        type: 'voice',
+        url: voiceUrl,
+        durationMs,
+        mime: recorded.mimeType || 'audio/mp4',
+        name: recorded.fileName || `voice-${Date.now()}.m4a`,
+        content: `[语音 ${durationSec}s]`,
+      };
+      const response = await fetch(`${API_BASE}/api/chat/send`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...authHeaders() },
+        body: JSON.stringify(payload),
+      });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok || !data?.success || !data?.data) {
+        throw new Error(data?.message || '语音发送失败。');
+      }
+      insertMessages(targetUid, [data.data]);
+      setTimeout(scrollToBottom, 0);
+    },
+    [authHeaders, insertMessages, scrollToBottom, selfUid, uploadVoiceFile]
+  );
+
+  const convertVoiceToTextDraft = useCallback(
+    (durationMs: number) => {
+      const durationSec = Math.max(1, Math.round(Math.max(0, Number(durationMs) || 0) / 1000));
+      const text = `（语音转文字 ${durationSec}s）`;
+      setDraftMessage((prev) => `${String(prev || '')}${text}`.slice(0, CHAT_INPUT_MAX_LENGTH));
+      focusChatInput();
+    },
+    [focusChatInput]
+  );
+
+  const closeVoicePanel = useCallback(async () => {
+    clearVoiceTicker();
+    if (voiceRecordingRef.current || voiceFinishInFlightRef.current) {
+      try {
+        await cancelVoiceRecording();
+      } catch {}
+    }
+    voiceFinishInFlightRef.current = false;
+    voiceHoldStartXRef.current = null;
+    voiceRecordingStartedAtMsRef.current = 0;
+    voiceKeyboardHoldingRef.current = false;
+    voiceRecordingRef.current = false;
+    voiceGestureActionRef.current = 'send';
+    setVoiceProcessing(false);
+    setVoiceRecording(false);
+    setVoiceGestureAction('send');
+    setVoiceElapsedSec(0);
+    setVoiceStatusText('按住开始录制语音');
+    setVoicePanelVisible(false);
+  }, [clearVoiceTicker]);
+
+  const beginVoiceRecording = useCallback(
+    async (startX?: number) => {
+      if (voiceProcessing || voiceRecordingRef.current || !activeChatUidRef.current || !selfUid) return;
+      if (!isVoiceRecordingSupported()) {
+        Alert.alert('暂不支持', '当前设备暂不支持语音录制。');
+        return;
+      }
+      try {
+        setEmojiPanelVisible(false);
+        setVoiceProcessing(false);
+        setVoiceGestureAction('send');
+        setVoiceStatusText('松开发送，左滑转文字，右滑取消');
+        setVoiceElapsedSec(0);
+        await startVoiceRecording();
+        const now = Date.now();
+        voiceRecordingStartedAtMsRef.current = now;
+        voiceHoldStartXRef.current = Number.isFinite(Number(startX)) ? Number(startX) : null;
+        setVoiceRecording(true);
+        voiceRecordingRef.current = true;
+        clearVoiceTicker();
+        voiceRecordingTickerRef.current = setInterval(() => {
+          const elapsed = Math.max(0, Date.now() - voiceRecordingStartedAtMsRef.current);
+          setVoiceElapsedSec(Math.max(0, Math.round(elapsed / 1000)));
+        }, 150);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : '无法开始录音。';
+        setVoiceStatusText('录音启动失败');
+        Alert.alert('录音失败', message || '无法开始录音。');
+      }
+    },
+    [clearVoiceTicker, selfUid, voiceProcessing]
+  );
+
+  const finishVoiceRecording = useCallback(
+    async (actionOverride?: VoiceGestureAction) => {
+      if (!voiceRecordingRef.current || voiceFinishInFlightRef.current) return;
+      voiceFinishInFlightRef.current = true;
+      clearVoiceTicker();
+      setVoiceProcessing(true);
+      setVoiceRecording(false);
+      voiceRecordingRef.current = false;
+      let recorded: VoiceRecordingResult | null = null;
+      const action = actionOverride || voiceGestureActionRef.current;
+      try {
+        if (action === 'cancel') {
+          await cancelVoiceRecording();
+          setVoiceStatusText('已取消发送');
+          return;
+        }
+        recorded = await stopVoiceRecording();
+        if (!recorded) {
+          Alert.alert('录音失败', '未能生成语音文件，请重试。');
+          return;
+        }
+        const durationMs =
+          Number(recorded.durationMs) || Math.max(0, Date.now() - voiceRecordingStartedAtMsRef.current);
+        recorded = { ...recorded, durationMs };
+        if (durationMs < MIN_VOICE_DURATION_MS) {
+          Alert.alert('语音太短', '按住至少 0.5 秒再松开发送。');
+          return;
+        }
+        if (action === 'transcribe') {
+          convertVoiceToTextDraft(durationMs);
+          setVoiceStatusText('已转为文字');
+          return;
+        }
+        await sendVoiceMessage(recorded);
+        setVoiceStatusText('语音已发送');
+      } catch (error) {
+        const message = error instanceof Error ? error.message : '语音处理失败，请稍后重试。';
+        Alert.alert('语音失败', message || '语音处理失败，请稍后重试。');
+      } finally {
+        if (recorded?.uri) {
+          revokeVoiceRecordingUri(recorded.uri);
+        }
+        setVoiceProcessing(false);
+        setVoiceGestureAction('send');
+        voiceGestureActionRef.current = 'send';
+        voiceHoldStartXRef.current = null;
+        voiceRecordingStartedAtMsRef.current = 0;
+        voiceFinishInFlightRef.current = false;
+      }
+    },
+    [clearVoiceTicker, convertVoiceToTextDraft, sendVoiceMessage]
+  );
+
+  const voiceHoldPanResponder = useMemo(
+    () =>
+      PanResponder.create({
+        onStartShouldSetPanResponder: () =>
+          voicePanelVisibleRef.current && !voiceProcessing && !voiceFinishInFlightRef.current,
+        onMoveShouldSetPanResponder: () =>
+          voicePanelVisibleRef.current && !voiceProcessing && !voiceFinishInFlightRef.current,
+        onPanResponderGrant: (event) => {
+          beginVoiceRecording(Number(event?.nativeEvent?.pageX) || undefined).catch(() => undefined);
+        },
+        onPanResponderMove: (_, gestureState) => {
+          if (!voiceRecordingRef.current) return;
+          updateVoiceGestureByDx(Number(gestureState?.dx) || 0);
+        },
+        onPanResponderRelease: (_, gestureState) => {
+          if (!voiceRecordingRef.current) return;
+          const dx = Number(gestureState?.dx) || 0;
+          const action: VoiceGestureAction =
+            dx <= -VOICE_SWIPE_THRESHOLD ? 'transcribe' : dx >= VOICE_SWIPE_THRESHOLD ? 'cancel' : 'send';
+          finishVoiceRecording(action).catch(() => undefined);
+        },
+        onPanResponderTerminate: (_, gestureState) => {
+          if (!voiceRecordingRef.current) return;
+          const dx = Number(gestureState?.dx) || 0;
+          const action: VoiceGestureAction =
+            dx <= -VOICE_SWIPE_THRESHOLD ? 'transcribe' : dx >= VOICE_SWIPE_THRESHOLD ? 'cancel' : 'send';
+          finishVoiceRecording(action).catch(() => undefined);
+        },
+      }),
+    [beginVoiceRecording, finishVoiceRecording, updateVoiceGestureByDx, voiceProcessing]
+  );
+
+  useEffect(() => {
+    if (Platform.OS !== 'web' || !voicePanelVisible) return;
+    const onKeyDown = (event: any) => {
+      const code = String(event.code || event.key || '');
+      if (code === 'Space' || event.key === ' ') {
+        event.preventDefault();
+        if (voiceKeyboardHoldingRef.current) return;
+        voiceKeyboardHoldingRef.current = true;
+        beginVoiceRecording(undefined).catch(() => undefined);
+        return;
+      }
+      if (event.key === 'Escape') {
+        if (voiceRecordingRef.current) {
+          event.preventDefault();
+          voiceKeyboardHoldingRef.current = false;
+          finishVoiceRecording('cancel').catch(() => undefined);
+          return;
+        }
+        closeVoicePanel().catch(() => undefined);
+      }
+    };
+    const onKeyUp = (event: any) => {
+      const code = String(event.code || event.key || '');
+      if (code !== 'Space' && event.key !== ' ') return;
+      if (!voiceKeyboardHoldingRef.current) return;
+      event.preventDefault();
+      voiceKeyboardHoldingRef.current = false;
+      if (!voiceRecordingRef.current) return;
+      finishVoiceRecording().catch(() => undefined);
+    };
+    window.addEventListener('keydown', onKeyDown);
+    window.addEventListener('keyup', onKeyUp);
+    return () => {
+      window.removeEventListener('keydown', onKeyDown);
+      window.removeEventListener('keyup', onKeyUp);
+      voiceKeyboardHoldingRef.current = false;
+    };
+  }, [beginVoiceRecording, closeVoicePanel, finishVoiceRecording, voicePanelVisible]);
+
+  useEffect(() => {
+    if (activeChatUid) return;
+    closeVoicePanel().catch(() => undefined);
+  }, [activeChatUid, closeVoicePanel]);
+
+  useEffect(() => {
+    stopPlayingVoice().catch(() => undefined);
+  }, [activeChatUid, stopPlayingVoice]);
+
+  useEffect(
+    () => () => {
+      clearVoiceTicker();
+      clearVoicePlaybackTimer();
+      cancelVoiceRecording().catch(() => undefined);
+      stopVoicePlayback().catch(() => undefined);
+    },
+    [clearVoicePlaybackTimer, clearVoiceTicker]
+  );
+
+  const openVoicePanel = useCallback(() => {
+    if (!activeChatUidRef.current) return;
+    if (voicePanelVisibleRef.current) {
+      closeVoicePanel().catch(() => undefined);
+      return;
+    }
+    setEmojiPanelVisible(false);
+    setVoicePanelVisible(true);
+    setVoiceStatusText('按住开始录制语音');
+    setVoiceGestureAction('send');
+    setVoiceElapsedSec(0);
+  }, [closeVoicePanel]);
+
+  const preventWebVoicePanelDefault = useCallback((event: any) => {
+    if (Platform.OS !== 'web') return;
+    event?.preventDefault?.();
+    event?.stopPropagation?.();
+  }, []);
+
+  const webVoicePanelGuardProps = useMemo(
+    () =>
+      Platform.OS === 'web'
+        ? ({
+            onContextMenu: preventWebVoicePanelDefault,
+            onDragStart: preventWebVoicePanelDefault,
+          } as any)
+        : ({} as any),
+    [preventWebVoicePanelDefault]
+  );
 
   const buildWsUrl = useCallback(() => {
     try {
@@ -3330,6 +3864,21 @@ export default function Home({ profile }: { profile: Profile }) {
                       >
                         {item.type === 'image' && item.imageUrl ? (
                           <Image source={{ uri: item.imageUrl }} style={styles.chatImageMessage} />
+                        ) : item.type === 'voice' ? (
+                          <Pressable
+                            style={[
+                              styles.voiceMessageBubble,
+                              playingVoiceMessageId === itemId && styles.voiceMessageBubblePlaying,
+                            ]}
+                            onPress={() => onPressVoiceMessage(item)}
+                          >
+                            <VoiceWaveIcon active={playingVoiceMessageId === itemId} isSelf={isSelf} />
+                            <Text style={[styles.voiceMessageText, isSelf && styles.selfText]}>
+                              {item.voiceDurationSec
+                                ? `${Math.max(1, Math.round(item.voiceDurationSec))}"`
+                                : item.content || '[语音]'}
+                            </Text>
+                          </Pressable>
                         ) : (
                           <Text style={[styles.messageText, isSelf && styles.selfText]}>
                             {item.content}
@@ -3367,16 +3916,17 @@ export default function Home({ profile }: { profile: Profile }) {
             </View>
             <View style={styles.chatToolRow}>
               <Pressable
-                style={styles.chatToolBtn}
-                onPress={() => {
-                  setEmojiPanelVisible(false);
-                }}
+                style={[styles.chatToolBtn, voicePanelVisible && styles.chatToolBtnActive]}
+                onPress={openVoicePanel}
               >
-                <ToolMicIcon />
+                <ToolMicIcon color={voicePanelVisible ? '#2b88ff' : '#2f3a48'} />
               </Pressable>
               <Pressable
                 style={[styles.chatToolBtn, chatImageSending && styles.chatToolBtnDisabled]}
-                onPress={sendPickedImages}
+                onPress={() => {
+                  closeVoicePanel().catch(() => undefined);
+                  sendPickedImages();
+                }}
                 disabled={chatImageSending}
               >
                 <ToolImageIcon />
@@ -3385,6 +3935,7 @@ export default function Home({ profile }: { profile: Profile }) {
                 style={styles.chatToolBtn}
                 onPress={() => {
                   setEmojiPanelVisible(false);
+                  closeVoicePanel().catch(() => undefined);
                 }}
               >
                 <ToolCameraIcon />
@@ -3393,6 +3944,7 @@ export default function Home({ profile }: { profile: Profile }) {
                 style={[styles.chatToolBtn, isPrivateChat && emojiPanelVisible && styles.chatToolBtnActive]}
                 onPress={() => {
                   if (!isPrivateChat) return;
+                  closeVoicePanel().catch(() => undefined);
                   setEmojiPanelVisible((prev) => !prev);
                   focusChatInput();
                 }}
@@ -3403,6 +3955,7 @@ export default function Home({ profile }: { profile: Profile }) {
                 style={styles.chatToolBtn}
                 onPress={() => {
                   setEmojiPanelVisible(false);
+                  closeVoicePanel().catch(() => undefined);
                 }}
               >
                 <ToolPlusIcon />
@@ -3478,6 +4031,115 @@ export default function Home({ profile }: { profile: Profile }) {
                 </ScrollView>
               </View>
             ) : null}
+            {voicePanelVisible ? (
+              <View
+                style={[styles.voicePanelInline, { height: voicePanelHeight }, styles.voiceNoSelect]}
+                {...webVoicePanelGuardProps}
+              >
+                <View style={[styles.voicePanelInlineInner, styles.voiceNoSelect]} {...webVoicePanelGuardProps}>
+                  {voiceRecording ? (
+                    <View style={styles.voiceTopMeterRow}>
+                      <VoiceMeterBars />
+                      <Text style={styles.voicePanelTimerInline} selectable={false}>
+                        {`0:${String(Math.max(0, voiceElapsedSec)).padStart(2, '0')}`}
+                      </Text>
+                      <VoiceMeterBars reversed />
+                    </View>
+                  ) : (
+                    <Text style={styles.voicePanelTitleInline} selectable={false}>
+                      按住说话
+                    </Text>
+                  )}
+
+                  <View style={styles.voiceCenterRow}>
+                    {voiceRecording ? (
+                      <View
+                        style={[
+                          styles.voiceActionBubbleInline,
+                          voiceGestureAction === 'transcribe' && styles.voiceActionBubbleInlineActive,
+                        ]}
+                      >
+                        <Text
+                          style={[
+                            styles.voiceActionBubbleInlineText,
+                            voiceGestureAction === 'transcribe' &&
+                              styles.voiceActionBubbleInlineTextActive,
+                          ]}
+                          selectable={false}
+                        >
+                          文
+                        </Text>
+                      </View>
+                    ) : (
+                      <View style={styles.voiceActionBubbleInlinePlaceholder} />
+                    )}
+
+                    <View
+                      style={[
+                        styles.voiceHoldBtnWrapInline,
+                        voiceRecording && styles.voiceHoldBtnWrapInlineActive,
+                        voiceGestureAction === 'cancel' && styles.voiceHoldBtnWrapInlineCancel,
+                      ]}
+                    >
+                      <View
+                        style={[
+                          styles.voiceHoldBtnInline,
+                          styles.voiceNoSelect,
+                          voiceRecording && styles.voiceHoldBtnInlineActive,
+                        ]}
+                        {...voiceHoldPanResponder.panHandlers}
+                        {...webVoicePanelGuardProps}
+                      >
+                        <ToolMicIcon color="#e7f5ff" />
+                      </View>
+                    </View>
+
+                    {voiceRecording ? (
+                      <View
+                        style={[
+                          styles.voiceActionBubbleInline,
+                          voiceGestureAction === 'cancel' && styles.voiceActionBubbleInlineCancelActive,
+                        ]}
+                      >
+                        <Text
+                          style={[
+                            styles.voiceActionBubbleInlineText,
+                            voiceGestureAction === 'cancel' && styles.voiceActionBubbleInlineTextActive,
+                          ]}
+                          selectable={false}
+                        >
+                          ×
+                        </Text>
+                      </View>
+                    ) : (
+                      <View style={styles.voiceActionBubbleInlinePlaceholder} />
+                    )}
+                  </View>
+
+                  <Text style={styles.voiceHintTextInline} selectable={false}>
+                    {voiceProcessing
+                      ? '处理中...'
+                      : voiceRecording
+                        ? voiceStatusText || '松开发送，左滑转文字，右滑取消'
+                        : '长按中间麦克风开始录音'}
+                  </Text>
+
+                  {!voiceRecording ? (
+                    <View style={styles.voiceModeRow}>
+                      <Text style={styles.voiceModeText} selectable={false}>
+                        变声
+                      </Text>
+                      <Text style={[styles.voiceModeText, styles.voiceModeTextActive]} selectable={false}>
+                        对讲
+                      </Text>
+                      <Text style={styles.voiceModeText} selectable={false}>
+                        录音
+                      </Text>
+                    </View>
+                  ) : null}
+                </View>
+              </View>
+            ) : null}
           </View>
         </Animated.View>
       ) : null}
@@ -3485,11 +4147,8 @@ export default function Home({ profile }: { profile: Profile }) {
       {!activeChatUid && activeView !== 'found' ? (
         <View style={styles.home}>
           <View style={styles.header}>
-            <View style={styles.headerLeft}>
-              <Pressable
-                style={styles.avatarContainer}
-                onPress={() => navigation.navigate('Profile')}
-              >
+            <Pressable style={styles.headerLeft} onPress={openUserCenter} hitSlop={6}>
+              <View style={styles.avatarContainer}>
                 {avatarSrc && !avatarFailed ? (
                   <Image
                     key={avatarSrc}
@@ -3503,9 +4162,11 @@ export default function Home({ profile }: { profile: Profile }) {
                 ) : (
                   <Text style={styles.avatarFallback}>{avatarText}</Text>
                 )}
-              </Pressable>
-              <Text style={styles.username}>{displayName}</Text>
-            </View>
+              </View>
+              <Text style={styles.username} numberOfLines={1}>
+                {displayName}
+              </Text>
+            </Pressable>
             <Pressable style={styles.headerRight} onPress={toggleQuickMenu}>
               <Svg viewBox="0 0 24 24" width={26} height={26} fill="none" stroke="#1a1a1a" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
                 <Line x1="12" y1="5" x2="12" y2="19" />
@@ -3969,6 +4630,7 @@ const styles = StyleSheet.create({
     fontWeight: '600',
     color: '#1a1a1a',
     letterSpacing: 0.5,
+    flexShrink: 1,
   },
   headerRight: {
     width: 30,
@@ -4739,6 +5401,21 @@ const styles = StyleSheet.create({
     resizeMode: 'cover',
     backgroundColor: '#e9edf5',
   },
+  voiceMessageBubble: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    minWidth: 90,
+    paddingRight: 2,
+  },
+  voiceMessageBubblePlaying: {
+    opacity: 0.82,
+  },
+  voiceMessageText: {
+    fontSize: 14,
+    color: '#1f2c3c',
+    fontWeight: '500',
+  },
   selfBubble: {
     backgroundColor: '#4a9df8',
     borderColor: '#4a9df8',
@@ -4805,7 +5482,7 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: '#e7eef8',
     backgroundColor: '#f8fbff',
-    maxHeight: 258,
+    height: 258,
   },
   emojiPanelContent: {
     flex: 1,
@@ -4940,6 +5617,160 @@ const styles = StyleSheet.create({
     fontSize: 14,
     fontWeight: '600',
   },
+  voicePanelInline: {
+    marginTop: 8,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: '#dde5f1',
+    backgroundColor: '#ffffff',
+    overflow: 'hidden',
+  },
+  voiceNoSelect: {
+    ...Platform.select({
+      web: {
+        userSelect: 'none',
+        WebkitUserSelect: 'none',
+        WebkitTouchCallout: 'none',
+      } as any,
+      default: {},
+    }),
+  },
+  voicePanelInlineInner: {
+    flex: 1,
+    paddingHorizontal: 16,
+    paddingTop: 12,
+    paddingBottom: 14,
+    alignItems: 'center',
+  },
+  voiceTopMeterRow: {
+    width: '100%',
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+    marginBottom: 10,
+  },
+  voiceMeterBars: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+  },
+  voiceMeterBar: {
+    width: 5,
+    borderRadius: 3,
+    backgroundColor: '#506175',
+  },
+  voicePanelTimerInline: {
+    color: '#44566e',
+    fontSize: 18,
+    fontWeight: '500',
+    minWidth: 56,
+    textAlign: 'center',
+  },
+  voicePanelTitleInline: {
+    marginTop: 18,
+    color: '#66788f',
+    fontSize: 20,
+    fontWeight: '500',
+  },
+  voiceCenterRow: {
+    marginTop: 16,
+    width: '100%',
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+  voiceActionBubbleInline: {
+    width: 66,
+    height: 66,
+    borderRadius: 33,
+    borderWidth: 1,
+    borderColor: '#e0e7f2',
+    backgroundColor: '#f2f6fc',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  voiceActionBubbleInlinePlaceholder: {
+    width: 66,
+    height: 66,
+  },
+  voiceActionBubbleInlineActive: {
+    borderColor: '#9ecbf0',
+    backgroundColor: '#e7f3ff',
+  },
+  voiceActionBubbleInlineCancelActive: {
+    borderColor: '#efc3c3',
+    backgroundColor: '#fff1f1',
+  },
+  voiceActionBubbleInlineText: {
+    color: '#526273',
+    fontSize: 28,
+    fontWeight: '600',
+    lineHeight: 30,
+  },
+  voiceActionBubbleInlineTextActive: {
+    color: '#2f84d7',
+  },
+  voiceHoldBtnWrapInline: {
+    width: 176,
+    height: 176,
+    borderRadius: 88,
+    backgroundColor: '#e8f2fc',
+    borderWidth: 1,
+    borderColor: '#cadff6',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  voiceHoldBtnWrapInlineActive: {
+    transform: [{ scale: 1.02 }],
+    backgroundColor: '#daecff',
+    borderColor: '#9ec6ec',
+  },
+  voiceHoldBtnWrapInlineCancel: {
+    backgroundColor: '#ffe5e5',
+    borderColor: '#f3c2c2',
+  },
+  voiceHoldBtnInline: {
+    width: 142,
+    height: 142,
+    borderRadius: 71,
+    backgroundColor: '#2e9ded',
+    alignItems: 'center',
+    justifyContent: 'center',
+    ...Platform.select({
+      web: {
+        boxShadow: 'inset 0 0 28px rgba(255,255,255,0.2)',
+        touchAction: 'none',
+      } as any,
+      default: {},
+    }),
+  },
+  voiceHoldBtnInlineActive: {
+    backgroundColor: '#2a8ddb',
+  },
+  voiceHintTextInline: {
+    marginTop: 14,
+    minHeight: 22,
+    color: '#5f7086',
+    fontSize: 16,
+    fontWeight: '500',
+  },
+  voiceModeRow: {
+    marginTop: 26,
+    width: '64%',
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+  voiceModeText: {
+    color: '#8493a6',
+    fontSize: 18,
+    fontWeight: '500',
+  },
+  voiceModeTextActive: {
+    color: '#256eb8',
+    fontWeight: '700',
+  },
 });
 
 function GroupAvatarGrid({
@@ -5017,17 +5848,63 @@ function ChatSettingsIcon() {
   );
 }
 
-function ToolMicIcon() {
+function VoiceWaveIcon({ active = false, isSelf = false }: { active?: boolean; isSelf?: boolean }) {
+  const color = isSelf ? '#ffffff' : '#2f3a48';
+  const dimColor = isSelf ? 'rgba(255,255,255,0.55)' : '#8fa2bb';
+  return (
+    <Svg width={22} height={18} viewBox="0 0 22 18" fill="none">
+      <Path
+        d="M1 16V2"
+        stroke={active ? color : dimColor}
+        strokeWidth={2}
+        strokeLinecap="round"
+      />
+      <Path
+        d="M6 14V4"
+        stroke={active ? color : dimColor}
+        strokeWidth={2.2}
+        strokeLinecap="round"
+      />
+      <Path d="M11 12V6" stroke={color} strokeWidth={2.2} strokeLinecap="round" />
+      <Path
+        d="M16 14V4"
+        stroke={active ? color : dimColor}
+        strokeWidth={2.2}
+        strokeLinecap="round"
+      />
+      <Path
+        d="M21 16V2"
+        stroke={active ? color : dimColor}
+        strokeWidth={2}
+        strokeLinecap="round"
+      />
+    </Svg>
+  );
+}
+
+function VoiceMeterBars({ reversed = false }: { reversed?: boolean }) {
+  const bars = [8, 12, 18, 24, 32, 24, 18, 12, 8];
+  const renderBars = reversed ? [...bars].reverse() : bars;
+  return (
+    <View style={styles.voiceMeterBars}>
+      {renderBars.map((height, index) => (
+        <View key={`${reversed ? 'r' : 'l'}-${index}`} style={[styles.voiceMeterBar, { height }]} />
+      ))}
+    </View>
+  );
+}
+
+function ToolMicIcon({ color = '#2f3a48' }: { color?: string }) {
   return (
     <Svg width={22} height={22} viewBox="0 0 24 24" fill="none">
       <Path
         d="M12 4a2 2 0 0 1 2 2v6a2 2 0 1 1-4 0V6a2 2 0 0 1 2-2Z"
-        stroke="#2f3a48"
+        stroke={color}
         strokeWidth={2}
       />
-      <Path d="M7 11a5 5 0 1 0 10 0" stroke="#2f3a48" strokeWidth={2} strokeLinecap="round" />
-      <Path d="M12 16V20" stroke="#2f3a48" strokeWidth={2} strokeLinecap="round" />
-      <Path d="M9 20H15" stroke="#2f3a48" strokeWidth={2} strokeLinecap="round" />
+      <Path d="M7 11a5 5 0 1 0 10 0" stroke={color} strokeWidth={2} strokeLinecap="round" />
+      <Path d="M12 16V20" stroke={color} strokeWidth={2} strokeLinecap="round" />
+      <Path d="M9 20H15" stroke={color} strokeWidth={2} strokeLinecap="round" />
     </Svg>
   );
 }

@@ -18,7 +18,7 @@ export default function InAppBrowserWeb() {
     <div style={styles.page}>
       <div style={styles.header}>
         <button type="button" style={styles.backBtn} onClick={() => navigation.goBack()}>
-          {'<'}
+          <BackIcon />
         </button>
         <div style={styles.title}>{title}</div>
       </div>
@@ -56,8 +56,10 @@ const styles: Record<string, React.CSSProperties> = {
     border: 0,
     borderRadius: 17,
     background: 'transparent',
-    color: '#222',
-    fontSize: 22,
+    padding: 0,
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
     cursor: 'pointer',
   },
   title: {
@@ -81,6 +83,20 @@ const styles: Record<string, React.CSSProperties> = {
     fontSize: 14,
   },
 };
+
+function BackIcon() {
+  return (
+    <svg width="24" height="24" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+      <path
+        d="M15 18L9 12L15 6"
+        stroke="#222"
+        strokeWidth="2"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
+}
 
 
 

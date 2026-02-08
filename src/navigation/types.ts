@@ -21,6 +21,14 @@ type GroupPreview = {
   myNickname?: string;
 };
 
+type ProfilePreview = {
+  uid?: number;
+  username?: string;
+  nickname?: string;
+  avatar?: string;
+  signature?: string;
+};
+
 export type RootStackParamList = {
   Home:
     | {
@@ -29,6 +37,11 @@ export type RootStackParamList = {
         openChatFriend?: FriendPreview;
         openChatGroup?: GroupPreview;
         openChatFocusMessageId?: string;
+      }
+    | undefined;
+  UserCenter:
+    | {
+        profile?: ProfilePreview;
       }
     | undefined;
   Profile: undefined;
@@ -65,6 +78,7 @@ export type RootStackParamList = {
 export type RootNavigation = NativeStackNavigationProp<RootStackParamList>;
 
 export type HomeRoute = RouteProp<RootStackParamList, 'Home'>;
+export type UserCenterRoute = RouteProp<RootStackParamList, 'UserCenter'>;
 export type FriendProfileRoute = RouteProp<RootStackParamList, 'FriendProfile'>;
 export type ChatSettingsRoute = RouteProp<RootStackParamList, 'ChatSettings'>;
 export type GroupChatSettingsRoute = RouteProp<RootStackParamList, 'GroupChatSettings'>;
