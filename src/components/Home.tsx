@@ -1456,7 +1456,16 @@ export default function Home({ profile }: { profile: Profile }) {
   );
   const canSend = useMemo(() => draftMessage.trim().length > 0, [draftMessage]);
   const activeChatTitle = useMemo(() => {
-    if (activeChatGroup) return getGroupDisplayName(activeChatGroup);
+    if (activeChatGroup) {
+      const baseName = getGroupDisplayName(activeChatGroup);
+      const memberCount = Array.isArray(activeChatGroup.memberUids)
+        ? activeChatGroup.memberUids.length
+        : Array.isArray(activeChatGroup.members)
+          ? activeChatGroup.members.length
+          : 0;
+      const safeCount = Number.isInteger(memberCount) && memberCount > 0 ? memberCount : 0;
+      return safeCount > 0 ? `${baseName}（${safeCount}）` : baseName;
+    }
     return activeChatFriend?.nickname || activeChatFriend?.username || '聊天';
   }, [activeChatFriend?.nickname, activeChatFriend?.username, activeChatGroup]);
   const activeChatStatusText = useMemo(() => {
