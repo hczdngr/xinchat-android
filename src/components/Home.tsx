@@ -2052,7 +2052,7 @@ export default function Home({ profile }: { profile: Profile }) {
           continue;
         }
 
-        if (!historyHasMoreRef.current[uid]) {
+        if (historyHasMoreRef.current[uid] === false) {
           break;
         }
 

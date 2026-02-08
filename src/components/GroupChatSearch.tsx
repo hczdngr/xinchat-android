@@ -186,6 +186,7 @@ export default function GroupChatSearch() {
           targetType: 'group',
           group: route.params?.group,
           focusMessageId,
+          returnToPrevious: true,
         })
         .catch(() => undefined);
       navigation.navigate('Home', {
@@ -193,6 +194,7 @@ export default function GroupChatSearch() {
         openChatTargetType: 'group',
         openChatGroup: route.params?.group,
         openChatFocusMessageId: focusMessageId,
+        openChatReturnToPrevious: true,
       });
     },
     [navigation, route.params?.group, uid]
@@ -201,7 +203,7 @@ export default function GroupChatSearch() {
   useEffect(() => {
     if (!searched || loading) return;
     performSearch().catch(() => undefined);
-  }, [filter, loading, performSearch, searched]);
+  }, [filter, performSearch, searched]);
 
   return (
     <View style={[styles.page, { paddingTop: insets.top }]}>
@@ -233,7 +235,12 @@ export default function GroupChatSearch() {
         </Pressable>
       </View>
 
-      <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.filterRow}>
+      <ScrollView
+        horizontal
+        style={styles.filterScroll}
+        showsHorizontalScrollIndicator={false}
+        contentContainerStyle={styles.filterRow}
+      >
         {TYPE_LABELS.map((item) => {
           const active = filter === item.key;
           return (
@@ -248,7 +255,11 @@ export default function GroupChatSearch() {
         })}
       </ScrollView>
 
-      <ScrollView style={styles.list} contentContainerStyle={styles.listInner}>
+      <ScrollView
+        style={styles.list}
+        contentContainerStyle={styles.listInner}
+        keyboardShouldPersistTaps="handled"
+      >
         {!searched ? <Text style={styles.empty}>请选择类型并输入关键词后搜索</Text> : null}
         {loading ? <ActivityIndicator size="small" color="#2f8cff" /> : null}
         {searched && !loading && results.length === 0 ? (
@@ -385,10 +396,19 @@ const styles = StyleSheet.create({
     fontWeight: '600',
   },
   filterRow: {
+    flexGrow: 0,
+    alignItems: 'center',
     paddingHorizontal: 10,
     paddingTop: 10,
     paddingBottom: 4,
     gap: 8,
+  },
+  filterScroll: {
+    flexGrow: 0,
+    flexShrink: 0,
+    height: 48,
+    maxHeight: 48,
+    minHeight: 48,
   },
   filterChip: {
     height: 32,
@@ -414,9 +434,13 @@ const styles = StyleSheet.create({
   },
   list: {
     flex: 1,
+    minHeight: 0,
   },
   listInner: {
+    justifyContent: 'flex-start',
+    alignItems: 'stretch',
     paddingHorizontal: 10,
+    paddingTop: 8,
     paddingBottom: 16,
     gap: 8,
   },
