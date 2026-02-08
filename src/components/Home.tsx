@@ -8,6 +8,7 @@ import {
   Easing,
   Image,
   Keyboard,
+  Modal,
   PanResponder,
   Platform,
   Pressable,
@@ -886,7 +887,7 @@ const getGroupDisplayName = (group?: Partial<Group> | null) => {
 
 export default function Home({ profile }: { profile: Profile }) {
   const insets = useSafeAreaInsets();
-  const { height: windowHeight } = useWindowDimensions();
+  const { height: windowHeight, width: windowWidth } = useWindowDimensions();
   const navPad = Math.min(insets.bottom, 6);
   const tokenRef = useRef<string>('');
   const [tokenReady, setTokenReady] = useState(false);
@@ -935,6 +936,8 @@ export default function Home({ profile }: { profile: Profile }) {
   const [customStickers, setCustomStickers] = useState<CustomSticker[]>([]);
   const [customStickerUploading, setCustomStickerUploading] = useState(false);
   const [chatImageSending, setChatImageSending] = useState(false);
+  const [imagePreviewVisible, setImagePreviewVisible] = useState(false);
+  const [imagePreviewUrl, setImagePreviewUrl] = useState('');
   const [voicePanelVisible, setVoicePanelVisible] = useState(false);
   const [voiceRecording, setVoiceRecording] = useState(false);
   const [voiceProcessing, setVoiceProcessing] = useState(false);
@@ -954,6 +957,17 @@ export default function Home({ profile }: { profile: Profile }) {
   const [tourVisible, setTourVisible] = useState(false);
   const [tourSeenLoaded, setTourSeenLoaded] = useState(false);
   const [tourSeen, setTourSeen] = useState(false);
+
+  const openImagePreview = useCallback((url?: string) => {
+    const finalUrl = String(url || '').trim();
+    if (!finalUrl) return;
+    setImagePreviewUrl(finalUrl);
+    setImagePreviewVisible(true);
+  }, []);
+
+  const closeImagePreview = useCallback(() => {
+    setImagePreviewVisible(false);
+  }, []);
 
   const tourSteps = useMemo<HomeTourStep[]>(() => {
     const { width: screenWidth, height: screenHeight } = Dimensions.get('window');
@@ -4117,7 +4131,12 @@ export default function Home({ profile }: { profile: Profile }) {
                         ]}
                       >
                         {item.type === 'image' && item.imageUrl ? (
-                          <Image source={{ uri: item.imageUrl }} style={styles.chatImageMessage} />
+                          <Pressable
+                            style={styles.chatImagePressable}
+                            onPress={() => openImagePreview(item.imageUrl)}
+                          >
+                            <Image source={{ uri: item.imageUrl }} style={styles.chatImageMessage} />
+                          </Pressable>
                         ) : item.type === 'voice' ? (
                           <Pressable
                             style={[
@@ -4825,6 +4844,28 @@ export default function Home({ profile }: { profile: Profile }) {
           </View>
         </View>
       ) : null}
+
+      <Modal
+        transparent
+        visible={imagePreviewVisible}
+        animationType="fade"
+        onRequestClose={closeImagePreview}
+      >
+        <Pressable style={styles.imagePreviewBackdrop} onPress={closeImagePreview}>
+          <View style={styles.imagePreviewContent}>
+            {imagePreviewUrl ? (
+              <Image
+                source={{ uri: imagePreviewUrl }}
+                style={[
+                  styles.imagePreviewImage,
+                  { maxWidth: windowWidth - 24, maxHeight: windowHeight - 120 },
+                ]}
+                resizeMode="contain"
+              />
+            ) : null}
+          </View>
+        </Pressable>
+      </Modal>
     </View>
   );
 }
@@ -5649,12 +5690,30 @@ const styles = StyleSheet.create({
     backgroundColor: '#eef4ff',
     borderColor: '#d9e6fb',
   },
+  chatImagePressable: {
+    alignSelf: 'flex-start',
+  },
   chatImageMessage: {
     width: 138,
     height: 138,
     borderRadius: 10,
     resizeMode: 'cover',
     backgroundColor: '#e9edf5',
+  },
+  imagePreviewBackdrop: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.85)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    padding: 12,
+  },
+  imagePreviewContent: {
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  imagePreviewImage: {
+    width: 320,
+    height: 320,
   },
   voiceMessageBubble: {
     flexDirection: 'row',
