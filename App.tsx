@@ -11,6 +11,7 @@ import UserCenter from './src/components/UserCenter';
 import FriendProfile from './src/components/FriendProfile';
 import EditProfile from './src/components/EditProfile';
 import QRScan from './src/components/QRScan';
+import ObjectInsight from './src/components/ObjectInsight';
 import InAppBrowser from './src/components/InAppBrowser';
 import ChatSettings from './src/components/ChatSettings';
 import CreateGroup from './src/components/CreateGroup';
@@ -462,6 +463,7 @@ function App() {
                   )}
                 </Stack.Screen>
                 <Stack.Screen name="QRScan" component={QRScan} />
+                <Stack.Screen name="ObjectInsight" component={ObjectInsight} />
                 <Stack.Screen name="InAppBrowser" component={InAppBrowser} />
               </Stack.Navigator>
             </NavigationContainer>

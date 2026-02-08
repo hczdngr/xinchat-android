@@ -3,6 +3,7 @@ import { Animated, Dimensions, Pressable, StyleSheet, Text, View } from 'react-n
 import { useFocusEffect, useIsFocused, useNavigation } from '@react-navigation/native';
 import type { RootNavigation } from '../navigation/types';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import { Buffer } from 'buffer';
 import Svg, { Circle, Path, Rect } from 'react-native-svg';
 import {
   Camera,
@@ -13,8 +14,40 @@ import {
 } from 'react-native-vision-camera';
 import { decodeQrFromBase64 } from '../utils/decodeQrFromBase64';
 import { pickQrImageForPlatform } from '../utils/pickQrImage';
+import { API_BASE } from '../config';
+import { STORAGE_KEYS } from '../constants/storageKeys';
+import { storage } from '../storage';
 import { normalizeScannedUrl } from './qrUtils';
 import { QR_SCAN_MODE_ITEMS, QR_SCAN_TEXT, type ScanMode } from './qrScanShared';
+
+type ObjectDetectItem = {
+  name?: string;
+  confidence?: number;
+  attributes?: string;
+  position?: string;
+};
+
+type ObjectDetectPayload = {
+  summary?: string;
+  scene?: string;
+  objects?: ObjectDetectItem[];
+  model?: string;
+};
+
+const normalizeBase64 = (value: string) => String(value || '').replace(/\s+/g, '');
+const toFileUri = (value: string) => {
+  const path = String(value || '').trim();
+  if (!path) return '';
+  return path.startsWith('file://') ? path : `file://${path}`;
+};
+
+const filePathToBase64 = async (rawPath: string) => {
+  const uri = rawPath.startsWith('file://') ? rawPath : `file://${rawPath}`;
+  const response = await fetch(uri);
+  if (!response.ok) throw new Error('Read photo failed');
+  const buffer = Buffer.from(await response.arrayBuffer());
+  return buffer.toString('base64');
+};
 
 
 export default function QRScan() {
@@ -34,10 +67,15 @@ export default function QRScan() {
   const [zoomLevel, setZoomLevel] = useState<1 | 2>(1);
   const [statusText, setStatusText] = useState('');
   const [albumDecoding, setAlbumDecoding] = useState(false);
+  const [arRecognizing, setArRecognizing] = useState(false);
+  const [arSummary, setArSummary] = useState('');
+  const [arScene, setArScene] = useState('');
+  const [arObjects, setArObjects] = useState<ObjectDetectItem[]>([]);
   const [scanMode, setScanMode] = useState<ScanMode>('scan');
   const scanLineAnim = useRef(new Animated.Value(0)).current;
   const lastTapAtRef = useRef(0);
   const scannedRef = useRef(false);
+  const cameraRef = useRef<Camera>(null);
 
   useEffect(() => {
     if (!hasPermission) {
@@ -49,6 +87,9 @@ export default function QRScan() {
     useCallback(() => {
       scannedRef.current = false;
       setStatusText('');
+      setArSummary('');
+      setArScene('');
+      setArObjects([]);
       return undefined;
     }, [])
   );
@@ -103,9 +144,73 @@ export default function QRScan() {
     [navigation]
   );
 
+  const detectObjects = useCallback(async (mimeType: string, base64: string) => {
+    const token = (await storage.getString(STORAGE_KEYS.token)) || '';
+    if (!token) throw new Error('No auth token');
+
+    const response = await fetch(`${API_BASE}/api/insight/object-detect`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify({
+        image: `data:${mimeType};base64,${normalizeBase64(base64)}`,
+      }),
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok || !data?.success || !data?.data) {
+      throw new Error(String(data?.message || QR_SCAN_TEXT.arRecognizeFailed));
+    }
+    return data.data as ObjectDetectPayload;
+  }, []);
+
+  const applyArResult = useCallback((result: ObjectDetectPayload) => {
+    const summary = String(result?.summary || '').trim();
+    const scene = String(result?.scene || '').trim();
+    const objects = Array.isArray(result?.objects) ? result.objects : [];
+    setArSummary(summary);
+    setArScene(scene);
+    setArObjects(objects);
+    if (!summary && objects.length === 0) {
+      setStatusText(QR_SCAN_TEXT.albumNoObjectDetected);
+      return;
+    }
+    setStatusText('');
+  }, []);
+
+  const buildInsightQuery = useCallback((result: ObjectDetectPayload) => {
+    const firstObjectName = (Array.isArray(result?.objects) ? result.objects : [])
+      .map((item) => String(item?.name || '').trim())
+      .find(Boolean);
+    if (firstObjectName) return firstObjectName;
+    const summary = String(result?.summary || '').replace(/\s+/g, ' ').trim();
+    if (!summary) return '';
+    return summary.replace(/[。！？.!?].*$/, '').slice(0, 48).trim();
+  }, []);
+
+  const openInsightPage = useCallback(
+    (result: ObjectDetectPayload, imageUri: string) => {
+      const query = buildInsightQuery(result);
+      if (!query) {
+        setStatusText(QR_SCAN_TEXT.albumNoObjectDetected);
+        return;
+      }
+      navigation.navigate('ObjectInsight', {
+        query,
+        imageUri: String(imageUri || '').trim(),
+        detectSummary: String(result?.summary || ''),
+        detectScene: String(result?.scene || ''),
+        detectObjects: Array.isArray(result?.objects) ? result.objects : [],
+      });
+    },
+    [buildInsightQuery, navigation]
+  );
+
   const codeScanner = useCodeScanner({
     codeTypes: ['qr'],
     onCodeScanned: (codes) => {
+      if (scanMode !== 'scan') return;
       const first = codes?.[0];
       const value = first?.value ? String(first.value) : '';
       if (!value) return;
@@ -126,8 +231,44 @@ export default function QRScan() {
   }, []);
 
   const onSelectMode = useCallback((mode: ScanMode) => {
+    if (mode === scanMode) return;
     setScanMode(mode);
-  }, []);
+    setStatusText('');
+    setArSummary('');
+    setArScene('');
+    setArObjects([]);
+    if (mode === 'scan') {
+      scannedRef.current = false;
+    }
+  }, [scanMode]);
+
+  const onPressArCapture = useCallback(async () => {
+    if (scanMode !== 'ar' || arRecognizing) return;
+    setArRecognizing(true);
+    setStatusText(QR_SCAN_TEXT.arRecognizing);
+    try {
+      const camera = cameraRef.current;
+      if (!camera) {
+        setStatusText(QR_SCAN_TEXT.arNoFrame);
+        return;
+      }
+      const captured = await camera.takePhoto({
+        enableShutterSound: false,
+      });
+      const path = String(captured?.path || '').trim();
+      if (!path) throw new Error(QR_SCAN_TEXT.arCaptureFailed);
+      const base64 = await filePathToBase64(path);
+      const mimeType = path.toLowerCase().endsWith('.png') ? 'image/png' : 'image/jpeg';
+      const result = await detectObjects(mimeType, base64);
+      applyArResult(result);
+      openInsightPage(result, toFileUri(path));
+    } catch (error) {
+      const message = error instanceof Error ? error.message : QR_SCAN_TEXT.arCaptureFailed;
+      setStatusText(message || QR_SCAN_TEXT.arCaptureFailed);
+    } finally {
+      setArRecognizing(false);
+    }
+  }, [applyArResult, arRecognizing, detectObjects, openInsightPage, scanMode]);
 
   const onPressAlbum = useCallback(async () => {
     if (albumDecoding) return;
@@ -135,18 +276,26 @@ export default function QRScan() {
     try {
       const picked = await pickQrImageForPlatform();
       if (!picked?.data) return;
-      const value = decodeQrFromBase64(picked.data, picked.mime, 'album');
-      if (!value) {
-        setStatusText(QR_SCAN_TEXT.albumNoQrDetected);
-        return;
+      if (scanMode === 'ar') {
+        setStatusText(QR_SCAN_TEXT.arRecognizing);
+        const result = await detectObjects(picked.mime || 'image/jpeg', picked.data);
+        applyArResult(result);
+        openInsightPage(result, toFileUri(picked.path));
+      } else {
+        const value = decodeQrFromBase64(picked.data, picked.mime, 'album');
+        if (!value) {
+          setStatusText(QR_SCAN_TEXT.albumNoQrDetected);
+          return;
+        }
+        onScanValue(value);
       }
-      onScanValue(value);
-    } catch {
-      setStatusText(QR_SCAN_TEXT.albumOpenFailed);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : QR_SCAN_TEXT.albumOpenFailed;
+      setStatusText(message || QR_SCAN_TEXT.albumOpenFailed);
     } finally {
       setAlbumDecoding(false);
     }
-  }, [albumDecoding, onScanValue]);
+  }, [albumDecoding, applyArResult, detectObjects, onScanValue, openInsightPage, scanMode]);
 
   if (!hasPermission) {
     return (
@@ -176,14 +325,15 @@ export default function QRScan() {
     <View style={styles.page}>
       <Pressable style={styles.previewArea} onPress={onPreviewTap}>
         <Camera
+          ref={cameraRef}
           style={StyleSheet.absoluteFill}
           device={device}
           format={cameraFormat}
           fps={effectiveFps}
           isActive={isFocused && hasPermission}
           zoom={effectiveZoom}
-          codeScanner={codeScanner}
-          photo={false}
+          codeScanner={scanMode === 'scan' ? codeScanner : undefined}
+          photo
           video={false}
           audio={false}
         />
@@ -200,11 +350,42 @@ export default function QRScan() {
           style={styles.scanArea}
           onLayout={(event) => setScanAreaHeight(event.nativeEvent.layout.height)}
         >
-          <Animated.View style={[styles.scanLine, { transform: [{ translateY: lineTranslateY }] }]} />
+          {scanMode === 'scan' ? (
+            <Animated.View style={[styles.scanLine, { transform: [{ translateY: lineTranslateY }] }]} />
+          ) : null}
         </View>
-        <Text style={styles.tipText}>{QR_SCAN_TEXT.tipAlignCode}</Text>
+        <Text style={styles.tipText}>
+          {scanMode === 'ar' ? QR_SCAN_TEXT.tipAlignObject : QR_SCAN_TEXT.tipAlignCode}
+        </Text>
         <Text style={styles.zoomText}>{`${zoomLevel}x (${QR_SCAN_TEXT.zoomHintDoubleTap})`}</Text>
+        {scanMode === 'ar' ? (
+          <Pressable
+            style={[styles.arActionBtn, arRecognizing && styles.arActionBtnDisabled]}
+            onPress={onPressArCapture}
+            disabled={arRecognizing}
+          >
+            <Text style={styles.arActionText}>
+              {arRecognizing ? QR_SCAN_TEXT.arRecognizing : QR_SCAN_TEXT.arRecognizeButton}
+            </Text>
+          </Pressable>
+        ) : null}
         {statusText ? <Text style={styles.statusText}>{statusText}</Text> : null}
+        {scanMode === 'ar' && (arSummary || arObjects.length > 0) ? (
+          <View style={styles.arResultCard}>
+            <Text style={styles.arResultTitle}>{QR_SCAN_TEXT.arResultTitle}</Text>
+            {arSummary ? <Text style={styles.arResultSummary}>{arSummary}</Text> : null}
+            {arScene ? <Text style={styles.arResultScene}>{`场景：${arScene}`}</Text> : null}
+            {arObjects.slice(0, 4).map((item, index) => {
+              const confidence = Number(item?.confidence || 0);
+              const suffix = Number.isFinite(confidence) ? ` (${Math.round(confidence * 100)}%)` : '';
+              return (
+                <Text key={`ar-obj-${index}-${item?.name || 'unknown'}`} style={styles.arObjectItem}>
+                  {`\u2022 ${item?.name || '未知物体'}${suffix}`}
+                </Text>
+              );
+            })}
+          </View>
+        ) : null}
       </View>
 
       <View style={[styles.bottomBar, { paddingBottom: Math.max(insets.bottom, 10) }]}>
@@ -242,7 +423,11 @@ export default function QRScan() {
             <AlbumIcon />
           </View>
           <Text style={styles.edgeText}>
-            {albumDecoding ? QR_SCAN_TEXT.decoding : QR_SCAN_TEXT.album}
+            {albumDecoding
+              ? QR_SCAN_TEXT.decoding
+              : scanMode === 'ar'
+                ? QR_SCAN_TEXT.albumRecognize
+                : QR_SCAN_TEXT.album}
           </Text>
         </Pressable>
       </View>
@@ -316,6 +501,55 @@ const styles = StyleSheet.create({
     fontSize: 12,
     textAlign: 'center',
     maxWidth: '88%',
+  },
+  arActionBtn: {
+    marginTop: 12,
+    paddingHorizontal: 16,
+    paddingVertical: 9,
+    borderRadius: 18,
+    borderWidth: 1,
+    borderColor: 'rgba(31, 166, 255, 0.8)',
+    backgroundColor: 'rgba(31, 166, 255, 0.2)',
+  },
+  arActionBtnDisabled: {
+    opacity: 0.65,
+  },
+  arActionText: {
+    color: '#cdeeff',
+    fontSize: 13,
+    fontWeight: '600',
+  },
+  arResultCard: {
+    marginTop: 12,
+    width: '88%',
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: 'rgba(150, 206, 255, 0.35)',
+    backgroundColor: 'rgba(0, 21, 42, 0.72)',
+    paddingHorizontal: 10,
+    paddingVertical: 9,
+  },
+  arResultTitle: {
+    color: '#d3ecff',
+    fontSize: 13,
+    fontWeight: '700',
+    marginBottom: 5,
+  },
+  arResultSummary: {
+    color: '#e9f5ff',
+    fontSize: 12,
+    lineHeight: 17,
+  },
+  arResultScene: {
+    marginTop: 4,
+    color: '#b9dfff',
+    fontSize: 11,
+  },
+  arObjectItem: {
+    marginTop: 3,
+    color: '#cce8ff',
+    fontSize: 11,
+    lineHeight: 15,
   },
   bottomBar: {
     position: 'absolute',
