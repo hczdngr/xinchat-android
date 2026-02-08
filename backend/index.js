@@ -6,6 +6,7 @@ import { WebSocket, WebSocketServer } from 'ws';
 import authRouter, {
   ensureStorage,
   findUserByToken,
+  readUsersCached,
   readUsers,
   writeUsers,
 } from './routes/auth.js';
@@ -35,6 +36,48 @@ const PORT = process.env.PORT || 3001;
 const NODE_ENV = process.env.NODE_ENV || 'development';
 const ROUTE_INSPECTOR_ENABLED =
   NODE_ENV !== 'production' || process.env.ENABLE_ROUTE_INSPECTOR === 'true';
+const parsePositiveInt = (value, fallback, min = 1) => {
+  const parsed = Number.parseInt(String(value || ''), 10);
+  if (!Number.isFinite(parsed) || parsed < min) {
+    return fallback;
+  }
+  return parsed;
+};
+const REQUEST_BODY_LIMIT_MB = parsePositiveInt(process.env.REQUEST_BODY_LIMIT_MB, 24, 1);
+const REQUEST_BODY_LIMIT = `${REQUEST_BODY_LIMIT_MB}mb`;
+const HTTP_KEEP_ALIVE_TIMEOUT_MS = parsePositiveInt(
+  process.env.HTTP_KEEP_ALIVE_TIMEOUT_MS,
+  65_000,
+  1_000
+);
+const HTTP_HEADERS_TIMEOUT_MS = parsePositiveInt(
+  process.env.HTTP_HEADERS_TIMEOUT_MS,
+  66_000,
+  HTTP_KEEP_ALIVE_TIMEOUT_MS + 1_000
+);
+const HTTP_REQUEST_TIMEOUT_MS = parsePositiveInt(process.env.HTTP_REQUEST_TIMEOUT_MS, 0, 0);
+const HTTP_SOCKET_KEEP_ALIVE_MS = parsePositiveInt(
+  process.env.HTTP_SOCKET_KEEP_ALIVE_MS,
+  30_000,
+  1_000
+);
+const HTTP_LISTEN_BACKLOG = parsePositiveInt(process.env.HTTP_LISTEN_BACKLOG, 2048, 128);
+const WS_MAX_PAYLOAD_BYTES = parsePositiveInt(
+  process.env.WS_MAX_PAYLOAD_BYTES,
+  512 * 1024,
+  1024
+);
+const WS_MAX_BACKPRESSURE_BYTES = parsePositiveInt(
+  process.env.WS_MAX_BACKPRESSURE_BYTES,
+  2 * 1024 * 1024,
+  64 * 1024
+);
+const WS_MAX_CONNECTIONS = parsePositiveInt(process.env.WS_MAX_CONNECTIONS, 20_000, 1);
+const WS_MAX_MESSAGE_BYTES = parsePositiveInt(
+  process.env.WS_MAX_MESSAGE_BYTES,
+  256 * 1024,
+  1024
+);
 const CORS_ALLOWED_ORIGINS = String(process.env.CORS_ORIGINS || '')
   .split(',')
   .map((item) => item.trim())
@@ -42,9 +85,10 @@ const CORS_ALLOWED_ORIGINS = String(process.env.CORS_ORIGINS || '')
 const CORS_ALLOW_ALL = NODE_ENV !== 'production' && CORS_ALLOWED_ORIGINS.length === 0;
 
 export const app = express();
+app.disable('x-powered-by');
 
-app.use(express.json({ limit: '200mb' }));
-app.use(express.urlencoded({ extended: true, limit: '200mb' }));
+app.use(express.json({ limit: REQUEST_BODY_LIMIT }));
+app.use(express.urlencoded({ extended: true, limit: REQUEST_BODY_LIMIT }));
 app.use((req, res, next) => {
   const origin = typeof req.headers.origin === 'string' ? req.headers.origin : '';
   const originAllowed =
@@ -655,24 +699,46 @@ app.use((err, req, res, next) => {
 
 export function startServer(port = PORT) {
   const server = http.createServer(app);
-  const wss = new WebSocketServer({ server, path: '/ws' });
+  server.keepAliveTimeout = HTTP_KEEP_ALIVE_TIMEOUT_MS;
+  server.headersTimeout = HTTP_HEADERS_TIMEOUT_MS;
+  server.requestTimeout = HTTP_REQUEST_TIMEOUT_MS;
+  server.on('connection', (socket) => {
+    socket.setNoDelay(true);
+    socket.setKeepAlive(true, HTTP_SOCKET_KEEP_ALIVE_MS);
+  });
+
+  const wss = new WebSocketServer({
+    server,
+    path: '/ws',
+    perMessageDeflate: false,
+    clientTracking: false,
+    maxPayload: WS_MAX_PAYLOAD_BYTES,
+  });
   const insightWorker = startInsightWorker({ logger: console });
   server.on('close', () => {
     insightWorker.stop();
   });
   const connections = new Map();
+  let activeSockets = 0;
   const presencePayload = (uid, online) => ({
     type: 'presence',
     data: { uid, online },
   });
 
   const addConnection = (uid, socket) => {
+    if (socket._tracked) return;
+    socket._tracked = true;
+    activeSockets += 1;
     const set = connections.get(uid) || new Set();
     set.add(socket);
     connections.set(uid, set);
   };
 
   const removeConnection = (uid, socket) => {
+    if (socket?._tracked) {
+      socket._tracked = false;
+      activeSockets = Math.max(0, activeSockets - 1);
+    }
     const set = connections.get(uid);
     if (!set) return;
     set.delete(socket);
@@ -687,24 +753,42 @@ export function startServer(port = PORT) {
     if (!set) return;
     const message = JSON.stringify(payload);
     set.forEach((socket) => {
-      if (socket.readyState === WebSocket.OPEN) {
+      if (socket.readyState !== WebSocket.OPEN) {
+        return;
+      }
+      if (socket.bufferedAmount > WS_MAX_BACKPRESSURE_BYTES) {
+        try {
+          socket.close(1013, 'Client too slow');
+        } catch {}
+        removeConnection(uid, socket);
+        return;
+      }
+      try {
         socket.send(message);
+      } catch {
+        removeConnection(uid, socket);
       }
     });
   };
 
   const verifyToken = async (token) => {
     if (!token) return null;
-    const users = await readUsers();
+    const users = await readUsersCached();
     const found = findUserByToken(users, token);
     if (found.touched) {
       await writeUsers(users);
     }
-    return found.user || null;
+    if (!found.user) {
+      return null;
+    }
+    if (typeof structuredClone === 'function') {
+      return structuredClone(found.user);
+    }
+    return JSON.parse(JSON.stringify(found.user));
   };
 
   const updateUserOnlineState = async (uid, online) => {
-    const users = await readUsers();
+    const users = await readUsersCached();
     const userIndex = users.findIndex((item) => item.uid === uid);
     if (userIndex === -1) return;
     const shouldWrite = users[userIndex].online !== online;
@@ -755,7 +839,7 @@ export function startServer(port = PORT) {
 
   const sendPresenceSnapshot = async (socket, user) => {
     try {
-      const users = await readUsers();
+      const users = await readUsersCached();
       const friendSet = new Set(user.friends || []);
       const snapshot = users
         .filter((item) => friendSet.has(item.uid))
@@ -768,6 +852,10 @@ export function startServer(port = PORT) {
 
   wss.on('connection', async (socket, req) => {
     try {
+      if (activeSockets >= WS_MAX_CONNECTIONS) {
+        socket.close(1013, 'Server busy');
+        return;
+      }
       const url = new URL(req.url, `http://${req.headers.host}`);
       const token = url.searchParams.get('token') || '';
       const user = await verifyToken(token);
@@ -786,6 +874,13 @@ export function startServer(port = PORT) {
       await sendPresenceSnapshot(socket, user);
       socket.on('message', (raw) => {
         try {
+          const rawSize = Buffer.isBuffer(raw)
+            ? raw.length
+            : Buffer.byteLength(String(raw || ''), 'utf8');
+          if (rawSize > WS_MAX_MESSAGE_BYTES) {
+            socket.close(1009, 'Message too large');
+            return;
+          }
           const text = raw?.toString?.() || '';
           const message = JSON.parse(text);
           if (message?.type === 'heartbeat') {
@@ -868,19 +963,25 @@ export function startServer(port = PORT) {
     uids.forEach((uid) => sendToUid(uid, message));
   });
 
-  return server.listen(port, '0.0.0.0', async () => {
-    await Promise.all([ensureStorage(), ensureChatStorage(), ensureGroupStorage()]);
-    await resetOnlineState();
-    (async () => {
-      try {
-        const users = await readUsers();
-        await prewarmWarmTipCache({ users, logger: console });
-      } catch (error) {
-        console.warn('[warm-tip] prewarm failed', error instanceof Error ? error.message : error);
-      }
-    })();
-    console.log(`Backend listening on http://0.0.0.0:${port}`);
-  });
+  return server.listen(
+    { port, host: '0.0.0.0', backlog: HTTP_LISTEN_BACKLOG },
+    async () => {
+      await Promise.all([ensureStorage(), ensureChatStorage(), ensureGroupStorage()]);
+      await resetOnlineState();
+      (async () => {
+        try {
+          const users = await readUsers();
+          await prewarmWarmTipCache({ users, logger: console });
+        } catch (error) {
+          console.warn(
+            '[warm-tip] prewarm failed',
+            error instanceof Error ? error.message : error
+          );
+        }
+      })();
+      console.log(`Backend listening on http://0.0.0.0:${port}`);
+    }
+  );
 }
 
 const entryHref = process.argv[1]

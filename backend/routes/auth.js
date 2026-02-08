@@ -23,6 +23,13 @@ const MAX_NICKNAME_LEN = 36;
 const MAX_SIGNATURE_LEN = 80;
 const MAX_AVATAR_BYTES = 20 * 1024 * 1024;
 const normalizeUsername = (value) => value.trim().toLowerCase();
+const parsePositiveInt = (value, fallback, min = 1) => {
+  const parsed = Number.parseInt(String(value || ''), 10);
+  if (!Number.isFinite(parsed) || parsed < min) {
+    return fallback;
+  }
+  return parsed;
+};
 
 const hasDepressionTendency = (user) => {
   const analysis = user?.aiProfile?.analysis || {};
@@ -112,34 +119,88 @@ const clearUserSession = async (users, userIndex) => {
   await writeUsers(users);
 };
 
-const USERS_CACHE_TTL_MS = 1000;
+const USERS_CACHE_TTL_MS = parsePositiveInt(process.env.USERS_CACHE_TTL_MS, 5000, 200);
 let cachedUsers = null;
 let cachedUsersAt = 0;
+let usersLoadInFlight = null;
 let writeUsersQueue = Promise.resolve();
+let ensureStorageInFlight = null;
+let storageReady = false;
+let tokenIndexCache = new Map();
+let usernameIndexCache = new Map();
 
-const cloneUsers = (users) => JSON.parse(JSON.stringify(users || []));
+const cloneUsers = (users) => {
+  const source = Array.isArray(users) ? users : [];
+  if (typeof structuredClone === 'function') {
+    return structuredClone(source);
+  }
+  return JSON.parse(JSON.stringify(source));
+};
+
+const rebuildUsersIndexes = (users) => {
+  const tokens = new Map();
+  const usernames = new Map();
+  const list = Array.isArray(users) ? users : [];
+  list.forEach((user, index) => {
+    if (typeof user?.username === 'string' && user.username) {
+      usernames.set(user.username, index);
+    }
+    if (Array.isArray(user?.tokens)) {
+      user.tokens.forEach((entry) => {
+        if (!entry || typeof entry.token !== 'string' || !entry.token) {
+          return;
+        }
+        if (!tokens.has(entry.token)) {
+          tokens.set(entry.token, index);
+        }
+      });
+    }
+    if (typeof user?.token === 'string' && user.token && !tokens.has(user.token)) {
+      tokens.set(user.token, index);
+    }
+  });
+  tokenIndexCache = tokens;
+  usernameIndexCache = usernames;
+};
+
+const setUsersCache = (users, timestamp = Date.now()) => {
+  cachedUsers = Array.isArray(users) ? users : [];
+  cachedUsersAt = timestamp;
+  rebuildUsersIndexes(cachedUsers);
+};
 
 const ensureStorage = async () => {
-  await fs.mkdir(DATA_DIR, { recursive: true });
+  if (storageReady) {
+    return;
+  }
+  if (ensureStorageInFlight) {
+    await ensureStorageInFlight;
+    return;
+  }
+  ensureStorageInFlight = (async () => {
+    await fs.mkdir(DATA_DIR, { recursive: true });
+    try {
+      await fs.access(USERS_PATH);
+    } catch {
+      await fs.writeFile(USERS_PATH, '[]', 'utf-8');
+    }
+    storageReady = true;
+  })();
   try {
-    await fs.access(USERS_PATH);
-  } catch {
-    await fs.writeFile(USERS_PATH, '[]', 'utf-8');
+    await ensureStorageInFlight;
+  } finally {
+    ensureStorageInFlight = null;
   }
 };
 
-const readUsers = async () => {
+const loadUsersFromDisk = async () => {
   await ensureStorage();
   const now = Date.now();
-  if (cachedUsers && now - cachedUsersAt < USERS_CACHE_TTL_MS) {
-    return cloneUsers(cachedUsers);
-  }
   const raw = await fs.readFile(USERS_PATH, 'utf-8');
   const trimmed = raw.trim();
   if (!trimmed) {
-    cachedUsers = [];
-    cachedUsersAt = now;
-    return cloneUsers(cachedUsers);
+    setUsersCache([], now);
+    return cachedUsers;
   }
   let users;
   try {
@@ -152,22 +213,48 @@ const readUsers = async () => {
       `Failed to parse users.json. Backup created at ${backupPath}.`,
       error
     );
-    cachedUsers = [];
-    cachedUsersAt = now;
-    return cloneUsers(cachedUsers);
+    setUsersCache([], now);
+    return cachedUsers;
   }
   if (!Array.isArray(users)) {
     console.error('Invalid users.json format. Resetting to empty array.');
     await fs.writeFile(USERS_PATH, '[]', 'utf-8');
-    cachedUsers = [];
-    cachedUsersAt = now;
-    return cloneUsers(cachedUsers);
+    setUsersCache([], now);
+    return cachedUsers;
   }
   await ensureUserUids(users);
   await ensureUserDefaults(users);
-  cachedUsers = cloneUsers(users);
-  cachedUsersAt = now;
-  return cloneUsers(cachedUsers);
+  setUsersCache(users, now);
+  return cachedUsers;
+};
+
+const readUsersCached = async () => {
+  await ensureStorage();
+  const now = Date.now();
+  if (cachedUsers && now - cachedUsersAt < USERS_CACHE_TTL_MS) {
+    return cachedUsers;
+  }
+  if (usersLoadInFlight) {
+    await usersLoadInFlight;
+    return cachedUsers || [];
+  }
+  usersLoadInFlight = loadUsersFromDisk()
+    .catch((error) => {
+      console.error('Read users cache refresh error:', error);
+      if (!cachedUsers) {
+        setUsersCache([], Date.now());
+      }
+    })
+    .finally(() => {
+      usersLoadInFlight = null;
+    });
+  await usersLoadInFlight;
+  return cachedUsers || [];
+};
+
+const readUsers = async () => {
+  const users = await readUsersCached();
+  return cloneUsers(users);
 };
 
 const writeUsers = async (users) => {
@@ -176,8 +263,7 @@ const writeUsers = async (users) => {
   const run = writeUsersQueue.then(async () => {
     await fs.writeFile(USERS_PATH_TMP, JSON.stringify(snapshot, null, 2), 'utf-8');
     await fs.rename(USERS_PATH_TMP, USERS_PATH);
-    cachedUsers = cloneUsers(snapshot);
-    cachedUsersAt = Date.now();
+    setUsersCache(snapshot, Date.now());
   });
   writeUsersQueue = run.catch(() => {});
   await run;
@@ -340,33 +426,62 @@ const removeTokenFromUser = (user, token) => {
   return changed;
 };
 
+const resolveTokenState = (user, token) => {
+  const tokens = Array.isArray(user?.tokens) ? user.tokens : [];
+  const entry = tokens.find((item) => item?.token === token);
+  if (entry) {
+    return isTokenExpired(entry.expiresAt) ? 'expired' : 'valid';
+  }
+  if (user?.token === token) {
+    return isTokenExpired(user.tokenExpiresAt) ? 'expired' : 'valid';
+  }
+  return 'missing';
+};
+
 const findUserByToken = (users, token) => {
   if (!token) return { user: null, userIndex: -1, touched: false };
+
+  const indexedUserIndex = tokenIndexCache.get(token);
+  if (
+    Number.isInteger(indexedUserIndex) &&
+    indexedUserIndex >= 0 &&
+    indexedUserIndex < users.length
+  ) {
+    const indexedUser = users[indexedUserIndex];
+    const indexedState = resolveTokenState(indexedUser, token);
+    if (indexedState === 'valid') {
+      return { user: indexedUser, userIndex: indexedUserIndex, touched: false };
+    }
+    if (indexedState === 'expired') {
+      const touched = removeTokenFromUser(indexedUser, token);
+      return { user: null, userIndex: -1, touched };
+    }
+  }
+
   let touched = false;
   for (let i = 0; i < users.length; i += 1) {
     const user = users[i];
-    const tokens = Array.isArray(user.tokens) ? user.tokens : [];
-    const entry = tokens.find((item) => item?.token === token);
-    if (entry) {
-      if (isTokenExpired(entry.expiresAt)) {
-        if (removeTokenFromUser(user, token)) {
-          touched = true;
-        }
-        return { user: null, userIndex: -1, touched };
-      }
+    const state = resolveTokenState(user, token);
+    if (state === 'valid') {
       return { user, userIndex: i, touched };
     }
-    if (user.token === token) {
-      if (isTokenExpired(user.tokenExpiresAt)) {
-        if (removeTokenFromUser(user, token)) {
-          touched = true;
-        }
-        return { user: null, userIndex: -1, touched };
+    if (state === 'expired') {
+      if (removeTokenFromUser(user, token)) {
+        touched = true;
       }
-      return { user, userIndex: i, touched };
+      return { user: null, userIndex: -1, touched };
     }
   }
   return { user: null, userIndex: -1, touched };
+};
+
+const findUserIndexByUsername = (users, normalizedUsername) => {
+  if (!normalizedUsername) return -1;
+  const indexed = usernameIndexCache.get(normalizedUsername);
+  if (Number.isInteger(indexed) && users[indexed]?.username === normalizedUsername) {
+    return indexed;
+  }
+  return users.findIndex((item) => item?.username === normalizedUsername);
 };
 
 const hasValidToken = (user) => {
@@ -469,7 +584,7 @@ router.post('/register', async (req, res) => {
 
     const users = await readUsers();
     const normalized = normalizeUsername(trimmedUsername);
-    if (users.some((user) => user.username === normalized)) {
+    if (findUserIndexByUsername(users, normalized) >= 0) {
       res.status(409).json({ success: false, message: '用户名已存在。' });
       return;
     }
@@ -524,7 +639,7 @@ router.post('/login', async (req, res) => {
     }
 
     const users = await readUsers();
-    const userIndex = users.findIndex((user) => user.username === normalized);
+    const userIndex = findUserIndexByUsername(users, normalized);
     const user = users[userIndex];
     const isLegacy = user && user.password;
     const isMatch = user
@@ -701,7 +816,7 @@ router.post('/profile', authenticate, async (req, res) => {
   });
 });
 
-export { ensureStorage, readUsers, writeUsers, findUserByToken, hasValidToken };
+export { ensureStorage, readUsers, readUsersCached, writeUsers, findUserByToken, hasValidToken };
 export default router;
 
 

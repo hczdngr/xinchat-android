@@ -1439,13 +1439,19 @@ router.post('/overview', authenticate, async (req, res) => {
 
     const database = await openDb();
     if (friendIds.length > 0) {
+      const placeholders = friendIds.map(() => '?').join(',');
       const stmt = database.prepare(`
         SELECT id, type, senderUid, targetUid, targetType, data, createdAt, createdAtMs
         FROM messages
-        WHERE targetType = 'private' AND (senderUid = ? OR targetUid = ?)
+        WHERE targetType = 'private'
+          AND (
+            (senderUid = ? AND targetUid IN (${placeholders}))
+            OR
+            (targetUid = ? AND senderUid IN (${placeholders}))
+          )
         ORDER BY createdAtMs DESC
       `);
-      stmt.bind([user.uid, user.uid]);
+      stmt.bind([user.uid, ...friendIds, user.uid, ...friendIds]);
       while (stmt.step()) {
         const row = stmt.getAsObject();
         const senderUid = Number(row.senderUid);
