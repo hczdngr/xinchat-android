@@ -25,9 +25,42 @@ const authenticate = createAuthenticateMiddleware({ scope: 'Groups' });
 let cachedGroups = null;
 let cachedGroupsAt = 0;
 let writeQueue = Promise.resolve();
-let leaveQueue = Promise.resolve();
+let mutationQueue = Promise.resolve();
+let groupsNotifier = null;
 
 const clone = (value) => JSON.parse(JSON.stringify(value || []));
+const nowIso = () => new Date().toISOString();
+
+const setGroupsNotifier = (notifier) => {
+  groupsNotifier = typeof notifier === 'function' ? notifier : null;
+};
+
+const notifyGroupUsers = (uids, payload) => {
+  if (!groupsNotifier) return;
+  const list = Array.from(
+    new Set(
+      (Array.isArray(uids) ? uids : [])
+        .map((uid) => Number(uid))
+        .filter((uid) => Number.isInteger(uid) && uid > 0)
+    )
+  );
+  if (!list.length) return;
+  try {
+    groupsNotifier(list, payload);
+  } catch (error) {
+    console.error('Group notifier error:', error);
+  }
+};
+
+const emitGroupEvent = (uids, payload) => {
+  setImmediate(() => notifyGroupUsers(uids, payload));
+};
+
+const enqueueMutation = (task) => {
+  const run = mutationQueue.catch(() => undefined).then(task);
+  mutationQueue = run.then(() => undefined).catch(() => undefined);
+  return run;
+};
 
 const fileExists = async (targetPath) => {
   try {
@@ -309,50 +342,69 @@ router.post('/create', authenticate, async (req, res) => {
     const rawMemberUids = normalizeMemberUids(req.body?.memberUids);
     const inviteUids = rawMemberUids.filter((uid) => uid !== user.uid);
     if (inviteUids.length === 0) {
-      res.status(400).json({ success: false, message: '请至少选择一位好友。' });
+      res.status(400).json({ success: false, message: '\u8bf7\u81f3\u5c11\u9009\u62e9\u4e00\u4f4d\u597d\u53cb\u3002' });
       return;
     }
     if (inviteUids.length + 1 > MAX_GROUP_MEMBERS) {
-      res.status(400).json({ success: false, message: '群成员数量超过上限。' });
+      res.status(400).json({ success: false, message: '\u7fa4\u6210\u5458\u6570\u91cf\u8d85\u8fc7\u4e0a\u9650\u3002' });
       return;
     }
 
     for (const uid of inviteUids) {
       const target = users.find((item) => item.uid === uid);
       if (!target) {
-        res.status(404).json({ success: false, message: `用户 ${uid} 不存在。` });
+        res.status(404).json({ success: false, message: `\u7528\u6237 ${uid} \u4e0d\u5b58\u5728\u3002` });
         return;
       }
       if (!isMutualFriend(user, target)) {
-        res.status(403).json({ success: false, message: `用户 ${uid} 不是你的好友。` });
+        res.status(403).json({ success: false, message: `\u7528\u6237 ${uid} \u4e0d\u662f\u4f60\u7684\u597d\u53cb\u3002` });
         return;
       }
     }
 
-    const groups = await readGroups();
-    const groupId = getNextGroupId(groups);
-    const memberUids = [user.uid, ...inviteUids];
-    const rawName =
-      typeof req.body?.name === 'string' ? req.body.name.trim().slice(0, GROUP_NAME_MAX_LEN) : '';
-    const name = rawName || buildDefaultGroupName(inviteUids, users, user.uid);
-    const now = new Date().toISOString();
-    const group = {
-      id: groupId,
-      ownerUid: user.uid,
-      memberUids,
-      name,
-      description: '',
-      announcement: '',
-      memberNicknames: {},
-      createdAt: now,
-      updatedAt: now,
-    };
-    groups.push(group);
-    await writeGroups(groups);
-    res.json({ success: true, group: serializeGroup(group, users, user.uid) });
+    const result = await enqueueMutation(async () => {
+      const groups = await readGroups();
+      const groupId = getNextGroupId(groups);
+      const memberUids = [user.uid, ...inviteUids];
+      const rawName =
+        typeof req.body?.name === 'string' ? req.body.name.trim().slice(0, GROUP_NAME_MAX_LEN) : '';
+      const name = rawName || buildDefaultGroupName(inviteUids, users, user.uid);
+      const now = nowIso();
+      const group = {
+        id: groupId,
+        ownerUid: user.uid,
+        memberUids,
+        name,
+        description: '',
+        announcement: '',
+        memberNicknames: {},
+        createdAt: now,
+        updatedAt: now,
+      };
+      groups.push(group);
+      await writeGroups(groups);
+      return {
+        status: 200,
+        body: { success: true, group: serializeGroup(group, users, user.uid) },
+        notify: {
+          uids: memberUids,
+          payload: {
+            event: 'group_created',
+            groupId,
+            actorUid: user.uid,
+            updatedAt: now,
+          },
+        },
+      };
+    });
+
+    if (result?.notify) {
+      emitGroupEvent(result.notify.uids, result.notify.payload);
+    }
+    res.status(result?.status || 200).json(result?.body || { success: false, message: '\u521b\u5efa\u7fa4\u804a\u5931\u8d25\u3002' });
   } catch (error) {
     console.error('Group create error:', error);
-    res.status(500).json({ success: false, message: '创建群聊失败。' });
+    res.status(500).json({ success: false, message: '\u521b\u5efa\u7fa4\u804a\u5931\u8d25\u3002' });
   }
 });
 
@@ -362,82 +414,131 @@ router.post('/update', authenticate, async (req, res) => {
     const { user, users } = req.auth;
     const groupId = Number(req.body?.groupId);
     if (!Number.isInteger(groupId) || groupId <= 0) {
-      res.status(400).json({ success: false, message: '群ID无效。' });
+      res.status(400).json({ success: false, message: '\u7fa4ID\u65e0\u6548\u3002' });
       return;
     }
 
-    const groups = await readGroups();
-    const groupIndex = groups.findIndex((item) => item.id === groupId);
-    if (groupIndex === -1) {
-      res.status(404).json({ success: false, message: '群聊不存在。' });
-      return;
-    }
-
-    const group = { ...groups[groupIndex] };
-    const memberSet = new Set(normalizeMemberUids(group.memberUids));
-    if (!memberSet.has(user.uid)) {
-      res.status(403).json({ success: false, message: '你不在该群聊中。' });
-      return;
-    }
-
-    let touched = false;
-
-    if (Object.prototype.hasOwnProperty.call(req.body || {}, 'name')) {
-      const nextName =
-        typeof req.body?.name === 'string' ? req.body.name.trim().slice(0, GROUP_NAME_MAX_LEN) : '';
-      group.name = nextName;
-      touched = true;
-    }
-
-    if (Object.prototype.hasOwnProperty.call(req.body || {}, 'description')) {
-      const nextDescription =
-        typeof req.body?.description === 'string'
-          ? req.body.description.trim().slice(0, GROUP_DESCRIPTION_MAX_LEN)
-          : '';
-      group.description = nextDescription;
-      touched = true;
-    }
-
-    if (Object.prototype.hasOwnProperty.call(req.body || {}, 'announcement')) {
-      const nextAnnouncement =
-        typeof req.body?.announcement === 'string'
-          ? req.body.announcement.trim().slice(0, GROUP_ANNOUNCEMENT_MAX_LEN)
-          : '';
-      group.announcement = nextAnnouncement;
-      touched = true;
-    }
-
-    if (Object.prototype.hasOwnProperty.call(req.body || {}, 'myNickname')) {
-      const nextMyNickname =
-        typeof req.body?.myNickname === 'string'
-          ? req.body.myNickname.trim().slice(0, GROUP_MEMBER_NICK_MAX_LEN)
-          : '';
-      const nextMemberNicknames = {
-        ...(group.memberNicknames && typeof group.memberNicknames === 'object'
-          ? group.memberNicknames
-          : {}),
-      };
-      if (nextMyNickname) {
-        nextMemberNicknames[user.uid] = nextMyNickname;
-      } else {
-        delete nextMemberNicknames[user.uid];
+    const result = await enqueueMutation(async () => {
+      const groups = await readGroups();
+      const groupIndex = groups.findIndex((item) => item.id === groupId);
+      if (groupIndex === -1) {
+        return {
+          status: 404,
+          body: { success: false, message: '\u7fa4\u804a\u4e0d\u5b58\u5728\u3002' },
+        };
       }
-      group.memberNicknames = nextMemberNicknames;
-      touched = true;
-    }
 
-    if (!touched) {
-      res.status(400).json({ success: false, message: '没有可更新的字段。' });
-      return;
-    }
+      const group = { ...groups[groupIndex] };
+      const memberUids = normalizeMemberUids(group.memberUids);
+      const memberSet = new Set(memberUids);
+      if (!memberSet.has(user.uid)) {
+        return {
+          status: 403,
+          body: { success: false, message: '\u4f60\u4e0d\u5728\u8be5\u7fa4\u804a\u4e2d\u3002' },
+        };
+      }
 
-    group.updatedAt = new Date().toISOString();
-    groups[groupIndex] = sanitizeGroup(group);
-    await writeGroups(groups);
-    res.json({ success: true, group: serializeGroup(groups[groupIndex], users, user.uid) });
+      const changedFields = [];
+      let hasUpdatableField = false;
+
+      if (Object.prototype.hasOwnProperty.call(req.body || {}, 'name')) {
+        hasUpdatableField = true;
+        const nextName =
+          typeof req.body?.name === 'string' ? req.body.name.trim().slice(0, GROUP_NAME_MAX_LEN) : '';
+        if (group.name !== nextName) {
+          group.name = nextName;
+          changedFields.push('name');
+        }
+      }
+
+      if (Object.prototype.hasOwnProperty.call(req.body || {}, 'description')) {
+        hasUpdatableField = true;
+        const nextDescription =
+          typeof req.body?.description === 'string'
+            ? req.body.description.trim().slice(0, GROUP_DESCRIPTION_MAX_LEN)
+            : '';
+        if (group.description !== nextDescription) {
+          group.description = nextDescription;
+          changedFields.push('description');
+        }
+      }
+
+      if (Object.prototype.hasOwnProperty.call(req.body || {}, 'announcement')) {
+        hasUpdatableField = true;
+        const nextAnnouncement =
+          typeof req.body?.announcement === 'string'
+            ? req.body.announcement.trim().slice(0, GROUP_ANNOUNCEMENT_MAX_LEN)
+            : '';
+        if (group.announcement !== nextAnnouncement) {
+          group.announcement = nextAnnouncement;
+          changedFields.push('announcement');
+        }
+      }
+
+      if (Object.prototype.hasOwnProperty.call(req.body || {}, 'myNickname')) {
+        hasUpdatableField = true;
+        const nextMyNickname =
+          typeof req.body?.myNickname === 'string'
+            ? req.body.myNickname.trim().slice(0, GROUP_MEMBER_NICK_MAX_LEN)
+            : '';
+        const nextMemberNicknames = {
+          ...(group.memberNicknames && typeof group.memberNicknames === 'object'
+            ? group.memberNicknames
+            : {}),
+        };
+        if (nextMyNickname) {
+          nextMemberNicknames[user.uid] = nextMyNickname;
+        } else {
+          delete nextMemberNicknames[user.uid];
+        }
+        const currentMyNickname = String(group.memberNicknames?.[user.uid] || '');
+        if (currentMyNickname !== String(nextMemberNicknames[user.uid] || '')) {
+          group.memberNicknames = nextMemberNicknames;
+          changedFields.push('myNickname');
+        }
+      }
+
+      if (!hasUpdatableField) {
+        return {
+          status: 400,
+          body: { success: false, message: '\u6ca1\u6709\u53ef\u66f4\u65b0\u7684\u5b57\u6bb5\u3002' },
+        };
+      }
+
+      if (!changedFields.length) {
+        return {
+          status: 200,
+          body: { success: true, group: serializeGroup(groups[groupIndex], users, user.uid) },
+        };
+      }
+
+      group.updatedAt = nowIso();
+      groups[groupIndex] = sanitizeGroup(group);
+      await writeGroups(groups);
+
+      return {
+        status: 200,
+        body: { success: true, group: serializeGroup(groups[groupIndex], users, user.uid) },
+        notify: {
+          uids: memberUids,
+          payload: {
+            event: 'group_updated',
+            groupId,
+            actorUid: user.uid,
+            changedFields,
+            updatedAt: groups[groupIndex]?.updatedAt || nowIso(),
+          },
+        },
+      };
+    });
+
+    if (result?.notify) {
+      emitGroupEvent(result.notify.uids, result.notify.payload);
+    }
+    res.status(result?.status || 500).json(result?.body || { success: false, message: '\u66f4\u65b0\u7fa4\u4fe1\u606f\u5931\u8d25\u3002' });
   } catch (error) {
     console.error('Group update error:', error);
-    res.status(500).json({ success: false, message: '更新群信息失败。' });
+    res.status(500).json({ success: false, message: '\u66f4\u65b0\u7fa4\u4fe1\u606f\u5931\u8d25\u3002' });
   }
 });
 
@@ -447,74 +548,93 @@ router.post('/leave', authenticate, async (req, res) => {
     const { user, users } = req.auth;
     const groupId = Number(req.body?.groupId);
     if (!Number.isInteger(groupId) || groupId <= 0) {
-      res.status(400).json({ success: false, message: '群ID无效。' });
+      res.status(400).json({ success: false, message: '\u7fa4ID\u65e0\u6548\u3002' });
       return;
     }
 
-    const leaveTask = leaveQueue
-      .catch(() => undefined)
-      .then(async () => {
-        const groups = await readGroups();
-        const groupIndex = groups.findIndex((item) => item.id === groupId);
-        if (groupIndex === -1) {
-          return {
-            status: 404,
-            body: { success: false, message: '群聊不存在。' },
-          };
-        }
-
-        const group = { ...groups[groupIndex] };
-        const originMemberUids = normalizeMemberUids(group.memberUids);
-        const memberUids = originMemberUids.filter((uid) => uid !== user.uid);
-        if (memberUids.length === originMemberUids.length) {
-          return {
-            status: 403,
-            body: { success: false, message: '你不在该群聊中。' },
-          };
-        }
-
-        if (memberUids.length === 0) {
-          groups.splice(groupIndex, 1);
-          await writeGroups(groups);
-          return {
-            status: 200,
-            body: { success: true, removed: true },
-          };
-        }
-
-        const memberNicknames = {
-          ...(group.memberNicknames && typeof group.memberNicknames === 'object'
-            ? group.memberNicknames
-            : {}),
+    const result = await enqueueMutation(async () => {
+      const groups = await readGroups();
+      const groupIndex = groups.findIndex((item) => item.id === groupId);
+      if (groupIndex === -1) {
+        return {
+          status: 404,
+          body: { success: false, message: '\u7fa4\u804a\u4e0d\u5b58\u5728\u3002' },
         };
-        delete memberNicknames[user.uid];
+      }
 
-        group.memberUids = memberUids;
-        group.memberNicknames = memberNicknames;
-        if (!memberUids.includes(Number(group.ownerUid))) {
-          group.ownerUid = memberUids[0];
-        }
-        group.updatedAt = new Date().toISOString();
+      const group = { ...groups[groupIndex] };
+      const originMemberUids = normalizeMemberUids(group.memberUids);
+      const memberUids = originMemberUids.filter((uid) => uid !== user.uid);
+      if (memberUids.length === originMemberUids.length) {
+        return {
+          status: 403,
+          body: { success: false, message: '\u4f60\u4e0d\u5728\u8be5\u7fa4\u804a\u4e2d\u3002' },
+        };
+      }
 
-        groups[groupIndex] = sanitizeGroup(group);
+      if (memberUids.length === 0) {
+        groups.splice(groupIndex, 1);
         await writeGroups(groups);
         return {
           status: 200,
-          body: {
-            success: true,
-            removed: false,
-            group: serializeGroup(groups[groupIndex], users, user.uid),
+          body: { success: true, removed: true },
+          notify: {
+            uids: originMemberUids,
+            payload: {
+              event: 'group_removed',
+              groupId,
+              actorUid: user.uid,
+              removed: true,
+              updatedAt: nowIso(),
+            },
           },
         };
-      });
+      }
 
-    leaveQueue = leaveTask.then(() => undefined).catch(() => undefined);
-    const result = await leaveTask;
-    res.status(result.status).json(result.body);
+      const memberNicknames = {
+        ...(group.memberNicknames && typeof group.memberNicknames === 'object'
+          ? group.memberNicknames
+          : {}),
+      };
+      delete memberNicknames[user.uid];
+
+      group.memberUids = memberUids;
+      group.memberNicknames = memberNicknames;
+      if (!memberUids.includes(Number(group.ownerUid))) {
+        group.ownerUid = memberUids[0];
+      }
+      group.updatedAt = nowIso();
+
+      groups[groupIndex] = sanitizeGroup(group);
+      await writeGroups(groups);
+      return {
+        status: 200,
+        body: {
+          success: true,
+          removed: false,
+          group: serializeGroup(groups[groupIndex], users, user.uid),
+        },
+        notify: {
+          uids: originMemberUids,
+          payload: {
+            event: 'group_member_left',
+            groupId,
+            actorUid: user.uid,
+            removed: false,
+            updatedAt: groups[groupIndex]?.updatedAt || nowIso(),
+          },
+        },
+      };
+    });
+
+    if (result?.notify) {
+      emitGroupEvent(result.notify.uids, result.notify.payload);
+    }
+    res.status(result?.status || 500).json(result?.body || { success: false, message: '\u9000\u51fa\u7fa4\u804a\u5931\u8d25\u3002' });
   } catch (error) {
     console.error('Group leave error:', error);
-    res.status(500).json({ success: false, message: '退出群聊失败。' });
+    res.status(500).json({ success: false, message: '\u9000\u51fa\u7fa4\u804a\u5931\u8d25\u3002' });
   }
 });
-export { ensureGroupStorage, readGroups, writeGroups, getGroupById, getGroupMemberUids, isUserInGroup };
+export { ensureGroupStorage, readGroups, writeGroups, getGroupById, getGroupMemberUids, isUserInGroup, setGroupsNotifier };
 export default router;

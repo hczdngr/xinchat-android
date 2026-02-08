@@ -3502,6 +3502,21 @@ export default function Home({ profile }: { profile: Profile }) {
         loadPendingRequestCount().catch(() => undefined);
         return;
       }
+      if (payload.type === 'groups') {
+        const groupId = Number(payload?.data?.groupId);
+        const eventType = String(payload?.data?.event || '').trim();
+        const actorUid = Number(payload?.data?.actorUid || 0);
+        loadGroups().catch(() => undefined);
+        if (
+          Number.isInteger(groupId) &&
+          groupId > 0 &&
+          activeChatUidRef.current === groupId &&
+          (eventType === 'group_removed' || (eventType === 'group_member_left' && actorUid === Number(selfUid)))
+        ) {
+          setActiveChatUid(null);
+        }
+        return;
+      }
       if (payload.type === 'presence') {
         const uid = Number(payload?.data?.uid);
         if (Number.isInteger(uid)) {

@@ -11,7 +11,11 @@ import authRouter, {
 } from './routes/auth.js';
 import chatRouter, { ensureChatStorage, setChatNotifier } from './routes/chat.js';
 import friendsRouter, { setFriendsNotifier } from './routes/friends.js';
-import groupsRouter, { ensureGroupStorage, getGroupMemberUids } from './routes/groups.js';
+import groupsRouter, {
+  ensureGroupStorage,
+  getGroupMemberUids,
+  setGroupsNotifier,
+} from './routes/groups.js';
 import voiceRouter from './routes/voice.js';
 import voiceTranscribeRouter from './routes/voiceTranscribe.js';
 import insightApiRouter, { prewarmWarmTipCache } from './routes/insightApi.js';
@@ -827,6 +831,10 @@ export function startServer(port = PORT) {
   });
   setFriendsNotifier((uids, payload) => {
     uids.forEach((uid) => sendToUid(uid, payload));
+  });
+  setGroupsNotifier((uids, payload) => {
+    const message = { type: 'groups', data: payload || {} };
+    uids.forEach((uid) => sendToUid(uid, message));
   });
 
   return server.listen(port, '0.0.0.0', async () => {
