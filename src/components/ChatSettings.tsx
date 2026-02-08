@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+﻿import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { Alert, Image, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 import { useNavigation, useRoute } from '@react-navigation/native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -344,6 +344,29 @@ export default function ChatSettings() {
         </View>
 
         <View style={styles.card}>
+          <Pressable
+            style={styles.row}
+            onPress={() => {
+              if (!Number.isInteger(uid) || uid <= 0) return;
+              navigation.navigate('GroupChatSearch', {
+                uid,
+                title: displayName,
+                targetType: 'private',
+                friend,
+              });
+            }}
+          >
+            <Text style={styles.normalText}>查找聊天记录</Text>
+            <View style={styles.rowRight}>
+              <Text style={styles.subText}>按类型查找</Text>
+              <View style={styles.arrowIcon}>
+                <ForwardIndicatorIcon />
+              </View>
+            </View>
+          </Pressable>
+        </View>
+
+        <View style={styles.card}>
           <Pressable style={styles.row} onPress={onSelectBackground}>
             <Text style={styles.normalText}>设置当前聊天背景</Text>
             <Text style={styles.subText}>{backgroundLabel}</Text>
@@ -454,6 +477,11 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     gap: 12,
     minHeight: 56,
+  },
+  rowRight: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
   },
   divider: {
     height: 1,

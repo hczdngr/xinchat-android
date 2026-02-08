@@ -68,6 +68,8 @@ export type RootStackParamList = {
   GroupChatSearch: {
     uid: number;
     title?: string;
+    targetType?: 'private' | 'group';
+    friend?: FriendPreview;
     group?: GroupPreview;
   };
   CreateGroup:

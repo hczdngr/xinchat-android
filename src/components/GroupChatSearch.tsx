@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+﻿import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   ActivityIndicator,
   Pressable,
@@ -81,26 +81,28 @@ export default function GroupChatSearch() {
   const navigation = useNavigation<RootNavigation>();
   const route = useRoute<GroupChatSearchRoute>();
   const uid = Number(route.params?.uid || 0);
+  const targetType = route.params?.targetType === 'private' ? 'private' : 'group';
   const [query, setQuery] = useState('');
   const [filter, setFilter] = useState<MessageTypeFilter>('all');
   const [loading, setLoading] = useState(false);
   const [searched, setSearched] = useState(false);
   const [results, setResults] = useState<GroupMessageResult[]>([]);
 
-  const title = useMemo(
-    () => {
-      const group = route.params?.group;
-      const memberCount = Array.isArray(group?.memberUids)
-        ? group.memberUids.length
-        : Array.isArray(group?.members)
-          ? group.members.length
-          : 0;
-      const raw = String(route.params?.title || group?.name || '').trim();
-      const cleaned = stripAutoGroupCountSuffix(raw, memberCount);
-      return cleaned || (uid > 0 ? `群聊${uid}` : '群聊');
-    },
-    [route.params?.group, route.params?.title, uid]
-  );
+  const title = useMemo(() => {
+    if (targetType === 'private') {
+      const raw = String(route.params?.title || '').trim();
+      return raw || (uid > 0 ? `聊天${uid}` : '聊天');
+    }
+    const group = route.params?.group;
+    const memberCount = Array.isArray(group?.memberUids)
+      ? group.memberUids.length
+      : Array.isArray(group?.members)
+        ? group.members.length
+        : 0;
+    const raw = String(route.params?.title || group?.name || '').trim();
+    const cleaned = stripAutoGroupCountSuffix(raw, memberCount);
+    return cleaned || (uid > 0 ? `群聊${uid}` : '群聊');
+  }, [route.params?.group, route.params?.title, targetType, uid]);
 
   const performSearch = useCallback(async () => {
     if (!Number.isInteger(uid) || uid <= 0) return;
@@ -121,7 +123,7 @@ export default function GroupChatSearch() {
       while (page < MAX_FETCH_PAGES && collected.length < MAX_RESULTS) {
         page += 1;
         const params = new URLSearchParams({
-          targetType: 'group',
+          targetType,
           targetUid: String(uid),
           limit: String(PAGE_LIMIT),
         });
@@ -174,7 +176,7 @@ export default function GroupChatSearch() {
     } finally {
       setLoading(false);
     }
-  }, [filter, query, uid]);
+  }, [filter, query, targetType, uid]);
 
   const openMessage = useCallback(
     async (item: GroupMessageResult) => {
@@ -183,7 +185,8 @@ export default function GroupChatSearch() {
       await storage
         .setJson(STORAGE_KEYS.pendingOpenChat, {
           uid,
-          targetType: 'group',
+          targetType,
+          friend: route.params?.friend,
           group: route.params?.group,
           focusMessageId,
           returnToPrevious: true,
@@ -191,13 +194,14 @@ export default function GroupChatSearch() {
         .catch(() => undefined);
       navigation.navigate('Home', {
         openChatUid: uid,
-        openChatTargetType: 'group',
+        openChatTargetType: targetType,
+        openChatFriend: route.params?.friend,
         openChatGroup: route.params?.group,
         openChatFocusMessageId: focusMessageId,
         openChatReturnToPrevious: true,
       });
     },
-    [navigation, route.params?.group, uid]
+    [navigation, route.params?.friend, route.params?.group, targetType, uid]
   );
 
   useEffect(() => {
