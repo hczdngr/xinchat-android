@@ -112,6 +112,7 @@ type PinnedMap = Record<number, boolean>;
 type HiddenMap = Record<number, boolean>;
 type MutedMap = Record<number, boolean>;
 type ChatBackgroundMap = Record<number, ChatBackgroundKey>;
+type DeleteCutoffMap = Record<number, number>;
 type MessageListItem = {
   uid: number;
   targetType: 'private' | 'group';
@@ -818,6 +819,15 @@ const sanitizeCachedMessages = (input: any): BucketMap => {
   return next;
 };
 
+const resolveMessageCreatedAtMs = (entry: any): number => {
+  const direct = Number(entry?.createdAtMs);
+  if (Number.isFinite(direct) && direct > 0) return direct;
+  const rawCreatedAt = String(entry?.createdAt || entry?.raw?.createdAt || '');
+  if (!rawCreatedAt) return 0;
+  const parsed = Date.parse(rawCreatedAt);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
+};
+
 const sanitizeBooleanMap = (input: any): Record<number, boolean> => {
   if (!input || typeof input !== 'object') return {};
   const next: Record<number, boolean> = {};
@@ -826,6 +836,19 @@ const sanitizeBooleanMap = (input: any): Record<number, boolean> => {
     if (!Number.isInteger(uid) || uid <= 0) return;
     if (!rawValue) return;
     next[uid] = true;
+  });
+  return next;
+};
+
+const sanitizeDeleteCutoffMap = (input: any): DeleteCutoffMap => {
+  if (!input || typeof input !== 'object') return {};
+  const next: DeleteCutoffMap = {};
+  Object.entries(input).forEach(([rawUid, rawValue]) => {
+    const uid = Number(rawUid);
+    if (!Number.isInteger(uid) || uid <= 0) return;
+    const cutoffMs = Number(rawValue);
+    if (!Number.isFinite(cutoffMs) || cutoffMs <= 0) return;
+    next[uid] = cutoffMs;
   });
   return next;
 };
@@ -913,9 +936,9 @@ export default function Home({ profile }: { profile: Profile }) {
   const [mutedMap, setMutedMap] = useState<MutedMap>({});
   const [chatBackgroundMap, setChatBackgroundMap] = useState<ChatBackgroundMap>({});
   const [groupRemarksMap, setGroupRemarksMap] = useState<Record<number, string>>({});
+  const [deleteCutoffMap, setDeleteCutoffMap] = useState<DeleteCutoffMap>({});
   const [chatMenuVisible, setChatMenuVisible] = useState(false);
   const [chatMenuTargetUid, setChatMenuTargetUid] = useState<number | null>(null);
-  const [chatMenuTargetType, setChatMenuTargetType] = useState<'private' | 'group'>('private');
   const [chatMenuPosition, setChatMenuPosition] = useState({ x: 0, y: 0 });
   const [quickMenuVisible, setQuickMenuVisible] = useState(false);
   const [quickMenuMounted, setQuickMenuMounted] = useState(false);
@@ -1066,6 +1089,7 @@ export default function Home({ profile }: { profile: Profile }) {
   const reconnectAttemptsRef = useRef(0);
   const messagesByUidRef = useRef<BucketMap>({});
   const readAtMapRef = useRef<ReadAtMap>({});
+  const deleteCutoffMapRef = useRef<DeleteCutoffMap>({});
   const mutedMapRef = useRef<MutedMap>({});
   const appStateRef = useRef<string>(AppState.currentState || 'active');
   const friendsRef = useRef<Friend[]>([]);
@@ -1138,6 +1162,75 @@ export default function Home({ profile }: { profile: Profile }) {
   useEffect(() => {
     readAtMapRef.current = readAtMap;
   }, [readAtMap]);
+
+  useEffect(() => {
+    deleteCutoffMapRef.current = deleteCutoffMap;
+  }, [deleteCutoffMap]);
+
+  useEffect(() => {
+    const cutoffEntries = Object.entries(deleteCutoffMap).filter(([rawUid, rawCutoff]) => {
+      const uid = Number(rawUid);
+      const cutoff = Number(rawCutoff);
+      return Number.isInteger(uid) && uid > 0 && Number.isFinite(cutoff) && cutoff > 0;
+    });
+    if (!cutoffEntries.length) return;
+
+    setMessagesByUid((prev) => {
+      let changed = false;
+      const next: BucketMap = { ...prev };
+      cutoffEntries.forEach(([rawUid, rawCutoff]) => {
+        const uid = Number(rawUid);
+        const cutoff = Number(rawCutoff);
+        const list = Array.isArray(next[uid]) ? next[uid] : [];
+        if (!list.length) return;
+        const filtered = list.filter((item) => resolveMessageCreatedAtMs(item) > cutoff);
+        if (filtered.length === list.length) return;
+        changed = true;
+        next[uid] = filtered;
+        if (!filtered.length) {
+          messageIdSetsRef.current.delete(uid);
+          messageOffsetMapRef.current.delete(uid);
+          return;
+        }
+        messageIdSetsRef.current.set(
+          uid,
+          new Set(
+            filtered
+              .map((item) => item?.id)
+              .filter((id) => typeof id === 'number' || typeof id === 'string')
+          )
+        );
+      });
+      return changed ? next : prev;
+    });
+
+    setLatestMap((prev) => {
+      let changed = false;
+      const next: LatestMap = { ...prev };
+      cutoffEntries.forEach(([rawUid, rawCutoff]) => {
+        const uid = Number(rawUid);
+        const cutoff = Number(rawCutoff);
+        const latest = next[uid];
+        if (!latest) return;
+        if (Number(latest.ts) > cutoff) return;
+        delete next[uid];
+        changed = true;
+      });
+      return changed ? next : prev;
+    });
+
+    setUnreadMap((prev) => {
+      let changed = false;
+      const next = { ...prev };
+      cutoffEntries.forEach(([rawUid]) => {
+        const uid = Number(rawUid);
+        if ((next[uid] || 0) === 0) return;
+        next[uid] = 0;
+        changed = true;
+      });
+      return changed ? next : prev;
+    });
+  }, [deleteCutoffMap]);
 
   useEffect(() => {
     mutedMapRef.current = mutedMap;
@@ -1587,6 +1680,7 @@ export default function Home({ profile }: { profile: Profile }) {
       cachedUnread,
       cachedPending,
       cachedGroupRemarks,
+      cachedDeleteCutoff,
     ] =
       await Promise.all([
         storage.getJson<Friend[]>(STORAGE_KEYS.homeFriendsCache),
@@ -1596,11 +1690,13 @@ export default function Home({ profile }: { profile: Profile }) {
         storage.getJson<Record<number, number>>(STORAGE_KEYS.homeUnreadCache),
         storage.getJson<number>(STORAGE_KEYS.homePendingRequestsCache),
         storage.getJson<Record<number, string>>(STORAGE_KEYS.groupRemarks),
+        storage.getJson<DeleteCutoffMap>(STORAGE_KEYS.chatDeleteCutoff),
       ]);
 
     const nextFriends = sanitizeFriends(Array.isArray(cachedFriends) ? cachedFriends : []);
     const nextGroups = sanitizeGroups(Array.isArray(cachedGroups) ? cachedGroups : []);
     const nextMessages = sanitizeCachedMessages(cachedMessages);
+    const nextDeleteCutoff = sanitizeDeleteCutoffMap(cachedDeleteCutoff);
 
     const nextLatest: LatestMap = {};
     if (cachedLatest && typeof cachedLatest === 'object') {
@@ -1625,6 +1721,19 @@ export default function Home({ profile }: { profile: Profile }) {
       });
     }
 
+    Object.entries(nextMessages).forEach(([rawUid, list]) => {
+      const uid = Number(rawUid);
+      if (!Number.isInteger(uid) || uid <= 0 || !Array.isArray(list)) return;
+      const cutoff = Number(nextDeleteCutoff[uid]) || 0;
+      if (!Number.isFinite(cutoff) || cutoff <= 0) return;
+      nextMessages[uid] = list.filter((item) => resolveMessageCreatedAtMs(item) > cutoff);
+      const latest = nextLatest[uid];
+      if (!latest || Number(latest.ts) <= cutoff) {
+        delete nextLatest[uid];
+        nextUnread[uid] = 0;
+      }
+    });
+
     const nextIdSets = new Map<number, Set<number | string>>();
     Object.entries(nextMessages).forEach(([rawUid, list]) => {
       const uid = Number(rawUid);
@@ -1639,11 +1748,13 @@ export default function Home({ profile }: { profile: Profile }) {
     });
 
     messageIdSetsRef.current = nextIdSets;
+    deleteCutoffMapRef.current = nextDeleteCutoff;
     setFriends(nextFriends);
     setGroups(nextGroups);
     setMessagesByUid(nextMessages);
     setLatestMap(nextLatest);
     setUnreadMap(nextUnread);
+    setDeleteCutoffMap(nextDeleteCutoff);
     setPendingRequestCount(Number.isFinite(Number(cachedPending)) ? Math.max(0, Number(cachedPending)) : 0);
     setGroupRemarksMap(sanitizeGroupRemarksMap(cachedGroupRemarks));
     homeCacheHydratedRef.current = true;
@@ -1743,6 +1854,32 @@ export default function Home({ profile }: { profile: Profile }) {
     await storage.setJson(STORAGE_KEYS.hiddenChats, nextMap);
   }, []);
 
+  const persistDeleteCutoffMap = useCallback(async (nextMap: DeleteCutoffMap) => {
+    await storage.setJson(STORAGE_KEYS.chatDeleteCutoff, nextMap);
+  }, []);
+
+  const getDeleteCutoff = useCallback((uid: number) => {
+    const value = Number(deleteCutoffMapRef.current[uid]);
+    return Number.isFinite(value) && value > 0 ? value : 0;
+  }, []);
+
+  const setDeleteCutoff = useCallback(
+    (uid: number, cutoffMs: number) => {
+      if (!uid || !Number.isFinite(cutoffMs) || cutoffMs <= 0) return;
+      setDeleteCutoffMap((prev) => {
+        const current = Number(prev[uid]);
+        const currentSafe = Number.isFinite(current) && current > 0 ? current : 0;
+        const nextValue = Math.max(currentSafe, cutoffMs);
+        if (nextValue === currentSafe) return prev;
+        const next = { ...prev, [uid]: nextValue };
+        deleteCutoffMapRef.current = next;
+        persistDeleteCutoffMap(next).catch(() => undefined);
+        return next;
+      });
+    },
+    [persistDeleteCutoffMap]
+  );
+
   const getReadAt = useCallback((uid: number) => {
     const value = Number(readAtMapRef.current[uid]);
     return Number.isFinite(value) ? value : 0;
@@ -1817,18 +1954,24 @@ export default function Home({ profile }: { profile: Profile }) {
     (uid: number, list: any[], { prepend }: { prepend?: boolean } = {}) => {
       if (!uid) return;
       ensureMessageBucket(uid);
-      unhideChat(uid);
       const bucket = messagesByUidRef.current[uid] || [];
       let idSet = messageIdSetsRef.current.get(uid);
       if (!idSet) {
         idSet = new Set();
         messageIdSetsRef.current.set(uid, idSet);
       }
+      const deleteCutoff = getDeleteCutoff(uid);
       const incoming = list
         .map(normalizeMessage)
-        .filter((entry) => entry.id && !idSet?.has(entry.id))
+        .filter(
+          (entry) =>
+            entry.id &&
+            !idSet?.has(entry.id) &&
+            (deleteCutoff <= 0 || Number(entry.createdAtMs) > deleteCutoff)
+        )
         .sort((a, b) => a.createdAtMs - b.createdAtMs);
       if (!incoming.length) return;
+      unhideChat(uid);
       incoming.forEach((entry) => idSet?.add(entry.id));
       const nextBucket = prepend ? [...incoming, ...bucket] : [...bucket, ...incoming];
       setMessagesByUid((prev) => ({ ...prev, [uid]: nextBucket }));
@@ -1839,7 +1982,7 @@ export default function Home({ profile }: { profile: Profile }) {
       }
       recalcUnread(uid, nextBucket);
     },
-    [ensureMessageBucket, normalizeMessage, recalcUnread, unhideChat, updateLatest]
+    [ensureMessageBucket, getDeleteCutoff, normalizeMessage, recalcUnread, unhideChat, updateLatest]
   );
 
   const loadPendingRequestCount = useCallback(async () => {
@@ -1895,25 +2038,41 @@ export default function Home({ profile }: { profile: Profile }) {
         const uid = Number(entry?.uid);
         if (!Number.isInteger(uid)) return;
         ensureMessageBucket(uid);
+        const deleteCutoff = getDeleteCutoff(uid);
         const nextUnread = Number.isFinite(Number(entry?.unread))
           ? Math.min(Math.max(Number(entry.unread), 0), 99)
           : 0;
-        unreadPatch[uid] = nextUnread;
         if (entry?.latest) {
           const normalized = normalizeMessage(entry.latest);
+          if (deleteCutoff > 0 && Number(normalized.createdAtMs) <= deleteCutoff) {
+            unreadPatch[uid] = 0;
+            return;
+          }
+          unreadPatch[uid] = nextUnread;
           latestPatch[uid] = {
             text: normalized.content || formatMessage(normalized.raw || normalized) || '暂无消息',
             time: formatTime(normalized.createdAt, normalized.createdAtMs),
             ts: normalized.createdAtMs,
           };
+          unhideChat(uid);
+          return;
         }
+        unreadPatch[uid] = deleteCutoff > 0 ? 0 : nextUnread;
       });
       setUnreadMap((prev) => ({ ...prev, ...unreadPatch }));
       if (Object.keys(latestPatch).length > 0) {
         setLatestMap((prev) => ({ ...prev, ...latestPatch }));
       }
     } catch {}
-  }, [authHeaders, ensureMessageBucket, formatMessage, formatTime, normalizeMessage]);
+  }, [
+    authHeaders,
+    ensureMessageBucket,
+    formatMessage,
+    formatTime,
+    getDeleteCutoff,
+    normalizeMessage,
+    unhideChat,
+  ]);
 
   const loadFriends = useCallback(async ({ silent = true }: { silent?: boolean } = {}) => {
     if (!tokenRef.current) return;
@@ -1960,15 +2119,26 @@ export default function Home({ profile }: { profile: Profile }) {
         });
         const data = await response.json().catch(() => ({}));
         if (response.ok && data?.success && Array.isArray(data?.data)) {
+          const deleteCutoff = getDeleteCutoff(uid);
+          const hasNewerThanDeleteCutoff =
+            deleteCutoff <= 0 ||
+            data.data.some((item: any) => {
+              const directMs = Number(item?.createdAtMs);
+              if (Number.isFinite(directMs)) return directMs > deleteCutoff;
+              const raw = String(item?.createdAt || '');
+              if (!raw) return false;
+              const parsed = Date.parse(raw);
+              return Number.isFinite(parsed) && parsed > deleteCutoff;
+            });
           insertMessages(uid, data.data, { prepend: Boolean(beforeId) });
-          if (data.data.length < PAGE_LIMIT) {
+          if (data.data.length < PAGE_LIMIT || !hasNewerThanDeleteCutoff) {
             setHistoryHasMore((prev) => ({ ...prev, [uid]: false }));
           }
         }
       } catch {}
       setHistoryLoading((prev) => ({ ...prev, [uid]: false }));
     },
-    [authHeaders, ensureMessageBucket, historyLoading, insertMessages]
+    [authHeaders, ensureMessageBucket, getDeleteCutoff, historyLoading, insertMessages]
   );
 
 
@@ -2476,16 +2646,18 @@ export default function Home({ profile }: { profile: Profile }) {
     useCallback(() => {
       let cancelled = false;
       const syncFromSettings = async () => {
-        const [storedPinned, storedMuted, storedBackground, storedGroupRemarks, pendingAction] =
+        const [storedPinned, storedMuted, storedBackground, storedGroupRemarks, storedDeleteCutoff, pendingAction] =
           await Promise.all([
             storage.getJson<PinnedMap>(STORAGE_KEYS.pinned),
             storage.getJson<MutedMap>(STORAGE_KEYS.chatMuted),
             storage.getJson<ChatBackgroundMap>(STORAGE_KEYS.chatBackground),
             storage.getJson<Record<number, string>>(STORAGE_KEYS.groupRemarks),
+            storage.getJson<DeleteCutoffMap>(STORAGE_KEYS.chatDeleteCutoff),
             storage.getJson<{
               type?: string;
               uid?: number;
               group?: Partial<Group>;
+              at?: number;
             }>(STORAGE_KEYS.pendingChatSettingsAction),
           ]);
         if (cancelled) return;
@@ -2494,8 +2666,14 @@ export default function Home({ profile }: { profile: Profile }) {
         setMutedMap(sanitizeBooleanMap(storedMuted));
         setChatBackgroundMap(sanitizeChatBackgroundMap(storedBackground));
         setGroupRemarksMap(sanitizeGroupRemarksMap(storedGroupRemarks));
+        const nextDeleteCutoff = sanitizeDeleteCutoffMap(storedDeleteCutoff);
+        deleteCutoffMapRef.current = nextDeleteCutoff;
+        setDeleteCutoffMap(nextDeleteCutoff);
 
         const actionUid = Number(pendingAction?.uid);
+        const actionAt = Number(pendingAction?.at);
+        const effectiveActionAt =
+          Number.isFinite(actionAt) && actionAt > 0 ? actionAt : Date.now();
         if (pendingAction?.type === 'group_update' && Number.isInteger(actionUid) && actionUid > 0) {
           await storage.remove(STORAGE_KEYS.pendingChatSettingsAction);
           const payload = pendingAction.group || {};
@@ -2521,6 +2699,8 @@ export default function Home({ profile }: { profile: Profile }) {
 
         if (pendingAction?.type === 'delete_chat' && Number.isInteger(actionUid) && actionUid > 0) {
           await storage.remove(STORAGE_KEYS.pendingChatSettingsAction);
+          setDeleteCutoff(actionUid, effectiveActionAt);
+          setReadAt(actionUid, effectiveActionAt);
           messageIdSetsRef.current.delete(actionUid);
           setMessagesByUid((prev) => {
             const next = { ...prev };
@@ -2534,7 +2714,9 @@ export default function Home({ profile }: { profile: Profile }) {
           });
           setUnreadMap((prev) => ({ ...prev, [actionUid]: 0 }));
           setHiddenMap((prev) => {
-            const next = { ...prev, [actionUid]: true };
+            if (!prev[actionUid]) return prev;
+            const next = { ...prev };
+            delete next[actionUid];
             persistHiddenMap(next).catch(() => undefined);
             return next;
           });
@@ -2546,6 +2728,8 @@ export default function Home({ profile }: { profile: Profile }) {
 
         if (pendingAction?.type === 'group_delete_chat' && Number.isInteger(actionUid) && actionUid > 0) {
           await storage.remove(STORAGE_KEYS.pendingChatSettingsAction);
+          setDeleteCutoff(actionUid, effectiveActionAt);
+          setReadAt(actionUid, effectiveActionAt);
           messageIdSetsRef.current.delete(actionUid);
           setMessagesByUid((prev) => {
             const next = { ...prev };
@@ -2558,6 +2742,9 @@ export default function Home({ profile }: { profile: Profile }) {
             return next;
           });
           setUnreadMap((prev) => ({ ...prev, [actionUid]: 0 }));
+          if (activeChatUidRef.current === actionUid) {
+            setActiveChatUid(null);
+          }
           return;
         }
 
@@ -2635,6 +2822,14 @@ export default function Home({ profile }: { profile: Profile }) {
             storage.setJson(STORAGE_KEYS.groupRemarks, next).catch(() => undefined);
             return next;
           });
+          setDeleteCutoffMap((prev) => {
+            if (!Object.prototype.hasOwnProperty.call(prev, actionUid)) return prev;
+            const next = { ...prev };
+            delete next[actionUid];
+            deleteCutoffMapRef.current = next;
+            persistDeleteCutoffMap(next).catch(() => undefined);
+            return next;
+          });
           if (activeChatUidRef.current === actionUid) {
             setActiveChatUid(null);
           }
@@ -2644,7 +2839,7 @@ export default function Home({ profile }: { profile: Profile }) {
       return () => {
         cancelled = true;
       };
-    }, [persistHiddenMap])
+    }, [persistDeleteCutoffMap, persistHiddenMap, setDeleteCutoff, setReadAt])
   );
 
   useEffect(() => {
@@ -3770,6 +3965,7 @@ export default function Home({ profile }: { profile: Profile }) {
     Object.entries(messagesByUid).forEach(([rawUid, list]) => {
       const uid = Number(rawUid);
       if (!Number.isInteger(uid) || uid <= 0 || !Array.isArray(list)) return;
+      const deleteCutoff = Number(deleteCutoffMap[uid]) || 0;
       const maybeGroup = groupMap.get(uid);
       const maybeFriend = friendMap.get(uid);
       const targetType: 'private' | 'group' = maybeGroup ? 'group' : 'private';
@@ -3778,19 +3974,25 @@ export default function Home({ profile }: { profile: Profile }) {
           ? getGroupDisplayName(maybeGroup)
           : maybeFriend?.nickname || maybeFriend?.username || `用户${uid}`;
       list.forEach((message) => {
+        const messageIdRaw = message?.id;
+        if (!(typeof messageIdRaw === 'number' || typeof messageIdRaw === 'string')) return;
+        const messageId = String(messageIdRaw).trim();
+        if (!messageId) return;
+        const safeCreatedAtMs = resolveMessageCreatedAtMs(message);
+        if (!(Number.isFinite(safeCreatedAtMs) && safeCreatedAtMs > 0)) return;
+        if (deleteCutoff > 0 && safeCreatedAtMs <= deleteCutoff) return;
         const content = String(message?.content || '').trim();
         if (!content) return;
         if (!content.toLowerCase().includes(normalizedSearchQuery)) return;
-        const createdAtMs = Number(message?.createdAtMs);
         hits.push({
-          key: `${uid}:${String(message?.id)}`,
-          messageId: String(message?.id),
+          key: `${uid}:${messageId}:${safeCreatedAtMs}`,
+          messageId,
           uid,
           targetType,
           title,
           content,
           createdAt: String(message?.createdAt || ''),
-          createdAtMs: Number.isFinite(createdAtMs) ? createdAtMs : Date.now(),
+          createdAtMs: safeCreatedAtMs,
         });
       });
     });
@@ -3799,7 +4001,7 @@ export default function Home({ profile }: { profile: Profile }) {
       return hits.slice(0, SEARCH_MAX_CHAT_HITS);
     }
     return hits;
-  }, [friends, groups, hasSearchQuery, messagesByUid, normalizedSearchQuery]);
+  }, [deleteCutoffMap, friends, groups, hasSearchQuery, messagesByUid, normalizedSearchQuery]);
 
   const searchTranslateY = useMemo(
     () =>
@@ -3865,6 +4067,21 @@ export default function Home({ profile }: { profile: Profile }) {
 
   const onSelectSearchChatHit = useCallback(
     (hit: SearchChatHit) => {
+      const deleteCutoff = getDeleteCutoff(hit.uid);
+      if (deleteCutoff > 0 && Number(hit.createdAtMs) <= deleteCutoff) {
+        closeSearchPanel();
+        return;
+      }
+      const bucket = messagesByUidRef.current[hit.uid] || [];
+      const exists = bucket.some(
+        (item) =>
+          String(item?.id) === String(hit.messageId) &&
+          (deleteCutoff <= 0 || resolveMessageCreatedAtMs(item) > deleteCutoff)
+      );
+      if (!exists) {
+        closeSearchPanel();
+        return;
+      }
       closeSearchPanel();
       const scheduleLocate = () => {
         setTimeout(() => {
@@ -3886,16 +4103,15 @@ export default function Home({ profile }: { profile: Profile }) {
       openChatFromPayload(hit.uid);
       scheduleLocate();
     },
-    [closeSearchPanel, friends, groups, locateChatMessage, openChat, openChatFromPayload]
+    [closeSearchPanel, friends, getDeleteCutoff, groups, locateChatMessage, openChat, openChatFromPayload]
   );
 
   const closeChatMenu = useCallback(() => {
     setChatMenuVisible(false);
     setChatMenuTargetUid(null);
-    setChatMenuTargetType('private');
   }, []);
 
-  const openChatMenu = useCallback((event: any, uid: number, targetType: 'private' | 'group') => {
+  const openChatMenu = useCallback((event: any, uid: number) => {
     const { width, height } = Dimensions.get('window');
     const menuWidth = 160;
     const menuHeight = 96;
@@ -3903,7 +4119,6 @@ export default function Home({ profile }: { profile: Profile }) {
     const y = Math.min(event.nativeEvent.pageY, height - menuHeight - 10);
     setChatMenuPosition({ x, y });
     setChatMenuTargetUid(uid);
-    setChatMenuTargetType(targetType);
     setChatMenuVisible(true);
   }, []);
 
@@ -3920,66 +4135,52 @@ export default function Home({ profile }: { profile: Profile }) {
     closeChatMenu();
   }, [chatMenuTargetUid, closeChatMenu, persistPinnedMap]);
 
-  const deleteChat = useCallback(async () => {
+  const applyLocalDeleteChat = useCallback(
+    (uid: number) => {
+      const deletedAt = Date.now();
+      setDeleteCutoff(uid, deletedAt);
+      setReadAt(uid, deletedAt);
+      messageIdSetsRef.current.delete(uid);
+      messageOffsetMapRef.current.delete(uid);
+      setHiddenMap((prev) => {
+        if (!prev[uid]) return prev;
+        const next = { ...prev };
+        delete next[uid];
+        persistHiddenMap(next).catch(() => undefined);
+        return next;
+      });
+      setMessagesByUid((prev) => {
+        const next = { ...prev };
+        delete next[uid];
+        return next;
+      });
+      setLatestMap((prev) => {
+        const next = { ...prev };
+        delete next[uid];
+        return next;
+      });
+      setUnreadMap((prev) => ({ ...prev, [uid]: 0 }));
+      if (activeChatUidRef.current === uid) {
+        setActiveChatUid(null);
+      }
+    },
+    [persistHiddenMap, setDeleteCutoff, setReadAt]
+  );
+
+  const deleteChat = useCallback(() => {
     if (!chatMenuTargetUid) return;
     const uid = chatMenuTargetUid;
     closeChatMenu();
-
-    const deleteBatch = async (beforeId?: number | string) => {
-      const params = new URLSearchParams({
-        targetType: chatMenuTargetType,
-        targetUid: String(uid),
-        limit: String(PAGE_LIMIT),
-      });
-      if (beforeId) {
-        params.set('beforeId', String(beforeId));
-      }
-      const response = await fetch(`${API_BASE}/api/chat/get?${params.toString()}`, {
-        headers: { ...authHeaders() },
-      });
-      const data = await response.json().catch(() => ({}));
-      if (!response.ok || !data?.success || !Array.isArray(data?.data)) {
-        return { done: true, lastId: null as null | number | string };
-      }
-      const list = data.data;
-      for (const item of list) {
-        if (!item?.id) continue;
-        await fetch(`${API_BASE}/api/chat/del`, {
-          method: 'DELETE',
-          headers: { 'Content-Type': 'application/json', ...authHeaders() },
-          body: JSON.stringify({ id: String(item.id) }),
-        }).catch(() => undefined);
-      }
-      if (list.length < PAGE_LIMIT) {
-        return { done: true, lastId: null as null | number | string };
-      }
-      return { done: false, lastId: list[0]?.id || null };
-    };
-
-    let beforeId: number | string | null = null;
-    for (;;) {
-      const result = await deleteBatch(beforeId || undefined);
-      if (result.done || !result.lastId) break;
-      beforeId = result.lastId;
-    }
-
-    setHiddenMap((prev) => {
-      const next = { ...prev, [uid]: true };
-      persistHiddenMap(next).catch(() => undefined);
-      return next;
-    });
-    setMessagesByUid((prev) => {
-      const next = { ...prev };
-      delete next[uid];
-      return next;
-    });
-    setLatestMap((prev) => {
-      const next = { ...prev };
-      delete next[uid];
-      return next;
-    });
-    setUnreadMap((prev) => ({ ...prev, [uid]: 0 }));
-  }, [authHeaders, chatMenuTargetType, chatMenuTargetUid, closeChatMenu, persistHiddenMap]);
+    Alert.alert(
+      '删除聊天记录',
+      '仅删除本地聊天记录，服务器记录不会删除。确认继续？',
+      [
+        { text: '取消', style: 'cancel' },
+        { text: '删除', style: 'destructive', onPress: () => applyLocalDeleteChat(uid) },
+      ],
+      { cancelable: true }
+    );
+  }, [applyLocalDeleteChat, chatMenuTargetUid, closeChatMenu]);
 
   return (
     <View style={[styles.page, { paddingTop: insets.top }]}>
@@ -4492,7 +4693,7 @@ export default function Home({ profile }: { profile: Profile }) {
                           openChat(item.friend);
                         }
                       }}
-                      onLongPress={(event) => openChatMenu(event, item.uid, item.targetType)}
+                      onLongPress={(event) => openChatMenu(event, item.uid)}
                     >
                       <View style={styles.avatarBox}>
                         {item.targetType === 'group' && item.group ? (

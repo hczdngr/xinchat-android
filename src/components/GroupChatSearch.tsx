@@ -17,6 +17,7 @@ import type { GroupChatSearchRoute, RootNavigation } from '../navigation/types';
 import { storage } from '../storage';
 
 type MessageTypeFilter = 'all' | 'text' | 'image' | 'file' | 'voice';
+type NumberMap = Record<number, number>;
 type GroupMessageResult = {
   id: string;
   senderUid: number;
@@ -49,6 +50,28 @@ const stripAutoGroupCountSuffix = (rawName: any, memberCount: number) => {
   return text.slice(0, text.length - match[0].length).trim();
 };
 
+const sanitizeNumberMap = (input: any): NumberMap => {
+  if (!input || typeof input !== 'object') return {};
+  const next: NumberMap = {};
+  Object.entries(input).forEach(([rawUid, rawValue]) => {
+    const uid = Number(rawUid);
+    if (!Number.isInteger(uid) || uid <= 0) return;
+    const value = Number(rawValue);
+    if (!Number.isFinite(value) || value <= 0) return;
+    next[uid] = value;
+  });
+  return next;
+};
+
+const resolveMessageCreatedAtMs = (entry: any): number => {
+  const direct = Number(entry?.createdAtMs);
+  if (Number.isFinite(direct) && direct > 0) return direct;
+  const rawCreatedAt = String(entry?.createdAt || '');
+  if (!rawCreatedAt) return 0;
+  const parsed = Date.parse(rawCreatedAt);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
+};
+
 const extractMessageContent = (entry: any): string => {
   const type = String(entry?.type || '');
   if (type === 'text') {
@@ -65,14 +88,15 @@ const normalizeMessage = (entry: any): GroupMessageResult | null => {
   const idRaw = entry?.id;
   if (typeof idRaw !== 'number' && typeof idRaw !== 'string') return null;
   const createdAt = String(entry?.createdAt || '');
-  const parsed = Date.parse(createdAt);
+  const createdAtMs = resolveMessageCreatedAtMs(entry);
+  if (!(Number.isFinite(createdAtMs) && createdAtMs > 0)) return null;
   return {
     id: String(idRaw),
     senderUid: Number(entry?.senderUid) || 0,
     type: String(entry?.type || ''),
     content: extractMessageContent(entry),
     createdAt,
-    createdAtMs: Number.isFinite(parsed) ? parsed : Date.now(),
+    createdAtMs,
   };
 };
 
@@ -87,6 +111,24 @@ export default function GroupChatSearch() {
   const [loading, setLoading] = useState(false);
   const [searched, setSearched] = useState(false);
   const [results, setResults] = useState<GroupMessageResult[]>([]);
+  const [deleteCutoff, setDeleteCutoff] = useState(0);
+
+  useEffect(() => {
+    let cancelled = false;
+    const loadDeleteCutoff = async () => {
+      const stored = await storage.getJson<NumberMap>(STORAGE_KEYS.chatDeleteCutoff);
+      if (cancelled) return;
+      const map = sanitizeNumberMap(stored);
+      const nextCutoff = Number(map[uid]) || 0;
+      setDeleteCutoff(Number.isFinite(nextCutoff) && nextCutoff > 0 ? nextCutoff : 0);
+    };
+    loadDeleteCutoff().catch(() => {
+      if (!cancelled) setDeleteCutoff(0);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [uid]);
 
   const title = useMemo(() => {
     if (targetType === 'private') {
@@ -109,6 +151,14 @@ export default function GroupChatSearch() {
     setLoading(true);
     setSearched(true);
     try {
+      let effectiveDeleteCutoff = deleteCutoff;
+      const latestDeleteCutoffMap = sanitizeNumberMap(
+        await storage.getJson<NumberMap>(STORAGE_KEYS.chatDeleteCutoff)
+      );
+      const latestDeleteCutoff = Number(latestDeleteCutoffMap[uid]) || 0;
+      if (Number.isFinite(latestDeleteCutoff) && latestDeleteCutoff > 0) {
+        effectiveDeleteCutoff = latestDeleteCutoff;
+      }
       const token = (await storage.getString(STORAGE_KEYS.token)) || '';
       if (!token) {
         setResults([]);
@@ -149,6 +199,10 @@ export default function GroupChatSearch() {
         const pageItems = list
           .map(normalizeMessage)
           .filter((item: GroupMessageResult | null): item is GroupMessageResult => Boolean(item))
+          .filter(
+            (item: GroupMessageResult) =>
+              effectiveDeleteCutoff <= 0 || item.createdAtMs > effectiveDeleteCutoff
+          )
           .filter((item: GroupMessageResult) => {
             if (!normalizedQuery) return true;
             const hay = `${item.content} ${item.senderUid} ${item.id}`.toLowerCase();
@@ -176,10 +230,11 @@ export default function GroupChatSearch() {
     } finally {
       setLoading(false);
     }
-  }, [filter, query, targetType, uid]);
+  }, [deleteCutoff, filter, query, targetType, uid]);
 
   const openMessage = useCallback(
     async (item: GroupMessageResult) => {
+      if (deleteCutoff > 0 && Number(item.createdAtMs) <= deleteCutoff) return;
       const focusMessageId = String(item.id || '').trim();
       if (!focusMessageId || !uid) return;
       await storage
@@ -201,7 +256,7 @@ export default function GroupChatSearch() {
         openChatReturnToPrevious: true,
       });
     },
-    [navigation, route.params?.friend, route.params?.group, targetType, uid]
+    [deleteCutoff, navigation, route.params?.friend, route.params?.group, targetType, uid]
   );
 
   useEffect(() => {

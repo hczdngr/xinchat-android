@@ -1,9 +1,9 @@
-﻿import React, { useCallback, useEffect, useMemo, useState } from 'react';
-import { Alert, Image, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
+﻿import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Alert, Image, Platform, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 import { useNavigation, useRoute } from '@react-navigation/native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import Svg, { Path } from 'react-native-svg';
-import { API_BASE, normalizeImageUrl } from '../config';
+import { normalizeImageUrl } from '../config';
 import {
   CHAT_BACKGROUND_PRESETS,
   type ChatBackgroundKey,
@@ -14,8 +14,7 @@ import { storage } from '../storage';
 
 type BoolMap = Record<number, boolean>;
 type BackgroundMap = Record<number, ChatBackgroundKey>;
-
-const PAGE_LIMIT = 30;
+type NumberMap = Record<number, number>;
 
 const sanitizeBoolMap = (input: any): BoolMap => {
   if (!input || typeof input !== 'object') return {};
@@ -25,6 +24,19 @@ const sanitizeBoolMap = (input: any): BoolMap => {
     if (!Number.isInteger(uid) || uid <= 0) return;
     if (!rawValue) return;
     next[uid] = true;
+  });
+  return next;
+};
+
+const sanitizeNumberMap = (input: any): NumberMap => {
+  if (!input || typeof input !== 'object') return {};
+  const next: NumberMap = {};
+  Object.entries(input).forEach(([rawUid, rawValue]) => {
+    const uid = Number(rawUid);
+    if (!Number.isInteger(uid) || uid <= 0) return;
+    const value = Number(rawValue);
+    if (!Number.isFinite(value) || value <= 0) return;
+    next[uid] = value;
   });
   return next;
 };
@@ -55,6 +67,32 @@ export default function ChatSettings() {
   const [muted, setMuted] = useState(false);
   const [background, setBackground] = useState<ChatBackgroundKey>('default');
   const [deleting, setDeleting] = useState(false);
+  const backActionHandledRef = useRef(false);
+
+    const queueOpenChatOnReturn = useCallback(async () => {
+    if (!Number.isInteger(uid) || uid <= 0) return;
+    await storage.setJson(STORAGE_KEYS.pendingOpenChat, {
+      uid,
+      targetType: 'private',
+      friend: friend
+        ? {
+            uid: Number(friend.uid),
+            username: friend.username,
+            nickname: friend.nickname,
+            avatar: friend.avatar,
+            signature: friend.signature,
+            online: friend.online,
+          }
+        : undefined,
+      returnToPrevious: false,
+    });
+  }, [friend, uid]);
+
+  const backToChat = useCallback(async () => {
+    backActionHandledRef.current = true;
+    await queueOpenChatOnReturn().catch(() => undefined);
+    navigation.goBack();
+  }, [navigation, queueOpenChatOnReturn]);
 
   const displayName = useMemo(
     () => friend?.nickname || friend?.username || (uid > 0 ? `用户${uid}` : '聊天'),
@@ -92,7 +130,25 @@ export default function ChatSettings() {
     return () => {
       cancelled = true;
     };
-  }, [uid]);
+    }, [uid]);
+
+  useEffect(() => {
+    backActionHandledRef.current = false;
+    const unsubscribe = navigation.addListener('beforeRemove', (event) => {
+      if (backActionHandledRef.current) return;
+      if (!Number.isInteger(uid) || uid <= 0) return;
+      const actionType = String(event?.data?.action?.type || '');
+      if (actionType !== 'GO_BACK' && actionType !== 'POP' && actionType !== 'POP_TO_TOP') return;
+      event.preventDefault();
+      queueOpenChatOnReturn()
+        .catch(() => undefined)
+        .finally(() => {
+          backActionHandledRef.current = true;
+          navigation.dispatch(event.data.action);
+        });
+    });
+    return unsubscribe;
+  }, [navigation, queueOpenChatOnReturn, uid]);
 
   const savePinned = useCallback(
     async (next: boolean) => {
@@ -176,112 +232,100 @@ export default function ChatSettings() {
     );
   }, [ready, saveBackground, uid]);
 
-  const clearLocalCaches = useCallback(async () => {
-    const [cachedMessages, cachedLatest, cachedUnread, hiddenChats] = await Promise.all([
-      storage.getJson<Record<number, any>>(STORAGE_KEYS.homeMessagesCache),
-      storage.getJson<Record<number, any>>(STORAGE_KEYS.homeLatestCache),
-      storage.getJson<Record<number, any>>(STORAGE_KEYS.homeUnreadCache),
-      storage.getJson<Record<number, any>>(STORAGE_KEYS.hiddenChats),
-    ]);
+  const showNotice = useCallback((title: string, message: string) => {
+    if (Platform.OS === 'web' && typeof window !== 'undefined' && typeof window.alert === 'function') {
+      window.alert(`${title}\n\n${message}`);
+      return;
+    }
+    Alert.alert(title, message);
+  }, []);
+
+  const clearLocalCaches = useCallback(async (deletedAt: number) => {
+    const [cachedMessages, cachedLatest, cachedUnread, hiddenChats, readAtMap, deleteCutoffMap] =
+      await Promise.all([
+        storage.getJson<Record<number, any>>(STORAGE_KEYS.homeMessagesCache),
+        storage.getJson<Record<number, any>>(STORAGE_KEYS.homeLatestCache),
+        storage.getJson<Record<number, any>>(STORAGE_KEYS.homeUnreadCache),
+        storage.getJson<Record<number, any>>(STORAGE_KEYS.hiddenChats),
+        storage.getJson<NumberMap>(STORAGE_KEYS.readAt),
+        storage.getJson<NumberMap>(STORAGE_KEYS.chatDeleteCutoff),
+      ]);
 
     const nextMessages = { ...(cachedMessages || {}) };
     const nextLatest = { ...(cachedLatest || {}) };
     const nextUnread = { ...(cachedUnread || {}) };
     const nextHidden = sanitizeBoolMap(hiddenChats);
+    const nextReadAt = sanitizeNumberMap(readAtMap);
+    const nextDeleteCutoff = sanitizeNumberMap(deleteCutoffMap);
 
     delete nextMessages[uid];
     delete nextLatest[uid];
     nextUnread[uid] = 0;
-    nextHidden[uid] = true;
+    delete nextHidden[uid];
+    nextReadAt[uid] = deletedAt;
+    nextDeleteCutoff[uid] = deletedAt;
 
     await Promise.all([
       storage.setJson(STORAGE_KEYS.homeMessagesCache, nextMessages),
       storage.setJson(STORAGE_KEYS.homeLatestCache, nextLatest),
       storage.setJson(STORAGE_KEYS.homeUnreadCache, nextUnread),
       storage.setJson(STORAGE_KEYS.hiddenChats, nextHidden),
+      storage.setJson(STORAGE_KEYS.readAt, nextReadAt),
+      storage.setJson(STORAGE_KEYS.chatDeleteCutoff, nextDeleteCutoff),
     ]);
   }, [uid]);
 
+  const applyLocalDeleteAction = useCallback(async () => {
+    const deletedAt = Date.now();
+    await clearLocalCaches(deletedAt);
+    await storage.setJson(STORAGE_KEYS.pendingChatSettingsAction, {
+      type: 'delete_chat',
+      uid,
+      at: deletedAt,
+    });
+  }, [clearLocalCaches, uid]);
+
   const deleteChatHistory = useCallback(async () => {
     if (deleting || !Number.isInteger(uid) || uid <= 0) return;
-    const token = (await storage.getString(STORAGE_KEYS.token)) || '';
-    if (!token) {
-      Alert.alert('操作失败', '请先登录后再试');
-      return;
-    }
     setDeleting(true);
     try {
-      const authHeaders = { Authorization: `Bearer ${token}` };
-      const deleteBatch = async (beforeId?: number | string) => {
-        const params = new URLSearchParams({
-          targetType: 'private',
-          targetUid: String(uid),
-          limit: String(PAGE_LIMIT),
-        });
-        if (beforeId) {
-          params.set('beforeId', String(beforeId));
-        }
-        const response = await fetch(`${API_BASE}/api/chat/get?${params.toString()}`, {
-          headers: authHeaders,
-        });
-        const data = await response.json().catch(() => ({}));
-        if (!response.ok || !data?.success || !Array.isArray(data?.data)) {
-          return { done: true, lastId: null as null | number | string };
-        }
-        const list = data.data;
-        for (const item of list) {
-          if (!item?.id) continue;
-          await fetch(`${API_BASE}/api/chat/del`, {
-            method: 'DELETE',
-            headers: { 'Content-Type': 'application/json', ...authHeaders },
-            body: JSON.stringify({ id: String(item.id) }),
-          }).catch(() => undefined);
-        }
-        if (list.length < PAGE_LIMIT) {
-          return { done: true, lastId: null as null | number | string };
-        }
-        return { done: false, lastId: list[0]?.id || null };
-      };
-
-      let beforeId: number | string | null = null;
-      for (;;) {
-        const result = await deleteBatch(beforeId || undefined);
-        if (result.done || !result.lastId) break;
-        beforeId = result.lastId;
-      }
-
-      await clearLocalCaches();
-      await storage.setJson(STORAGE_KEYS.pendingChatSettingsAction, {
-        type: 'delete_chat',
-        uid,
-        at: Date.now(),
-      });
-      Alert.alert('已完成', '聊天记录已删除');
-      navigation.goBack();
+      await applyLocalDeleteAction();
+      showNotice('已完成', '聊天记录已删除');
     } catch {
-      Alert.alert('删除失败', '请稍后重试');
+      showNotice('删除失败', '请稍后重试');
     } finally {
       setDeleting(false);
     }
-  }, [clearLocalCaches, deleting, navigation, uid]);
+  }, [applyLocalDeleteAction, deleting, showNotice, uid]);
 
   const onDeleteChatHistory = useCallback(() => {
-    if (!ready || uid <= 0) return;
+    if (uid <= 0) {
+      showNotice('删除失败', '聊天目标无效');
+      return;
+    }
+    const title = '删除聊天记录';
+    const message = '确认删除该聊天的所有消息记录？';
+    if (Platform.OS === 'web' && typeof window !== 'undefined' && typeof window.confirm === 'function') {
+      if (window.confirm(`${title}\n\n${message}`)) {
+        deleteChatHistory().catch(() => undefined);
+      }
+      return;
+    }
     Alert.alert(
-      '删除聊天记录',
-      '确认删除该聊天的所有消息记录？',
+      title,
+      message,
       [
         { text: '取消', style: 'cancel' },
         { text: '删除', style: 'destructive', onPress: () => deleteChatHistory() },
       ],
       { cancelable: true }
     );
-  }, [deleteChatHistory, ready, uid]);
+  }, [deleteChatHistory, showNotice, uid]);
 
   return (
     <View style={[styles.page, { paddingTop: insets.top }]}>
       <View style={styles.header}>
-        <Pressable style={styles.backBtn} onPress={() => navigation.goBack()}>
+        <Pressable style={styles.backBtn} onPress={() => { backToChat().catch(() => navigation.goBack()); }}>
           <BackIcon />
         </Pressable>
         <Text style={styles.headerTitle}>聊天设置</Text>
@@ -559,3 +603,4 @@ const styles = StyleSheet.create({
     marginLeft: 18,
   },
 });
+
