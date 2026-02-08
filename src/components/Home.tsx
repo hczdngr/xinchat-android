@@ -7,6 +7,7 @@ import {
   Dimensions,
   Easing,
   Image,
+  Keyboard,
   PanResponder,
   Platform,
   Pressable,
@@ -941,6 +942,7 @@ export default function Home({ profile }: { profile: Profile }) {
   const [voiceElapsedSec, setVoiceElapsedSec] = useState(0);
   const [voiceStatusText, setVoiceStatusText] = useState('按住开始录制语音');
   const [playingVoiceMessageId, setPlayingVoiceMessageId] = useState<string>('');
+  const [keyboardInset, setKeyboardInset] = useState(0);
   const [activeView, setActiveView] = useState<'list' | 'found'>('list');
   const [foundFriendsInitialTab, setFoundFriendsInitialTab] = useState<'search' | 'requests'>(
     'search'
@@ -1059,6 +1061,7 @@ export default function Home({ profile }: { profile: Profile }) {
   const messageOffsetMapRef = useRef<Map<number, Map<string, number>>>(new Map());
   const messageFocusTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const activeChatUidRef = useRef<number | null>(null);
+  const chatReturnToPreviousRef = useRef(false);
   const contentHeightRef = useRef(0);
   const messageListRef = useRef<ScrollView | null>(null);
   const chatInputRef = useRef<TextInput | null>(null);
@@ -1157,6 +1160,44 @@ export default function Home({ profile }: { profile: Profile }) {
       setProfileData((prev) => ({ ...prev, ...profile }));
     }
   }, [profile]);
+
+  useEffect(() => {
+    if (Platform.OS === 'web') {
+      setKeyboardInset(0);
+      return;
+    }
+
+    const updateKeyboardInset = (event: any) => {
+      const rawHeight = Number(event?.endCoordinates?.height || 0);
+      if (!Number.isFinite(rawHeight) || rawHeight <= 0) {
+        setKeyboardInset(0);
+        return;
+      }
+      const next = Math.max(0, rawHeight - insets.bottom);
+      setKeyboardInset(next);
+    };
+
+    const resetKeyboardInset = () => setKeyboardInset(0);
+    const showEvent = Platform.OS === 'ios' ? 'keyboardWillShow' : 'keyboardDidShow';
+    const hideEvent = Platform.OS === 'ios' ? 'keyboardWillHide' : 'keyboardDidHide';
+    const frameEvent = Platform.OS === 'ios' ? 'keyboardWillChangeFrame' : null;
+
+    const showSub = Keyboard.addListener(showEvent, updateKeyboardInset);
+    const hideSub = Keyboard.addListener(hideEvent, resetKeyboardInset);
+    const frameSub = frameEvent ? Keyboard.addListener(frameEvent, updateKeyboardInset) : null;
+
+    return () => {
+      showSub.remove();
+      hideSub.remove();
+      if (frameSub) frameSub.remove();
+    };
+  }, [insets.bottom]);
+
+  useEffect(() => {
+    if (!activeChatUid) {
+      setKeyboardInset(0);
+    }
+  }, [activeChatUid]);
 
   useEffect(() => {
     const loadToken = async () => {
@@ -1437,6 +1478,10 @@ export default function Home({ profile }: { profile: Profile }) {
     const key = chatBackgroundMap[activeChatUid] || 'default';
     return CHAT_BACKGROUND_COLORS[key] || CHAT_BACKGROUND_COLORS.default;
   }, [activeChatUid, chatBackgroundMap]);
+  const chatComposerBottomInset = useMemo(
+    () => (activeChatUid ? Math.max(0, keyboardInset) : 0),
+    [activeChatUid, keyboardInset]
+  );
 
   const getAvatarText = useCallback((value?: string) => {
     const text = String(value || '').trim();
@@ -1927,6 +1972,12 @@ export default function Home({ profile }: { profile: Profile }) {
       chatInputRef.current?.focus();
     }, 0);
   }, []);
+  const dismissChatKeyboard = useCallback(() => {
+    chatInputRef.current?.blur();
+    if (Platform.OS !== 'web') {
+      Keyboard.dismiss();
+    }
+  }, []);
 
   const sleep = useCallback((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)), []);
 
@@ -2013,8 +2064,9 @@ export default function Home({ profile }: { profile: Profile }) {
   );
 
   const openChat = useCallback(
-    async (friend: Friend) => {
+    async (friend: Friend, options?: { returnToPrevious?: boolean }) => {
       if (!friend) return;
+      chatReturnToPreviousRef.current = Boolean(options?.returnToPrevious);
       closeQuickMenu();
       setActiveChatUid(friend.uid);
       ensureMessageBucket(friend.uid);
@@ -2033,9 +2085,19 @@ export default function Home({ profile }: { profile: Profile }) {
   );
 
   const openChatFromPayload = useCallback(
-    (targetUid: number, paramFriend?: Partial<Friend>, options?: { targetType?: 'private' | 'group'; group?: Partial<Group> }) => {
+    (
+      targetUid: number,
+      paramFriend?: Partial<Friend>,
+      options?: {
+        targetType?: 'private' | 'group';
+        group?: Partial<Group>;
+        returnToPrevious?: boolean;
+      }
+    ) => {
       if (!Number.isFinite(targetUid) || targetUid <= 0) return;
+      const shouldReturnToPrevious = Boolean(options?.returnToPrevious);
       if (options?.targetType === 'group') {
+        chatReturnToPreviousRef.current = shouldReturnToPrevious;
         const payloadGroup =
           options?.group && Number.isInteger(Number(options.group.id || targetUid))
             ? normalizeGroup({ ...options.group, id: targetUid })
@@ -2081,10 +2143,11 @@ export default function Home({ profile }: { profile: Profile }) {
       }
 
       if (existing) {
-        openChat(existing);
+        openChat(existing, { returnToPrevious: shouldReturnToPrevious });
       } else if (payloadFriend?.uid) {
-        openChat(payloadFriend);
+        openChat(payloadFriend, { returnToPrevious: shouldReturnToPrevious });
       } else {
+        chatReturnToPreviousRef.current = shouldReturnToPrevious;
         setActiveChatUid(targetUid);
       }
     },
@@ -2119,6 +2182,8 @@ export default function Home({ profile }: { profile: Profile }) {
   ]);
 
   const closeChat = useCallback(() => {
+    const shouldReturnToPrevious = chatReturnToPreviousRef.current;
+    chatReturnToPreviousRef.current = false;
     if (activeChatUidRef.current) {
       markChatRead(activeChatUidRef.current);
     }
@@ -2148,7 +2213,14 @@ export default function Home({ profile }: { profile: Profile }) {
     setVoiceGestureAction('send');
     setEmojiPanelVisible(false);
     setActiveChatUid(null);
-  }, [markChatRead]);
+    if (shouldReturnToPrevious && navigation.canGoBack()) {
+      setTimeout(() => {
+        if (navigation.canGoBack()) {
+          navigation.goBack();
+        }
+      }, 0);
+    }
+  }, [markChatRead, navigation]);
 
   const openFoundFriends = useCallback(
     (initialTab: 'search' | 'requests' = 'search') => {
@@ -2314,9 +2386,11 @@ export default function Home({ profile }: { profile: Profile }) {
     const targetUid = Number(params.openChatUid);
     if (!Number.isFinite(targetUid) || targetUid <= 0) return;
     const focusMessageId = String(params.openChatFocusMessageId || '').trim();
+    const returnToPrevious = params.openChatReturnToPrevious === true;
     openChatFromPayload(targetUid, params.openChatFriend, {
       targetType: params.openChatTargetType,
       group: params.openChatGroup,
+      returnToPrevious,
     });
     if (focusMessageId) {
       setTimeout(() => {
@@ -2329,6 +2403,7 @@ export default function Home({ profile }: { profile: Profile }) {
       openChatFriend: undefined,
       openChatGroup: undefined,
       openChatFocusMessageId: undefined,
+      openChatReturnToPrevious: undefined,
     });
   }, [route.params, navigation, locateChatMessage, openChatFromPayload]);
 
@@ -2342,6 +2417,7 @@ export default function Home({ profile }: { profile: Profile }) {
           friend?: Partial<Friend>;
           group?: Partial<Group>;
           focusMessageId?: string | number;
+          returnToPrevious?: boolean;
         }>(STORAGE_KEYS.pendingOpenChat);
         if (cancelled || !pending?.uid) return;
         await storage.remove(STORAGE_KEYS.pendingOpenChat);
@@ -2349,6 +2425,7 @@ export default function Home({ profile }: { profile: Profile }) {
         openChatFromPayload(targetUid, pending.friend, {
           targetType: pending.targetType,
           group: pending.group,
+          returnToPrevious: pending.returnToPrevious === true,
         });
         const focusMessageId = String(pending.focusMessageId || '').trim();
         if (focusMessageId) {
@@ -2567,6 +2644,14 @@ export default function Home({ profile }: { profile: Profile }) {
         closeTour(true);
         return true;
       }
+      if (activeChatUidRef.current) {
+        exitScene(chatSceneAnim, closeChat);
+        return true;
+      }
+      if (activeView === 'found') {
+        exitScene(foundSceneAnim, closeFoundFriends);
+        return true;
+      }
       if (voicePanelVisible && activeChatUidRef.current) {
         if (voiceRecordingTickerRef.current) {
           clearInterval(voiceRecordingTickerRef.current);
@@ -2597,9 +2682,15 @@ export default function Home({ profile }: { profile: Profile }) {
     });
     return () => sub.remove();
   }, [
+    activeView,
+    chatSceneAnim,
+    closeChat,
     closeQuickMenu,
+    closeFoundFriends,
     closeTour,
     emojiPanelVisible,
+    exitScene,
+    foundSceneAnim,
     quickMenuVisible,
     searchAnim,
     searchVisible,
@@ -3247,6 +3338,7 @@ export default function Home({ profile }: { profile: Profile }) {
 
   const openVoicePanel = useCallback(() => {
     if (!activeChatUidRef.current) return;
+    dismissChatKeyboard();
     if (voicePanelVisibleRef.current) {
       closeVoicePanel().catch(() => undefined);
       return;
@@ -3256,7 +3348,7 @@ export default function Home({ profile }: { profile: Profile }) {
     setVoiceStatusText('按住开始录制语音');
     setVoiceGestureAction('send');
     setVoiceElapsedSec(0);
-  }, [closeVoicePanel]);
+  }, [closeVoicePanel, dismissChatKeyboard]);
 
   const preventWebVoicePanelDefault = useCallback((event: any) => {
     if (Platform.OS !== 'web') return;
@@ -4019,11 +4111,11 @@ export default function Home({ profile }: { profile: Profile }) {
                             ]}
                             onPress={() => onPressVoiceMessage(item)}
                           >
-                            <VoiceWaveIcon active={playingVoiceMessageId === itemId} isSelf={isSelf} />
-                            <Text style={[styles.voiceMessageText, isSelf && styles.selfText]}>
-                              {item.voiceDurationSec
-                                ? `${Math.max(1, Math.round(item.voiceDurationSec))}"`
-                                : item.content || '[语音]'}
+                            <View style={styles.voiceWaveTrack}>
+                              <VoiceWaveIcon active={playingVoiceMessageId === itemId} isSelf={isSelf} />
+                            </View>
+                            <Text style={[styles.voiceMessageDuration, isSelf && styles.selfText]}>
+                              {item.voiceDurationSec ? `${Math.max(1, Math.round(item.voiceDurationSec))}"` : '[语音]'}
                             </Text>
                           </Pressable>
                         ) : (
@@ -4039,7 +4131,12 @@ export default function Home({ profile }: { profile: Profile }) {
             })}
           </ScrollView>
 
-          <View style={[styles.chatComposer, { paddingBottom: 8 + insets.bottom }]}>
+          <View
+            style={[
+              styles.chatComposer,
+              { paddingBottom: 8 + insets.bottom, marginBottom: chatComposerBottomInset },
+            ]}
+          >
             <View style={styles.chatInputRow}>
               <TextInput
                 ref={chatInputRef}
@@ -4071,6 +4168,7 @@ export default function Home({ profile }: { profile: Profile }) {
               <Pressable
                 style={[styles.chatToolBtn, chatImageSending && styles.chatToolBtnDisabled]}
                 onPress={() => {
+                  dismissChatKeyboard();
                   closeVoicePanel().catch(() => undefined);
                   sendPickedImages();
                 }}
@@ -4081,6 +4179,7 @@ export default function Home({ profile }: { profile: Profile }) {
               <Pressable
                 style={styles.chatToolBtn}
                 onPress={() => {
+                  dismissChatKeyboard();
                   setEmojiPanelVisible(false);
                   closeVoicePanel().catch(() => undefined);
                 }}
@@ -4091,9 +4190,9 @@ export default function Home({ profile }: { profile: Profile }) {
                 style={[styles.chatToolBtn, isPrivateChat && emojiPanelVisible && styles.chatToolBtnActive]}
                 onPress={() => {
                   if (!isPrivateChat) return;
+                  dismissChatKeyboard();
                   closeVoicePanel().catch(() => undefined);
                   setEmojiPanelVisible((prev) => !prev);
-                  focusChatInput();
                 }}
               >
                 <ToolEmojiIcon active={isPrivateChat && emojiPanelVisible} />
@@ -4101,6 +4200,7 @@ export default function Home({ profile }: { profile: Profile }) {
               <Pressable
                 style={styles.chatToolBtn}
                 onPress={() => {
+                  dismissChatKeyboard();
                   setEmojiPanelVisible(false);
                   closeVoicePanel().catch(() => undefined);
                 }}
@@ -4238,7 +4338,7 @@ export default function Home({ profile }: { profile: Profile }) {
                         {...voiceHoldPanResponder.panHandlers}
                         {...webVoicePanelGuardProps}
                       >
-                        <ToolMicIcon color="#e7f5ff" />
+                        <ToolMicIcon color="#e7f5ff" size={48} />
                       </View>
                     </View>
 
@@ -4274,15 +4374,7 @@ export default function Home({ profile }: { profile: Profile }) {
 
                   {!voiceRecording ? (
                     <View style={styles.voiceModeRow}>
-                      <Text style={styles.voiceModeText} selectable={false}>
-                        变声
-                      </Text>
-                      <Text style={[styles.voiceModeText, styles.voiceModeTextActive]} selectable={false}>
-                        对讲
-                      </Text>
-                      <Text style={styles.voiceModeText} selectable={false}>
-                        录音
-                      </Text>
+                     
                     </View>
                   ) : null}
                 </View>
@@ -5552,17 +5644,26 @@ const styles = StyleSheet.create({
   voiceMessageBubble: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 8,
-    minWidth: 90,
-    paddingRight: 2,
+    gap: 10,
+    minWidth: 150,
+    maxWidth: 230,
   },
   voiceMessageBubblePlaying: {
     opacity: 0.82,
   },
-  voiceMessageText: {
+  voiceWaveTrack: {
+    flex: 1,
+    minWidth: 84,
+    height: 18,
+    justifyContent: 'center',
+  },
+  voiceMessageDuration: {
     fontSize: 14,
     color: '#1f2c3c',
     fontWeight: '500',
+    width: 42,
+    textAlign: 'right',
+    flexShrink: 0,
   },
   selfBubble: {
     backgroundColor: '#4a9df8',
@@ -5794,9 +5895,9 @@ const styles = StyleSheet.create({
   },
   voicePanelInlineInner: {
     flex: 1,
-    paddingHorizontal: 16,
-    paddingTop: 12,
-    paddingBottom: 14,
+    paddingHorizontal: 12,
+    paddingTop: 8,
+    paddingBottom: 10,
     alignItems: 'center',
   },
   voiceTopMeterRow: {
@@ -5805,12 +5906,23 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
     gap: 8,
-    marginBottom: 10,
+    marginBottom: 6,
   },
   voiceMeterBars: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: 4,
+  },
+  voiceWaveIcon: {
+    width: '100%',
+    height: 18,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+  voiceWaveBar: {
+    width: 2,
+    borderRadius: 1,
   },
   voiceMeterBar: {
     width: 5,
@@ -5819,28 +5931,28 @@ const styles = StyleSheet.create({
   },
   voicePanelTimerInline: {
     color: '#44566e',
-    fontSize: 18,
+    fontSize: 16,
     fontWeight: '500',
-    minWidth: 56,
+    minWidth: 52,
     textAlign: 'center',
   },
   voicePanelTitleInline: {
-    marginTop: 18,
+    marginTop: 8,
     color: '#66788f',
-    fontSize: 20,
+    fontSize: 16,
     fontWeight: '500',
   },
   voiceCenterRow: {
-    marginTop: 16,
+    marginTop: 10,
     width: '100%',
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
   },
   voiceActionBubbleInline: {
-    width: 66,
-    height: 66,
-    borderRadius: 33,
+    width: 48,
+    height: 48,
+    borderRadius: 24,
     borderWidth: 1,
     borderColor: '#e0e7f2',
     backgroundColor: '#f2f6fc',
@@ -5848,8 +5960,8 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
   },
   voiceActionBubbleInlinePlaceholder: {
-    width: 66,
-    height: 66,
+    width: 48,
+    height: 48,
   },
   voiceActionBubbleInlineActive: {
     borderColor: '#9ecbf0',
@@ -5861,17 +5973,17 @@ const styles = StyleSheet.create({
   },
   voiceActionBubbleInlineText: {
     color: '#526273',
-    fontSize: 28,
+    fontSize: 20,
     fontWeight: '600',
-    lineHeight: 30,
+    lineHeight: 22,
   },
   voiceActionBubbleInlineTextActive: {
     color: '#2f84d7',
   },
   voiceHoldBtnWrapInline: {
-    width: 136,
-    height: 136,
-    borderRadius: 88,
+    width: 124,
+    height: 124,
+    borderRadius: 62,
     backgroundColor: '#e8f2fc',
     borderWidth: 1,
     borderColor: '#cadff6',
@@ -5888,9 +6000,9 @@ const styles = StyleSheet.create({
     borderColor: '#f3c2c2',
   },
   voiceHoldBtnInline: {
-    width: 102,
-    height: 102,
-    borderRadius: 71,
+    width: 96,
+    height: 96,
+    borderRadius: 48,
     backgroundColor: '#2e9ded',
     alignItems: 'center',
     justifyContent: 'center',
@@ -5906,22 +6018,22 @@ const styles = StyleSheet.create({
     backgroundColor: '#2a8ddb',
   },
   voiceHintTextInline: {
-    marginTop: 14,
-    minHeight: 22,
+    marginTop: 8,
+    minHeight: 18,
     color: '#5f7086',
-    fontSize: 16,
+    fontSize: 14,
     fontWeight: '500',
   },
   voiceModeRow: {
-    marginTop: 26,
-    width: '64%',
+    marginTop: 10,
+    width: '74%',
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
   },
   voiceModeText: {
     color: '#8493a6',
-    fontSize: 18,
+    fontSize: 14,
     fontWeight: '500',
   },
   voiceModeTextActive: {
@@ -6008,34 +6120,25 @@ function ChatSettingsIcon() {
 function VoiceWaveIcon({ active = false, isSelf = false }: { active?: boolean; isSelf?: boolean }) {
   const color = isSelf ? '#ffffff' : '#2f3a48';
   const dimColor = isSelf ? 'rgba(255,255,255,0.55)' : '#8fa2bb';
+  const bars = [8, 12, 16, 10, 14, 18, 12, 16, 10, 14, 18, 12, 16, 10];
   return (
-    <Svg width={22} height={18} viewBox="0 0 22 18" fill="none">
-      <Path
-        d="M1 16V2"
-        stroke={active ? color : dimColor}
-        strokeWidth={2}
-        strokeLinecap="round"
-      />
-      <Path
-        d="M6 14V4"
-        stroke={active ? color : dimColor}
-        strokeWidth={2.2}
-        strokeLinecap="round"
-      />
-      <Path d="M11 12V6" stroke={color} strokeWidth={2.2} strokeLinecap="round" />
-      <Path
-        d="M16 14V4"
-        stroke={active ? color : dimColor}
-        strokeWidth={2.2}
-        strokeLinecap="round"
-      />
-      <Path
-        d="M21 16V2"
-        stroke={active ? color : dimColor}
-        strokeWidth={2}
-        strokeLinecap="round"
-      />
-    </Svg>
+    <View style={styles.voiceWaveIcon}>
+      {bars.map((height, index) => {
+        const emphasized = active || index % 3 === 1;
+        return (
+          <View
+            key={`voice-wave-${index}`}
+            style={[
+              styles.voiceWaveBar,
+              {
+                height,
+                backgroundColor: emphasized ? color : dimColor,
+              },
+            ]}
+          />
+        );
+      })}
+    </View>
   );
 }
 
@@ -6051,9 +6154,9 @@ function VoiceMeterBars({ reversed = false }: { reversed?: boolean }) {
   );
 }
 
-function ToolMicIcon({ color = '#2f3a48' }: { color?: string }) {
+function ToolMicIcon({ color = '#2f3a48', size = 22 }: { color?: string; size?: number }) {
   return (
-    <Svg width={22} height={22} viewBox="0 0 24 24" fill="none">
+    <Svg width={size} height={size} viewBox="0 0 24 24" fill="none">
       <Path
         d="M12 4a2 2 0 0 1 2 2v6a2 2 0 1 1-4 0V6a2 2 0 0 1 2-2Z"
         stroke={color}

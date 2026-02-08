@@ -133,7 +133,7 @@ android {
             if (signingConfigs.release.storeFile != null) {
                 signingConfig signingConfigs.release
             }
-            manifestPlaceholders = [usesCleartextTraffic: "false"]
+            manifestPlaceholders = [usesCleartextTraffic: "true"]
             minifyEnabled enableProguardInReleaseBuilds
             proguardFiles getDefaultProguardFile("proguard-android.txt"), "proguard-rules.pro"
         }

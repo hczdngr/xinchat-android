@@ -4,9 +4,10 @@
   "private": true,
   "scripts": {
     "android": "react-native run-android",
-    "android:assemble": "cd android && gradlew.bat assembleDebug",
-    "android:install": "node scripts/android-install.js",
-    "android:auto-install": "node scripts/android-auto-install.js",
+    "api:sync-host": "node scripts/sync-api-host.js",
+    "android:assemble": "npm run api:sync-host && cd android && gradlew.bat assembleDebug",
+    "android:install": "npm run api:sync-host && node scripts/android-install.js",
+    "android:auto-install": "npm run api:sync-host && node scripts/android-auto-install.js",
     "backend": "npm --prefix backend install && npm --prefix backend run start",
     "ios": "react-native run-ios",
     "lint": "eslint .",
