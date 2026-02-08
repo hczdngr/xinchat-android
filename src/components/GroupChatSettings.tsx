@@ -667,6 +667,7 @@ export default function GroupChatSettings() {
             onPress={() =>
               navigation.navigate('GroupChatSearch', {
                 uid,
+                targetType: 'group',
                 title: displayName,
                 group: group
                   ? {
