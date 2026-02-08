@@ -8,18 +8,48 @@ export type PickedImage = {
 
 export async function pickImagesForPlatform(maxCount = 1): Promise<PickedImage[]> {
   const doc = (globalThis as any).document as Document | undefined;
-  if (!doc) return [];
+  const win = (globalThis as any).window as Window | undefined;
+  if (!doc || !win) return [];
   const safeMaxCount = Math.max(1, Math.min(9, Number(maxCount) || 1));
 
   return new Promise((resolve, reject) => {
     const input = doc.createElement('input');
+    let settled = false;
+    let focusTimer: number | null = null;
+    const cleanup = () => {
+      input.onchange = null;
+      win.removeEventListener('focus', handleFocus);
+      if (focusTimer) {
+        win.clearTimeout(focusTimer);
+        focusTimer = null;
+      }
+    };
+    const resolveOnce = (value: PickedImage[]) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      resolve(value);
+    };
+    const rejectOnce = (error: Error) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      reject(error);
+    };
+    const handleFocus = () => {
+      focusTimer = win.setTimeout(() => {
+        if (settled) return;
+        const files = input.files ? Array.from(input.files).slice(0, safeMaxCount) : [];
+        if (!files.length) resolveOnce([]);
+      }, 250);
+    };
     input.type = 'file';
     input.accept = 'image/*';
     input.multiple = safeMaxCount > 1;
     input.onchange = () => {
       const files = input.files ? Array.from(input.files).slice(0, safeMaxCount) : [];
       if (!files.length) {
-        resolve([]);
+        resolveOnce([]);
         return;
       }
       Promise.all(
@@ -60,9 +90,10 @@ export async function pickImagesForPlatform(maxCount = 1): Promise<PickedImage[]
             })
         )
       )
-        .then(resolve)
-        .catch(reject);
+        .then(resolveOnce)
+        .catch((error) => rejectOnce(error instanceof Error ? error : new Error('Pick image failed')));
     };
+    win.addEventListener('focus', handleFocus, { once: true });
     input.click();
   });
 }
