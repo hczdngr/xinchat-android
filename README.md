@@ -1,6 +1,7 @@
 # XinChat (React Native + Web)
 
 𝓛𝓞𝓥𝓔 𝓕𝓡𝓞𝓜 𝓓𝓖𝓘𝓣𝓒 𝓪𝓷𝓭 𝔀𝓮𝓫𝓬𝓵𝓪𝓼𝓼💗💗
+
 一个支持 Android 与 Web 调试的聊天项目，前端基于 React Native，后端为本地 Node.js 服务。
 
 ## 1. 环境要求
