@@ -736,18 +736,73 @@ const sanitizeCachedMessages = (input: any): BucketMap => {
     const uid = Number(rawUid);
     if (!Number.isInteger(uid) || uid <= 0 || !Array.isArray(rawList)) return;
     const list: Message[] = rawList
-      .map((entry: any) => ({
-        id: entry?.id,
-        type: String(entry?.type || 'text'),
-        senderUid: Number(entry?.senderUid),
-        targetUid: Number(entry?.targetUid),
-        targetType: String(entry?.targetType || ''),
-        content: String(entry?.content || ''),
-        imageUrl: typeof entry?.imageUrl === 'string' ? normalizeImageUrl(entry.imageUrl) : '',
-        createdAt: String(entry?.createdAt || ''),
-        createdAtMs: Number(entry?.createdAtMs),
-        raw: entry?.raw,
-      }))
+      .map((entry: any) => {
+        const raw = entry?.raw && typeof entry.raw === 'object' ? entry.raw : {};
+        const data = raw?.data && typeof raw.data === 'object' ? raw.data : {};
+        const type = String(entry?.type || raw?.type || 'text');
+        const createdAt = String(entry?.createdAt || raw?.createdAt || '');
+        const parsedCreatedAtMs = Number(entry?.createdAtMs);
+        const createdAtMs = Number.isFinite(parsedCreatedAtMs)
+          ? parsedCreatedAtMs
+          : Number.isFinite(Date.parse(createdAt))
+            ? Date.parse(createdAt)
+            : NaN;
+        const imageFromUrls =
+          Array.isArray(data?.urls) && typeof data.urls[0] === 'string' ? data.urls[0] : '';
+        const imageUrl =
+          type === 'image'
+            ? normalizeImageUrl(
+                String(
+                  entry?.imageUrl ||
+                    (typeof data?.url === 'string' ? data.url : '') ||
+                    imageFromUrls
+                )
+              )
+            : '';
+        const voiceFromUrls =
+          Array.isArray(data?.urls) && typeof data.urls[0] === 'string' ? data.urls[0] : '';
+        const voiceUrl =
+          type === 'voice'
+            ? normalizeImageUrl(
+                String(
+                  entry?.voiceUrl ||
+                    (typeof data?.url === 'string' ? data.url : '') ||
+                    voiceFromUrls
+                )
+              )
+            : '';
+        const textContent = String(entry?.content || data?.content || data?.text || '');
+        const durationFromData = Number(data?.durationMs || data?.duration || 0);
+        const durationFromEntry = Number(entry?.voiceDurationSec || 0);
+        const durationByContentMatch = textContent.match(/(\d+)\s*s/i);
+        const durationByContent = durationByContentMatch ? Number(durationByContentMatch[1]) : 0;
+        const voiceDurationSec =
+          type !== 'voice'
+            ? 0
+            : Number.isFinite(durationFromEntry) && durationFromEntry > 0
+              ? Math.max(0, Math.round(durationFromEntry))
+              : Number.isFinite(durationFromData) && durationFromData > 0
+                ? Math.max(0, Math.round(durationFromData / 1000))
+                : Number.isFinite(durationByContent) && durationByContent > 0
+                  ? Math.max(0, Math.round(durationByContent))
+                  : 0;
+        const defaultVoiceText = voiceDurationSec > 0 ? `[语音 ${voiceDurationSec}s]` : '[语音]';
+
+        return {
+          id: entry?.id ?? raw?.id,
+          type,
+          senderUid: Number(entry?.senderUid ?? raw?.senderUid),
+          targetUid: Number(entry?.targetUid ?? raw?.targetUid),
+          targetType: String(entry?.targetType || raw?.targetType || ''),
+          content: textContent || (type === 'image' ? '[图片]' : type === 'voice' ? defaultVoiceText : ''),
+          imageUrl,
+          voiceUrl,
+          voiceDurationSec,
+          createdAt,
+          createdAtMs,
+          raw: Object.keys(raw).length > 0 ? raw : entry?.raw,
+        };
+      })
       .filter(
         (entry) =>
           (typeof entry.id === 'number' || typeof entry.id === 'string') &&
@@ -1966,7 +2021,11 @@ export default function Home({ profile }: { profile: Profile }) {
       closeQuickMenu();
       setActiveChatUid(friend.uid);
       ensureMessageBucket(friend.uid);
-      if ((messagesByUidRef.current[friend.uid] || []).length === 0) {
+      const bucket = messagesByUidRef.current[friend.uid] || [];
+      const hasBrokenVoice = bucket.some(
+        (item) => item?.type === 'voice' && !String(item?.voiceUrl || '').trim()
+      );
+      if (bucket.length === 0 || hasBrokenVoice) {
         await loadHistory(friend.uid);
       }
       setTimeout(scrollToBottom, 0);
@@ -1994,7 +2053,11 @@ export default function Home({ profile }: { profile: Profile }) {
         }
         setActiveChatUid(targetUid);
         ensureMessageBucket(targetUid);
-        if ((messagesByUidRef.current[targetUid] || []).length === 0) {
+        const bucket = messagesByUidRef.current[targetUid] || [];
+        const hasBrokenVoice = bucket.some(
+          (item) => item?.type === 'voice' && !String(item?.voiceUrl || '').trim()
+        );
+        if (bucket.length === 0 || hasBrokenVoice) {
           loadHistory(targetUid).catch(() => undefined);
         }
         setTimeout(scrollToBottom, 0);
@@ -3060,13 +3123,8 @@ export default function Home({ profile }: { profile: Profile }) {
         }
         if (action === 'transcribe') {
           setVoiceStatusText('语音转文字中...');
-          try {
-            const transcript = await requestVoiceTranscription(recorded);
-            appendTranscriptionToDraft(transcript, durationMs);
-          } catch (error) {
-            appendTranscriptionToDraft('', durationMs);
-            throw error;
-          }
+          const transcript = await requestVoiceTranscription(recorded);
+          appendTranscriptionToDraft(transcript, durationMs);
           setVoiceStatusText('已转为文字');
           return;
         }
