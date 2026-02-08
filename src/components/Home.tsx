@@ -2829,13 +2829,17 @@ export default function Home({ profile }: { profile: Profile }) {
 
   const uploadVoiceFile = useCallback(
     async (recorded: VoiceRecordingResult) => {
-      let blob: Blob | null = null;
-      if ((recorded as any)?.blob) {
-        blob = (recorded as any).blob as Blob;
-      } else if (recorded.uri) {
-        const localResponse = await fetch(recorded.uri);
-        blob = await localResponse.blob();
-      }
+      const getVoiceBlob = async () => {
+        if ((recorded as any)?.blob) {
+          return (recorded as any).blob as Blob;
+        }
+        if (recorded.uri) {
+          const localResponse = await fetch(recorded.uri);
+          return localResponse.blob();
+        }
+        return null;
+      };
+      const blob = await getVoiceBlob();
       if (!blob || blob.size <= 0) {
         throw new Error('语音文件无效。');
       }
@@ -2853,6 +2857,75 @@ export default function Home({ profile }: { profile: Profile }) {
         throw new Error(uploadData?.message || '语音上传失败。');
       }
       return String(uploadData.data.url);
+    },
+    [authHeaders]
+  );
+
+  const requestVoiceTranscription = useCallback(
+    async (recorded: VoiceRecordingResult) => {
+      const getVoiceBlob = async () => {
+        if ((recorded as any)?.blob) {
+          return (recorded as any).blob as Blob;
+        }
+        if (recorded.uri) {
+          const localResponse = await fetch(recorded.uri);
+          return localResponse.blob();
+        }
+        return null;
+      };
+      const blob = await getVoiceBlob();
+      if (!blob || blob.size <= 0) {
+        throw new Error('语音文件无效。');
+      }
+
+      const startResponse = await fetch(`${API_BASE}/api/chat/voice/transcribe`, {
+        method: 'POST',
+        headers: {
+          ...authHeaders(),
+          'x-file-name': recorded.fileName || `voice-${Date.now()}.m4a`,
+          'x-file-type': recorded.mimeType || 'audio/mp4',
+        },
+        body: blob as any,
+      });
+      const startData = await startResponse.json().catch(() => ({}));
+      if (!startResponse.ok || !startData?.success || !startData?.data) {
+        throw new Error(startData?.message || '语音转写请求失败。');
+      }
+      if (startData.data.status === 'succeeded' && typeof startData.data.text === 'string') {
+        return String(startData.data.text || '').trim();
+      }
+
+      const jobId = String(startData.data.jobId || '').trim();
+      if (!jobId) {
+        throw new Error('转写任务创建失败。');
+      }
+
+      const startedAt = Date.now();
+      const maxWaitMs = 45 * 1000;
+      let nextPollMs = Number(startData.data.pollAfterMs) || 700;
+      while (Date.now() - startedAt < maxWaitMs) {
+        await new Promise((resolve) => setTimeout(resolve, Math.max(250, Math.min(1500, nextPollMs))));
+        const statusResponse = await fetch(
+          `${API_BASE}/api/chat/voice/transcribe/${encodeURIComponent(jobId)}`,
+          {
+            method: 'GET',
+            headers: { ...authHeaders() },
+          }
+        );
+        const statusData = await statusResponse.json().catch(() => ({}));
+        if (!statusResponse.ok || !statusData?.success || !statusData?.data) {
+          throw new Error(statusData?.message || '获取转写状态失败。');
+        }
+        const status = String(statusData.data.status || '');
+        if (status === 'succeeded') {
+          return String(statusData.data.text || '').trim();
+        }
+        if (status === 'failed') {
+          throw new Error(String(statusData.data.error || '语音转写失败。'));
+        }
+        nextPollMs = 700;
+      }
+      throw new Error('转写超时，请稍后重试。');
     },
     [authHeaders]
   );
@@ -2891,11 +2964,13 @@ export default function Home({ profile }: { profile: Profile }) {
     [authHeaders, insertMessages, scrollToBottom, selfUid, uploadVoiceFile]
   );
 
-  const convertVoiceToTextDraft = useCallback(
-    (durationMs: number) => {
+  const appendTranscriptionToDraft = useCallback(
+    (text: string, durationMs: number) => {
       const durationSec = Math.max(1, Math.round(Math.max(0, Number(durationMs) || 0) / 1000));
-      const text = `（语音转文字 ${durationSec}s）`;
-      setDraftMessage((prev) => `${String(prev || '')}${text}`.slice(0, CHAT_INPUT_MAX_LENGTH));
+      const normalized = String(text || '').trim();
+      const fallback = `（语音转文字 ${durationSec}s）`;
+      const nextText = normalized || fallback;
+      setDraftMessage((prev) => `${String(prev || '')}${nextText}`.slice(0, CHAT_INPUT_MAX_LENGTH));
       focusChatInput();
     },
     [focusChatInput]
@@ -2984,7 +3059,14 @@ export default function Home({ profile }: { profile: Profile }) {
           return;
         }
         if (action === 'transcribe') {
-          convertVoiceToTextDraft(durationMs);
+          setVoiceStatusText('语音转文字中...');
+          try {
+            const transcript = await requestVoiceTranscription(recorded);
+            appendTranscriptionToDraft(transcript, durationMs);
+          } catch (error) {
+            appendTranscriptionToDraft('', durationMs);
+            throw error;
+          }
           setVoiceStatusText('已转为文字');
           return;
         }
@@ -3005,7 +3087,7 @@ export default function Home({ profile }: { profile: Profile }) {
         voiceFinishInFlightRef.current = false;
       }
     },
-    [clearVoiceTicker, convertVoiceToTextDraft, sendVoiceMessage]
+    [appendTranscriptionToDraft, clearVoiceTicker, requestVoiceTranscription, sendVoiceMessage]
   );
 
   const voiceHoldPanResponder = useMemo(

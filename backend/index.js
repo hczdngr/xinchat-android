@@ -13,6 +13,7 @@ import chatRouter, { ensureChatStorage, setChatNotifier } from './routes/chat.js
 import friendsRouter, { setFriendsNotifier } from './routes/friends.js';
 import groupsRouter, { ensureGroupStorage, getGroupMemberUids } from './routes/groups.js';
 import voiceRouter from './routes/voice.js';
+import voiceTranscribeRouter from './routes/voiceTranscribe.js';
 import insightApiRouter, { prewarmWarmTipCache } from './routes/insightApi.js';
 import { startInsightWorker } from './routes/insight.js';
 import {
@@ -601,6 +602,7 @@ app.use('/api/chat', chatRouter);
 app.use('/api/friends', friendsRouter);
 app.use('/api/groups', groupsRouter);
 app.use('/api/voice', voiceRouter);
+app.use('/api/chat/voice', voiceTranscribeRouter);
 app.use('/api/insight', insightApiRouter);
 
 app.use((err, req, res, next) => {

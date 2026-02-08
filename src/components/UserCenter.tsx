@@ -1,4 +1,4 @@
-﻿import React, { useMemo, useState } from 'react';
+import React, { useMemo, useState } from 'react';
 import { Image, Platform, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import Svg, { Circle, Line, Path, Rect } from 'react-native-svg';
@@ -25,23 +25,23 @@ type MenuItem = {
 };
 
 const MENU_ITEMS: MenuItem[] = [
-  { key: 'album', label: '相册', tint: '#e7bc10' },
+  { key: 'album', label: '相册', tint: '#e4c213' },
   { key: 'favorite', label: '收藏', tint: '#1f9de7' },
   { key: 'file', label: '文件', tint: '#1f9de7' },
   { key: 'wallet', label: '钱包', tint: '#1f9de7' },
-  { key: 'vip', label: '会员中心', tint: '#e65378' },
-  { key: 'dress', label: '个性装扮', tint: '#e65378' },
+  { key: 'vip', label: '会员中心', tint: '#e65278' },
+  { key: 'dress', label: '个性装扮', tint: '#e65278' },
 ];
 
-const surfaceShadowStyle =
+const cardShadowStyle =
   Platform.OS === 'web'
-    ? ({ boxShadow: '0px 10px 32px rgba(35, 53, 80, 0.16)' } as any)
+    ? ({ boxShadow: '0px 12px 30px rgba(27, 41, 66, 0.16)' } as any)
     : {
-        shadowColor: '#22344f',
-        shadowOpacity: 0.12,
+        shadowColor: '#23364d',
+        shadowOpacity: 0.16,
         shadowOffset: { width: 0, height: 12 },
-        shadowRadius: 22,
-        elevation: 7,
+        shadowRadius: 24,
+        elevation: 8,
       };
 
 export default function UserCenter({ profile, onBack, onOpenProfile }: Props) {
@@ -49,28 +49,23 @@ export default function UserCenter({ profile, onBack, onOpenProfile }: Props) {
   const [avatarFailed, setAvatarFailed] = useState(false);
 
   const displayName = useMemo(
-    () => String(profile?.nickname || profile?.username || 'XinChat 用户'),
+    () => String(profile?.nickname || profile?.username || 'Rw0ter.Tech'),
     [profile?.nickname, profile?.username]
   );
-  const signature = useMemo(
-    () => String(profile?.signature || 'undefined.'),
-    [profile?.signature]
-  );
+  const signature = useMemo(() => String(profile?.signature || 'undefined.'), [profile?.signature]);
   const uidTag = useMemo(() => String(profile?.uid || '404'), [profile?.uid]);
-  const usernameTag = useMemo(
-    () => String(profile?.username || 'NotFound'),
-    [profile?.username]
-  );
+  const usernameTag = useMemo(() => String(profile?.username || 'NotFound'), [profile?.username]);
   const avatarUrl = useMemo(() => normalizeImageUrl(profile?.avatar), [profile?.avatar]);
   const avatarText = useMemo(() => displayName.slice(0, 2), [displayName]);
+  const bottomPad = Math.max(insets.bottom, 8);
 
   return (
     <View style={styles.page}>
       <ScrollView
         style={styles.scroll}
         bounces={false}
-        contentContainerStyle={{ paddingBottom: Math.max(insets.bottom, 10) + 108 }}
         showsVerticalScrollIndicator={false}
+        contentContainerStyle={{ paddingBottom: 108 + bottomPad }}
       >
         <View style={[styles.hero, { paddingTop: insets.top + 10 }]}>
           {avatarUrl && !avatarFailed ? (
@@ -82,114 +77,122 @@ export default function UserCenter({ profile, onBack, onOpenProfile }: Props) {
             />
           ) : null}
           <View style={styles.heroMask} />
-          <View style={styles.heroGlowA} />
-          <View style={styles.heroGlowB} />
+          <View style={styles.heroGlowOne} />
+          <View style={styles.heroGlowTwo} />
 
           <View style={styles.heroTopRow}>
-            <View style={styles.checkinChip}>
+            <View style={styles.checkInChip}>
               <CheckinIcon />
-              <Text style={styles.checkinChipText}>打卡</Text>
+              <Text style={styles.checkInText}>打卡</Text>
             </View>
 
             <View style={styles.heroActionRow}>
               <View style={styles.musicChip}>
                 <Text style={styles.musicChipText}>😊 听歌中</Text>
               </View>
-              <View style={styles.heroRoundGhost}>
+              <View style={styles.roundChip}>
                 <ThemeIcon />
               </View>
-              <Pressable style={styles.heroRoundGhost} onPress={onBack} hitSlop={8}>
+              <Pressable style={styles.roundChip} onPress={onBack} hitSlop={8}>
                 <CloseIcon />
               </Pressable>
             </View>
           </View>
+        </View>
 
-          <View style={styles.content}>
-            <Pressable style={styles.userCard} onPress={onOpenProfile}>
-              <View style={styles.userCardTopRow}>
-                <View style={styles.userMainRow}>
-                  <View style={styles.userAvatarWrap}>
-                    {avatarUrl && !avatarFailed ? (
-                      <Image
-                        source={{ uri: avatarUrl }}
-                        style={styles.userAvatar}
-                        resizeMode="cover"
-                        onError={() => setAvatarFailed(true)}
-                      />
-                    ) : (
-                      <Text style={styles.userAvatarFallback}>{avatarText}</Text>
-                    )}
-                  </View>
-                  <View style={styles.userInfo}>
-                    <View style={styles.userNameRow}>
-                      <Text style={styles.userName} numberOfLines={1}>
-                        {displayName}
-                      </Text>
-                      <View style={styles.switchAccountBtn}>
-                        <Text style={styles.switchAccountText}>切换账号</Text>
-                      </View>
-                    </View>
-                    <Text style={styles.userSignature} numberOfLines={1}>
-                      {signature}
+        <View style={styles.content}>
+          <Pressable style={styles.userCard} onPress={onOpenProfile}>
+            <View style={styles.cardTopRow}>
+              <View style={styles.profileMain}>
+                <View style={styles.avatarWrap}>
+                  {avatarUrl && !avatarFailed ? (
+                    <Image
+                      source={{ uri: avatarUrl }}
+                      style={styles.avatar}
+                      resizeMode="cover"
+                      onError={() => setAvatarFailed(true)}
+                    />
+                  ) : (
+                    <Text style={styles.avatarFallback}>{avatarText}</Text>
+                  )}
+                </View>
+
+                <View style={styles.profileInfo}>
+                  <View style={styles.nameRow}>
+                    <Text style={styles.nameText} numberOfLines={1}>
+                      {displayName}
                     </Text>
-                    <Text style={styles.userVipLine}>🎗4SVIP8 👑🌙⭐⭐ 💍8</Text>
-                    <View style={styles.tagRow}>
-                      <View style={styles.tagPill}>
-                        <Text style={styles.tagText}>{uidTag}</Text>
-                      </View>
-                      <View style={styles.tagPill}>
-                        <Text style={styles.tagText}>{usernameTag}</Text>
-                      </View>
+                    <View style={styles.switchBtn}>
+                      <Text style={styles.switchBtnText}>切换账号</Text>
+                    </View>
+                  </View>
+
+                  <Text style={styles.signatureText} numberOfLines={1}>
+                    {signature}
+                  </Text>
+                  <Text style={styles.vipLine}>🎗4SVIP8 👑🌙⭐⭐ 🛎8</Text>
+
+                  <View style={styles.tagRow}>
+                    <View style={styles.tagPill}>
+                      <Text style={styles.tagText}>{uidTag}</Text>
+                    </View>
+                    <View style={styles.tagPill}>
+                      <Text style={styles.tagText}>{usernameTag}</Text>
                     </View>
                   </View>
                 </View>
-
-                <View style={styles.cardTopAction}>
-                  <GridIcon />
-                </View>
               </View>
 
-              <View style={styles.userCardDivider} />
-
-              <View style={styles.userCardBottomRow}>
-                <Text style={styles.userCardBottomLeft}>+ 创建QQ秀</Text>
-                <View style={styles.userCardBottomCenter}>
-                  <InteractionIcon />
-                  <Text style={styles.userCardBottomCenterText}>52条新互动</Text>
-                </View>
-                <Text style={styles.userCardBottomRight}>👍9999+</Text>
+              <View style={styles.gridAction}>
+                <GridIcon />
               </View>
-            </Pressable>
-
-            <View style={styles.menuSection}>
-              {MENU_ITEMS.map((item) => (
-                <View key={item.key} style={styles.menuRow}>
-                  <View style={styles.menuLeft}>
-                    <View style={styles.menuIconWrap}>
-                      <MenuIcon kind={item.key} color={item.tint} />
-                    </View>
-                    <Text style={styles.menuText}>{item.label}</Text>
-                  </View>
-                  <ChevronRightIcon />
-                </View>
-              ))}
             </View>
+
+            <View style={styles.cardDivider} />
+
+            <View style={styles.cardBottomRow}>
+              <Text style={styles.createText}>+ 创建QQ秀</Text>
+              <View style={styles.interactionWrap}>
+                <InteractionIcon />
+                <Text style={styles.interactionText}>52条新互动</Text>
+              </View>
+              <View style={styles.likeWrap}>
+                <Text style={styles.likeText}>👍9999+</Text>
+              </View>
+            </View>
+          </Pressable>
+
+          <View style={styles.menuBlock}>
+            {MENU_ITEMS.map((item, index) => (
+              <View
+                key={item.key}
+                style={[styles.menuRow, index === MENU_ITEMS.length - 1 ? styles.menuRowLast : null]}
+              >
+                <View style={styles.menuLeft}>
+                  <View style={styles.menuIconWrap}>
+                    <MenuIcon kind={item.key} color={item.tint} />
+                  </View>
+                  <Text style={styles.menuText}>{item.label}</Text>
+                </View>
+                <ChevronRightIcon />
+              </View>
+            ))}
           </View>
         </View>
       </ScrollView>
 
-      <View style={[styles.bottomTools, { paddingBottom: Math.max(insets.bottom, 10) }]}>
-        <View style={styles.bottomToolItem}>
+      <View style={[styles.bottomBar, { paddingBottom: bottomPad }]}>
+        <View style={styles.bottomItem}>
           <SettingsIcon />
-          <Text style={styles.bottomToolText}>设置</Text>
+          <Text style={styles.bottomText}>设置</Text>
         </View>
-        <View style={styles.bottomToolItem}>
+        <View style={styles.bottomItem}>
           <MoonIcon />
-          <Text style={styles.bottomToolText}>夜间</Text>
+          <Text style={styles.bottomText}>夜间</Text>
         </View>
-        <View style={styles.bottomToolItem}>
+        <View style={styles.bottomItem}>
           <MenuBarsIcon />
-          <Text style={styles.bottomToolText}>汉川</Text>
+          <Text style={styles.bottomText}>汉川</Text>
         </View>
       </View>
     </View>
@@ -199,42 +202,42 @@ export default function UserCenter({ profile, onBack, onOpenProfile }: Props) {
 const styles = StyleSheet.create({
   page: {
     flex: 1,
-    backgroundColor: '#f4f4f6',
+    backgroundColor: '#ffffff',
   },
   scroll: {
     flex: 1,
   },
   hero: {
-    height: 266,
+    height: 164,
     paddingHorizontal: 14,
+    backgroundColor: '#c8cdd8',
     overflow: 'hidden',
-    backgroundColor: '#d7d9df',
     position: 'relative',
   },
   heroImage: {
     ...StyleSheet.absoluteFillObject,
-    opacity: 0.46,
+    opacity: 0.58,
   },
   heroMask: {
     ...StyleSheet.absoluteFillObject,
-    backgroundColor: 'rgba(20, 18, 20, 0.18)',
+    backgroundColor: 'rgba(22, 22, 24, 0.2)',
   },
-  heroGlowA: {
+  heroGlowOne: {
     position: 'absolute',
-    width: 240,
-    height: 240,
-    borderRadius: 120,
-    top: -90,
-    right: -36,
-    backgroundColor: 'rgba(255, 255, 255, 0.18)',
+    width: 260,
+    height: 260,
+    borderRadius: 130,
+    top: -100,
+    right: -40,
+    backgroundColor: 'rgba(255, 255, 255, 0.22)',
   },
-  heroGlowB: {
+  heroGlowTwo: {
     position: 'absolute',
-    width: 210,
-    height: 210,
-    borderRadius: 105,
-    bottom: -90,
-    left: -52,
+    width: 220,
+    height: 220,
+    borderRadius: 110,
+    bottom: -82,
+    left: -46,
     backgroundColor: 'rgba(255, 255, 255, 0.2)',
   },
   heroTopRow: {
@@ -243,19 +246,19 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'space-between',
   },
-  checkinChip: {
-    height: 38,
-    borderRadius: 19,
+  checkInChip: {
+    height: 42,
+    borderRadius: 21,
     paddingHorizontal: 12,
-    backgroundColor: 'rgba(255, 255, 255, 0.18)',
-    borderWidth: 1,
-    borderColor: 'rgba(255, 255, 255, 0.38)',
     flexDirection: 'row',
     alignItems: 'center',
     gap: 8,
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.38)',
+    backgroundColor: 'rgba(90, 94, 101, 0.35)',
   },
-  checkinChipText: {
-    fontSize: 17,
+  checkInText: {
+    fontSize: 18,
     color: '#ffffff',
     fontWeight: '500',
   },
@@ -265,194 +268,197 @@ const styles = StyleSheet.create({
     gap: 10,
   },
   musicChip: {
-    height: 38,
-    borderRadius: 19,
-    paddingHorizontal: 12,
-    backgroundColor: 'rgba(255, 255, 255, 0.34)',
-    borderWidth: 1,
-    borderColor: 'rgba(255, 255, 255, 0.42)',
+    height: 42,
+    borderRadius: 21,
+    paddingHorizontal: 14,
+    alignItems: 'center',
     justifyContent: 'center',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.38)',
+    backgroundColor: 'rgba(138, 143, 149, 0.42)',
   },
   musicChipText: {
     color: '#ffffff',
     fontSize: 17,
     fontWeight: '500',
   },
-  heroRoundGhost: {
-    width: 38,
-    height: 38,
-    borderRadius: 19,
-    backgroundColor: 'rgba(255, 255, 255, 0.34)',
-    borderWidth: 1,
-    borderColor: 'rgba(255, 255, 255, 0.42)',
+  roundChip: {
+    width: 42,
+    height: 42,
+    borderRadius: 21,
     alignItems: 'center',
     justifyContent: 'center',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.38)',
+    backgroundColor: 'rgba(138, 143, 149, 0.42)',
   },
   content: {
-    marginTop: -34,
-    paddingHorizontal: 10,
+    marginTop: -58,
   },
   userCard: {
     borderRadius: 22,
     borderWidth: 1,
-    borderColor: '#e5e5e8',
+    borderColor: '#e7e8eb',
     backgroundColor: '#ffffff',
     paddingHorizontal: 14,
+    marginHorizontal: 5,
     paddingTop: 14,
     paddingBottom: 12,
-    ...surfaceShadowStyle,
+    ...cardShadowStyle,
   },
-  userCardTopRow: {
+  cardTopRow: {
     flexDirection: 'row',
     alignItems: 'flex-start',
     justifyContent: 'space-between',
-    gap: 10,
+    gap: 8,
   },
-  userMainRow: {
+  profileMain: {
+    flex: 1,
     flexDirection: 'row',
     alignItems: 'flex-start',
-    flex: 1,
-    minWidth: 0,
     gap: 12,
+    minWidth: 0,
   },
-  userAvatarWrap: {
-    width: 78,
-    height: 78,
-    borderRadius: 16,
+  avatarWrap: {
+    width: 82,
+    height: 82,
+    borderRadius: 18,
+    overflow: 'hidden',
     backgroundColor: '#f0f2f6',
     borderWidth: 1,
-    borderColor: '#ebedf1',
-    overflow: 'hidden',
+    borderColor: '#eceef2',
     alignItems: 'center',
     justifyContent: 'center',
   },
-  userAvatar: {
+  avatar: {
     width: '100%',
     height: '100%',
-    resizeMode: 'cover',
   },
-  userAvatarFallback: {
-    color: '#5a6b7f',
+  avatarFallback: {
+    color: '#526175',
     fontSize: 22,
     fontWeight: '700',
   },
-  userInfo: {
+  profileInfo: {
     flex: 1,
     minWidth: 0,
     gap: 8,
   },
-  userNameRow: {
+  nameRow: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: 8,
     paddingRight: 8,
   },
-  userName: {
-    color: '#b08e4d',
+  nameText: {
+    color: '#b5954f',
     fontSize: 22,
     fontWeight: '500',
-    maxWidth: '64%',
+    flexShrink: 1,
   },
-  switchAccountBtn: {
-    borderRadius: 16,
-    borderWidth: 1,
-    borderColor: '#e4e5e9',
-    backgroundColor: '#f8f8fa',
-    paddingHorizontal: 10,
+  switchBtn: {
     height: 30,
+    borderRadius: 15,
+    borderWidth: 1,
+    borderColor: '#e3e4e8',
+    backgroundColor: '#f8f8fa',
+    paddingHorizontal: 11,
     alignItems: 'center',
     justifyContent: 'center',
   },
-  switchAccountText: {
-    color: '#5f5f67',
+  switchBtnText: {
+    color: '#5f6067',
     fontSize: 14,
   },
-  userSignature: {
-    color: '#1f1f22',
-    fontSize: 14,
+  signatureText: {
+    color: '#18191d',
+    fontSize: 16,
   },
-  userVipLine: {
-    color: '#ac7f2b',
-    fontSize: 17,
-    lineHeight: 20,
+  vipLine: {
+    color: '#ad812f',
+    fontSize: 18,
+    lineHeight: 22,
   },
   tagRow: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: 10,
-    paddingTop: 2,
   },
   tagPill: {
-    height: 34,
-    borderRadius: 17,
-    paddingHorizontal: 15,
+    height: 36,
+    borderRadius: 18,
+    paddingHorizontal: 16,
     borderWidth: 1,
-    borderColor: '#e5e6ea',
-    backgroundColor: '#fafafb',
+    borderColor: '#e8e9ec',
+    backgroundColor: '#fbfbfc',
     alignItems: 'center',
     justifyContent: 'center',
   },
   tagText: {
-    color: '#404046',
-    fontSize: 14,
+    color: '#3e4046',
+    fontSize: 16,
     fontWeight: '500',
   },
-  cardTopAction: {
+  gridAction: {
     width: 38,
     height: 38,
-    borderRadius: 19,
     alignItems: 'center',
     justifyContent: 'center',
   },
-  userCardDivider: {
+  cardDivider: {
     marginTop: 12,
     height: 1,
     backgroundColor: '#ececf1',
   },
-  userCardBottomRow: {
+  cardBottomRow: {
     marginTop: 12,
     flexDirection: 'row',
     alignItems: 'center',
-    justifyContent: 'space-between',
-    gap: 8,
   },
-  userCardBottomLeft: {
-    color: '#2b2b2f',
-    fontSize: 16,
+  createText: {
+    color: '#1d1e23',
+    fontSize: 17,
   },
-  userCardBottomCenter: {
+  interactionWrap: {
+    flex: 1,
+    minWidth: 0,
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 6,
-    flex: 1,
     justifyContent: 'center',
-    minWidth: 0,
+    gap: 6,
   },
-  userCardBottomCenterText: {
-    color: '#2b2b2f',
-    fontSize: 16,
+  interactionText: {
+    color: '#1f2026',
+    fontSize: 17,
   },
-  userCardBottomRight: {
-    color: '#2b2b2f',
-    fontSize: 16,
+  likeWrap: {
+    borderLeftWidth: 1,
+    borderLeftColor: '#ececf1',
+    paddingLeft: 12,
   },
-  menuSection: {
-    marginTop: 14,
-    borderRadius: 18,
-    borderWidth: 1,
-    borderColor: '#ececf0',
+  likeText: {
+    color: '#1f2026',
+    fontSize: 17,
+  },
+  menuBlock: {
+    marginTop: 12,
     backgroundColor: '#ffffff',
+    borderWidth: 1,
+    borderColor: '#efeff2',
     overflow: 'hidden',
   },
   menuRow: {
-    height: 74,
+    height: 54,
     paddingHorizontal: 16,
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
     borderBottomWidth: 1,
-    borderBottomColor: '#f0f0f3',
+    borderBottomColor: '#f0f0f4',
     backgroundColor: '#ffffff',
+  },
+  menuRowLast: {
+    borderBottomWidth: 0,
   },
   menuLeft: {
     flexDirection: 'row',
@@ -460,39 +466,40 @@ const styles = StyleSheet.create({
     gap: 14,
   },
   menuIconWrap: {
-    width: 30,
-    height: 30,
+    width: 28,
+    height: 28,
     alignItems: 'center',
     justifyContent: 'center',
   },
   menuText: {
-    fontSize: 18,
-    color: '#101015',
+    color: '#121319',
+    fontSize: 16,
     fontWeight: '400',
   },
-  bottomTools: {
+  bottomBar: {
     position: 'absolute',
     left: 0,
     right: 0,
     bottom: 0,
-    height: 92,
+    height: 66,
     borderTopWidth: 1,
-    borderTopColor: '#e2e3e6',
-    backgroundColor: '#f3f4f6',
+    borderTopColor: '#ffffff',
+    backgroundColor: '#ffffff',
     flexDirection: 'row',
     alignItems: 'flex-start',
-    justifyContent: 'space-around',
+    justifyContent: 'flex-start',
+    gap: 18,
     paddingTop: 10,
   },
-  bottomToolItem: {
+  bottomItem: {
+    minWidth: 80,
     alignItems: 'center',
     justifyContent: 'center',
     gap: 4,
-    minWidth: 78,
   },
-  bottomToolText: {
+  bottomText: {
     fontSize: 14,
-    color: '#222328',
+    color: '#1d1e22',
   },
 });
 
@@ -507,7 +514,7 @@ function MenuIcon({ kind, color }: { kind: MenuItem['key']; color: string }) {
 
 function CheckinIcon() {
   return (
-    <Svg width={21} height={21} viewBox="0 0 24 24" fill="none">
+    <Svg width={22} height={22} viewBox="0 0 24 24" fill="none">
       <Rect x={3} y={4} width={18} height={17} rx={4} stroke="#ffffff" strokeWidth={2} />
       <Path d="M8 2V6" stroke="#ffffff" strokeWidth={2} strokeLinecap="round" />
       <Path d="M16 2V6" stroke="#ffffff" strokeWidth={2} strokeLinecap="round" />
@@ -542,19 +549,19 @@ function CloseIcon() {
 function GridIcon() {
   return (
     <Svg width={22} height={22} viewBox="0 0 24 24" fill="none">
-      <Rect x={4} y={4} width={6} height={6} rx={1.4} stroke="#6d6e74" strokeWidth={1.8} />
-      <Rect x={14} y={4} width={6} height={6} rx={1.4} stroke="#6d6e74" strokeWidth={1.8} />
-      <Rect x={4} y={14} width={6} height={6} rx={1.4} stroke="#6d6e74" strokeWidth={1.8} />
-      <Rect x={14} y={14} width={6} height={6} rx={1.4} stroke="#6d6e74" strokeWidth={1.8} />
+      <Rect x={4} y={4} width={6} height={6} rx={1.4} stroke="#6f7077" strokeWidth={1.8} />
+      <Rect x={14} y={4} width={6} height={6} rx={1.4} stroke="#6f7077" strokeWidth={1.8} />
+      <Rect x={4} y={14} width={6} height={6} rx={1.4} stroke="#6f7077" strokeWidth={1.8} />
+      <Rect x={14} y={14} width={6} height={6} rx={1.4} stroke="#6f7077" strokeWidth={1.8} />
     </Svg>
   );
 }
 
 function InteractionIcon() {
   return (
-    <Svg width={28} height={16} viewBox="0 0 28 16" fill="none">
-      <Circle cx={8} cy={8} r={7} fill="#f3d2b6" />
-      <Circle cx={20} cy={8} r={7} fill="#f0d8d8" />
+    <Svg width={30} height={18} viewBox="0 0 30 18" fill="none">
+      <Circle cx={9} cy={9} r={8} fill="#efcdb0" />
+      <Circle cx={21} cy={9} r={8} fill="#ead8cc" />
     </Svg>
   );
 }
@@ -564,7 +571,7 @@ function ChevronRightIcon() {
     <Svg width={16} height={16} viewBox="0 0 24 24" fill="none">
       <Path
         d="M9 6L15 12L9 18"
-        stroke="#a3a6ad"
+        stroke="#a7aab2"
         strokeWidth={2}
         strokeLinecap="round"
         strokeLinejoin="round"
@@ -575,7 +582,7 @@ function ChevronRightIcon() {
 
 function AlbumIcon({ color }: { color: string }) {
   return (
-    <Svg width={24} height={24} viewBox="0 0 24 24" fill="none">
+    <Svg width={22} height={22} viewBox="0 0 24 24" fill="none">
       <Rect x={3} y={4} width={18} height={15} rx={3} stroke={color} strokeWidth={2} />
       <Circle cx={8.5} cy={9} r={1.4} fill={color} />
       <Path d="M6 16L11 11.5L14.6 14.6L18 12" stroke={color} strokeWidth={2} strokeLinecap="round" />
@@ -585,7 +592,7 @@ function AlbumIcon({ color }: { color: string }) {
 
 function FavoriteIcon({ color }: { color: string }) {
   return (
-    <Svg width={24} height={24} viewBox="0 0 24 24" fill="none">
+    <Svg width={22} height={22} viewBox="0 0 24 24" fill="none">
       <Path
         d="M7 4H17A2 2 0 0 1 19 6V20L12 16L5 20V6A2 2 0 0 1 7 4Z"
         stroke={color}
@@ -599,7 +606,7 @@ function FavoriteIcon({ color }: { color: string }) {
 
 function FileIcon({ color }: { color: string }) {
   return (
-    <Svg width={24} height={24} viewBox="0 0 24 24" fill="none">
+    <Svg width={22} height={22} viewBox="0 0 24 24" fill="none">
       <Path
         d="M4 7A3 3 0 0 1 7 4H10.2C11 4 11.8 4.3 12.4 4.9L13.1 5.6C13.4 5.9 13.8 6 14.2 6H17A3 3 0 0 1 20 9V17A3 3 0 0 1 17 20H7A3 3 0 0 1 4 17V7Z"
         stroke={color}
@@ -612,7 +619,7 @@ function FileIcon({ color }: { color: string }) {
 
 function WalletIcon({ color }: { color: string }) {
   return (
-    <Svg width={24} height={24} viewBox="0 0 24 24" fill="none">
+    <Svg width={22} height={22} viewBox="0 0 24 24" fill="none">
       <Rect x={3} y={6} width={18} height={13} rx={3} stroke={color} strokeWidth={2} />
       <Path d="M3 10H21" stroke={color} strokeWidth={2} />
       <Circle cx={15.8} cy={14.2} r={1.2} fill={color} />
@@ -622,7 +629,7 @@ function WalletIcon({ color }: { color: string }) {
 
 function VipIcon({ color }: { color: string }) {
   return (
-    <Svg width={24} height={24} viewBox="0 0 24 24" fill="none">
+    <Svg width={22} height={22} viewBox="0 0 24 24" fill="none">
       <Path
         d="M12 3L16.6 8.6L21 10.1L17.9 14.1L18 20L12 17.4L6 20L6.1 14.1L3 10.1L7.4 8.6L12 3Z"
         stroke={color}
@@ -636,7 +643,7 @@ function VipIcon({ color }: { color: string }) {
 
 function DressIcon({ color }: { color: string }) {
   return (
-    <Svg width={24} height={24} viewBox="0 0 24 24" fill="none">
+    <Svg width={22} height={22} viewBox="0 0 24 24" fill="none">
       <Path
         d="M8 4L12 6L16 4L18.5 7L15.5 9.2V19H8.5V9.2L5.5 7L8 4Z"
         stroke={color}
@@ -652,10 +659,10 @@ function SettingsIcon() {
     <Svg width={28} height={28} viewBox="0 0 24 24" fill="none">
       <Path
         d="M9.6 3.2H14.4L15 5.6C15.6 5.8 16.2 6.1 16.8 6.5L19.1 5.4L21.5 9.5L19.5 11.1C19.5 11.4 19.6 11.7 19.6 12C19.6 12.3 19.5 12.6 19.5 12.9L21.5 14.5L19.1 18.6L16.8 17.5C16.2 17.9 15.6 18.2 15 18.4L14.4 20.8H9.6L9 18.4C8.4 18.2 7.8 17.9 7.2 17.5L4.9 18.6L2.5 14.5L4.5 12.9C4.5 12.6 4.4 12.3 4.4 12C4.4 11.7 4.5 11.4 4.5 11.1L2.5 9.5L4.9 5.4L7.2 6.5C7.8 6.1 8.4 5.8 9 5.6L9.6 3.2Z"
-        stroke="#1e1f24"
+        stroke="#1f2025"
         strokeWidth={1.8}
       />
-      <Circle cx={12} cy={12} r={2.8} stroke="#1e1f24" strokeWidth={1.8} />
+      <Circle cx={12} cy={12} r={2.8} stroke="#1f2025" strokeWidth={1.8} />
     </Svg>
   );
 }
@@ -665,7 +672,7 @@ function MoonIcon() {
     <Svg width={28} height={28} viewBox="0 0 24 24" fill="none">
       <Path
         d="M15.8 3.9C14.2 4.3 12.8 5.2 11.8 6.6C9.3 10.1 10.2 15 13.7 17.5C14.9 18.4 16.3 18.9 17.7 19C16.5 19.8 15 20.3 13.4 20.3C8.9 20.3 5.3 16.7 5.3 12.2C5.3 7.7 8.9 4.1 13.4 4.1C14.2 4.1 15 4.2 15.8 3.9Z"
-        stroke="#1e1f24"
+        stroke="#1f2025"
         strokeWidth={1.8}
         strokeLinejoin="round"
       />
@@ -676,10 +683,9 @@ function MoonIcon() {
 function MenuBarsIcon() {
   return (
     <Svg width={28} height={28} viewBox="0 0 24 24" fill="none">
-      <Line x1={5} y1={8} x2={19} y2={8} stroke="#1e1f24" strokeWidth={2.2} strokeLinecap="round" />
-      <Line x1={5} y1={12} x2={19} y2={12} stroke="#1e1f24" strokeWidth={2.2} strokeLinecap="round" />
-      <Line x1={5} y1={16} x2={19} y2={16} stroke="#1e1f24" strokeWidth={2.2} strokeLinecap="round" />
+      <Line x1={5} y1={8} x2={19} y2={8} stroke="#1f2025" strokeWidth={2.2} strokeLinecap="round" />
+      <Line x1={5} y1={12} x2={19} y2={12} stroke="#1f2025" strokeWidth={2.2} strokeLinecap="round" />
+      <Line x1={5} y1={16} x2={19} y2={16} stroke="#1f2025" strokeWidth={2.2} strokeLinecap="round" />
     </Svg>
   );
 }
-
