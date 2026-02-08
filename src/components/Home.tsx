@@ -1285,10 +1285,7 @@ export default function Home({ profile }: { profile: Profile }) {
     return encodeURI(`${avatarUrl}${joiner}v=${encodeURIComponent(avatarVersion)}`);
   }, [avatarUrl, avatarVersion]);
   const avatarText = useMemo(() => displayName.slice(0, 2), [displayName]);
-  const voicePanelHeight = useMemo(() => {
-    const ideal = Math.round(windowHeight * 0.42);
-    return Math.max(260, Math.min(390, ideal));
-  }, [windowHeight]);
+  const voicePanelHeight = 320;
   const canShowMainHome = !activeChatUid && activeView !== 'found';
   const currentTourStep = tourSteps[tourStepIndex] || null;
   const quickMenuPanelAnimatedStyle = useMemo(
@@ -2951,8 +2948,11 @@ export default function Home({ profile }: { profile: Profile }) {
         body: blob as any,
       });
       const startData = await startResponse.json().catch(() => ({}));
-      if (!startResponse.ok || !startData?.success || !startData?.data) {
+      if (!startResponse.ok || !startData?.success) {
         throw new Error(startData?.message || '语音转写请求失败。');
+      }
+      if (startData?.data == null) {
+        return '';
       }
       if (startData.data.status === 'succeeded' && typeof startData.data.text === 'string') {
         return String(startData.data.text || '').trim();
@@ -2976,8 +2976,11 @@ export default function Home({ profile }: { profile: Profile }) {
           }
         );
         const statusData = await statusResponse.json().catch(() => ({}));
-        if (!statusResponse.ok || !statusData?.success || !statusData?.data) {
+        if (!statusResponse.ok || !statusData?.success) {
           throw new Error(statusData?.message || '获取转写状态失败。');
+        }
+        if (statusData?.data == null) {
+          return '';
         }
         const status = String(statusData.data.status || '');
         if (status === 'succeeded') {
@@ -3124,6 +3127,10 @@ export default function Home({ profile }: { profile: Profile }) {
         if (action === 'transcribe') {
           setVoiceStatusText('语音转文字中...');
           const transcript = await requestVoiceTranscription(recorded);
+          if (!String(transcript || '').trim()) {
+            setVoiceStatusText('未识别到有效内容');
+            return;
+          }
           appendTranscriptionToDraft(transcript, durationMs);
           setVoiceStatusText('已转为文字');
           return;
@@ -4154,6 +4161,7 @@ export default function Home({ profile }: { profile: Profile }) {
                 <ScrollView
                   horizontal
                   showsHorizontalScrollIndicator={false}
+                  style={styles.emojiTabScroll}
                   contentContainerStyle={styles.emojiTabBar}
                 >
                   {EMOJI_TAB_ITEMS.map((tab) => (
@@ -5622,7 +5630,7 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: '#e7eef8',
     backgroundColor: '#f8fbff',
-    height: 258,
+    height: 320,
   },
   emojiPanelContent: {
     flex: 1,
@@ -5667,7 +5675,7 @@ const styles = StyleSheet.create({
   customStickerGrid: {
     flexDirection: 'row',
     flexWrap: 'wrap',
-    gap: 8,
+    gap: 7,
   },
   customStickerItem: {
     width: '18.4%',
@@ -5704,6 +5712,14 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     gap: 6,
+  },
+  emojiTabScroll: {
+    ...Platform.select({
+      web: {
+        flexGrow: 'unset',
+      } as any,
+      default: {},
+    }),
   },
   emojiTabBtn: {
     minWidth: 66,
@@ -5764,6 +5780,7 @@ const styles = StyleSheet.create({
     borderColor: '#dde5f1',
     backgroundColor: '#ffffff',
     overflow: 'hidden',
+    height: 320,
   },
   voiceNoSelect: {
     ...Platform.select({
@@ -5852,8 +5869,8 @@ const styles = StyleSheet.create({
     color: '#2f84d7',
   },
   voiceHoldBtnWrapInline: {
-    width: 176,
-    height: 176,
+    width: 136,
+    height: 136,
     borderRadius: 88,
     backgroundColor: '#e8f2fc',
     borderWidth: 1,
@@ -5871,8 +5888,8 @@ const styles = StyleSheet.create({
     borderColor: '#f3c2c2',
   },
   voiceHoldBtnInline: {
-    width: 142,
-    height: 142,
+    width: 102,
+    height: 102,
     borderRadius: 71,
     backgroundColor: '#2e9ded',
     alignItems: 'center',

@@ -32,9 +32,15 @@ const REQUEST_TIMEOUT_MS = readPositiveInt(process.env.VOICE_TRANSCRIBE_TIMEOUT_
 const RETRY_MAX = readPositiveInt(process.env.VOICE_TRANSCRIBE_RETRIES, 2, 0);
 const RETRY_DELAY_MS = readPositiveInt(process.env.VOICE_TRANSCRIBE_RETRY_DELAY_MS, 500, 100);
 
+const DEFAULT_FAST_TRANSCRIBE_MODEL = 'gemini-2.0-flash-lite';
 const GEMINI_MODEL = String(
-  process.env.VOICE_TRANSCRIBE_MODEL || process.env.GEMINI_DEFAULT_MODEL || 'gemini-3-flash-preview'
+  process.env.VOICE_TRANSCRIBE_MODEL || process.env.VOICE_TRANSCRIBE_FAST_MODEL || DEFAULT_FAST_TRANSCRIBE_MODEL
 ).trim();
+const TRANSCRIBE_NULL_TEXT = 'null';
+const TRANSCRIBE_PROMPT =
+  '\u8bf7\u628a\u8fd9\u6bb5\u8bed\u97f3\u51c6\u786e\u8f6c\u5199\u6210\u7b80\u4f53\u4e2d\u6587\u6587\u672c\u3002' +
+  '\u53ea\u8f93\u51fa\u8f6c\u5199\u7ed3\u679c\uff0c\u4e0d\u8981\u6dfb\u52a0\u89e3\u91ca\u3001\u524d\u7f00\u6216\u989d\u5916\u8bf4\u660e\u3002' +
+  '\u5982\u679c\u6ca1\u6709\u8f6c\u5199\u5230\u4efb\u4f55\u6709\u6548\u4fe1\u606f\uff0c\u8bf7\u53ea\u8fd4\u56denull\u3002';
 
 const AUDIO_MIME_ALLOW = new Set([
   'audio/webm',
@@ -70,10 +76,55 @@ const decodeHardcodedGeminiKey = () => {
   }
 };
 
+const mapTranscribeError = (error) => {
+  const status = Number(error?.status || error?.statusCode || 0);
+  const code = String(error?.code || '').toUpperCase();
+  const message = String(error?.message || '');
+
+  if (code === 'FILE_TOO_LARGE' || message === 'FILE_TOO_LARGE') {
+    return { statusCode: 413, publicMessage: 'Audio file is too large.' };
+  }
+  if (message === 'REQUEST_ABORTED') {
+    return { statusCode: 400, publicMessage: 'Request aborted.' };
+  }
+  if (code === 'MISSING_API_KEY') {
+    return { statusCode: 500, publicMessage: 'Voice transcribe service is not configured.' };
+  }
+  if (
+    code === 'ETIMEDOUT' ||
+    code === 'ECONNRESET' ||
+    code === 'ECONNABORTED' ||
+    /timeout/i.test(message)
+  ) {
+    return { statusCode: 504, publicMessage: 'Voice transcribe timed out.' };
+  }
+  if (status === 429) {
+    return { statusCode: 429, publicMessage: 'Voice transcribe service is busy. Please retry shortly.' };
+  }
+  if (status === 401 || status === 403 || /permission|unauth|api key/i.test(message)) {
+    return { statusCode: 502, publicMessage: 'Voice transcribe authentication failed.' };
+  }
+  if (status === 500 || status === 502 || status === 503 || status === 504) {
+    return { statusCode: 502, publicMessage: 'Voice transcribe service is temporarily unavailable.' };
+  }
+  return { statusCode: 500, publicMessage: 'Voice transcribe failed.' };
+};
+
+const normalizeTranscribeText = (value) => {
+  const text = String(value || '').trim();
+  if (!text) return TRANSCRIBE_NULL_TEXT;
+  if (/^["'`]?null["'`]?$/i.test(text)) return TRANSCRIBE_NULL_TEXT;
+  return text;
+};
+
+const isNullTranscribeText = (value) => normalizeTranscribeText(value) === TRANSCRIBE_NULL_TEXT;
+
 const getAiClient = () => {
   const apiKey = String(process.env.GEMINI_API_KEY || decodeHardcodedGeminiKey()).trim();
   if (!apiKey) {
-    throw new Error('GEMINI_API_KEY not configured.');
+    const error = new Error('MISSING_API_KEY');
+    error.code = 'MISSING_API_KEY';
+    throw error;
   }
   if (!aiClient || aiClientKey !== apiKey) {
     aiClient = new GoogleGenAI({ apiKey });
@@ -172,8 +223,6 @@ const extractText = (response) => {
 
 const requestTranscriptionOnce = async ({ buffer, mimeType }) => {
   const ai = getAiClient();
-  const prompt =
-    '请把这段语音准确转写成简体中文文本。只输出转写结果，不要添加解释、前缀或额外说明。';
   const response = await withTimeout(
     ai.models.generateContent({
       model: GEMINI_MODEL,
@@ -181,7 +230,7 @@ const requestTranscriptionOnce = async ({ buffer, mimeType }) => {
         {
           role: 'user',
           parts: [
-            { text: prompt },
+            { text: TRANSCRIBE_PROMPT },
             {
               inlineData: {
                 mimeType: mimeType || 'audio/webm',
@@ -199,16 +248,14 @@ const requestTranscriptionOnce = async ({ buffer, mimeType }) => {
     REQUEST_TIMEOUT_MS,
     'voice-transcribe'
   );
-  return extractText(response);
+  return normalizeTranscribeText(extractText(response));
 };
 
 const requestTranscriptionWithRetry = async ({ buffer, mimeType }) => {
   let lastError = null;
   for (let i = 0; i <= RETRY_MAX; i += 1) {
     try {
-      const text = await requestTranscriptionOnce({ buffer, mimeType });
-      if (!text) throw new Error('TRANSCRIBE_EMPTY_RESULT');
-      return text;
+      return await requestTranscriptionOnce({ buffer, mimeType });
     } catch (error) {
       lastError = error;
       const status = Number(error?.status || 0);
@@ -233,7 +280,7 @@ const toPublicJob = (job) => ({
   createdAt: job.createdAt,
   startedAt: job.startedAt || '',
   finishedAt: job.finishedAt || '',
-  text: job.status === 'succeeded' ? job.text : '',
+  text: job.status === 'succeeded' && !isNullTranscribeText(job.text) ? job.text : '',
   error: job.status === 'failed' ? job.error : '',
 });
 
@@ -265,9 +312,11 @@ const runJob = async (job) => {
       expiresAtMs: Date.now() + HASH_CACHE_TTL_MS,
     });
   } catch (error) {
-    const message = error instanceof Error ? error.message : 'VOICE_TRANSCRIBE_FAILED';
+    console.error('Voice transcribe run job error:', error);
+    const mapped = mapTranscribeError(error);
+    const message = mapped.publicMessage || 'Voice transcribe failed.';
     job.status = 'failed';
-    job.error = message || 'VOICE_TRANSCRIBE_FAILED';
+    job.error = message;
     job.finishedAt = nowIso();
   } finally {
     hashInFlight.delete(hashInFlightKey(job.userUid, job.hash));
@@ -338,6 +387,10 @@ router.post('/transcribe', authenticate, async (req, res) => {
     const cached = hashCache.get(hash);
     if (cached && cached.expiresAtMs > Date.now()) {
       await fs.unlink(tempPath).catch(() => undefined);
+      if (isNullTranscribeText(cached.text)) {
+        res.json({ success: true, data: null });
+        return;
+      }
       res.json({
         success: true,
         data: {
@@ -355,6 +408,10 @@ router.post('/transcribe', authenticate, async (req, res) => {
     if (existingJobId && jobs.has(existingJobId)) {
       await fs.unlink(tempPath).catch(() => undefined);
       const existingJob = jobs.get(existingJobId);
+      if (existingJob?.status === 'succeeded' && isNullTranscribeText(existingJob?.text)) {
+        res.json({ success: true, data: null });
+        return;
+      }
       res.json({
         success: true,
         data: {
@@ -395,17 +452,9 @@ router.post('/transcribe', authenticate, async (req, res) => {
       },
     });
   } catch (error) {
-    const code = String(error?.code || '');
-    const message = String(error?.message || '');
-    if (code === 'FILE_TOO_LARGE' || message === 'FILE_TOO_LARGE') {
-      res.status(413).json({ success: false, message: 'Audio file is too large.' });
-      return;
-    }
-    if (message === 'REQUEST_ABORTED') {
-      res.status(400).json({ success: false, message: 'Request aborted.' });
-      return;
-    }
-    res.status(400).json({ success: false, message: 'Failed to create transcribe job.' });
+    console.error('Voice transcribe create job error:', error);
+    const mapped = mapTranscribeError(error);
+    res.status(mapped.statusCode).json({ success: false, message: mapped.publicMessage });
   }
 });
 
@@ -419,6 +468,10 @@ router.get('/transcribe/:jobId', authenticate, async (req, res) => {
     const job = jobs.get(jobId);
     if (!job || Number(job.userUid) !== Number(req.auth?.user?.uid)) {
       res.status(404).json({ success: false, message: 'Transcribe job not found.' });
+      return;
+    }
+    if (job.status === 'succeeded' && isNullTranscribeText(job.text)) {
+      res.json({ success: true, data: null });
       return;
     }
     res.json({ success: true, data: toPublicJob(job) });
