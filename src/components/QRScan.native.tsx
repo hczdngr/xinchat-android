@@ -549,7 +549,6 @@ export default function QRScan() {
               <View style={styles.pendingCore} />
             </View>
             <Text style={styles.pendingTitle}>AI Vision Scanning</Text>
-            <Text style={styles.pendingSubtitle}>{QR_SCAN_TEXT.arRecognizing}</Text>
           </View>
         </View>
       ) : null}
@@ -826,11 +825,6 @@ const styles = StyleSheet.create({
     fontSize: 18,
     fontWeight: '700',
     letterSpacing: 0.6,
-  },
-  pendingSubtitle: {
-    color: '#8cc7e8',
-    fontSize: 13,
-    letterSpacing: 0.4,
   },
 });
 
