@@ -135,6 +135,7 @@ export default function GroupChatSettings() {
   const [ready, setReady] = useState(false);
   const [saving, setSaving] = useState(false);
   const [deleting, setDeleting] = useState(false);
+  const [deleteConfirmVisible, setDeleteConfirmVisible] = useState(false);
   const [leaving, setLeaving] = useState(false);
   const [muted, setMuted] = useState(false);
   const [groupRemark, setGroupRemark] = useState('');
@@ -489,6 +490,7 @@ export default function GroupChatSettings() {
 
   const deleteChatHistory = useCallback(async () => {
     if (deleting || !Number.isInteger(uid) || uid <= 0) return;
+    setDeleteConfirmVisible(false);
     setDeleting(true);
     try {
       await applyLocalGroupDeleteAction();
@@ -505,19 +507,8 @@ export default function GroupChatSettings() {
       showNotice('删除失败', '群聊ID无效。');
       return;
     }
-    const title = '删除聊天记录';
-    const message = '确认删除该群的聊天记录？';
-    if (Platform.OS === 'web' && typeof window !== 'undefined' && typeof window.confirm === 'function') {
-      if (window.confirm(`${title}\n\n${message}`)) {
-        deleteChatHistory().catch(() => undefined);
-      }
-      return;
-    }
-    Alert.alert(title, message, [
-      { text: '取消', style: 'cancel' },
-      { text: '删除', style: 'destructive', onPress: () => deleteChatHistory() },
-    ]);
-  }, [deleteChatHistory, showNotice, uid]);
+    setDeleteConfirmVisible(true);
+  }, [showNotice, uid]);
 
   const confirmLeaveGroup = useCallback(async () => {
     if (leaving) return;
@@ -767,6 +758,47 @@ export default function GroupChatSettings() {
             <Pressable style={styles.qrCloseBtn} onPress={() => setQrVisible(false)}>
               <Text style={styles.qrCloseText}>关闭</Text>
             </Pressable>
+          </Pressable>
+        </Pressable>
+      </Modal>
+
+      <Modal
+        transparent
+        visible={deleteConfirmVisible}
+        animationType="fade"
+        onRequestClose={() => {
+          if (deleting) return;
+          setDeleteConfirmVisible(false);
+        }}
+      >
+        <Pressable
+          style={styles.modalMask}
+          onPress={() => {
+            if (deleting) return;
+            setDeleteConfirmVisible(false);
+          }}
+        >
+          <Pressable style={styles.leaveConfirmCard} onPress={() => undefined}>
+            <Text style={styles.leaveConfirmTitle}>删除聊天记录</Text>
+            <Text style={styles.leaveConfirmDesc}>确认删除该群的聊天记录？</Text>
+            <View style={styles.leaveConfirmActions}>
+              <Pressable
+                style={styles.leaveConfirmBtn}
+                onPress={() => setDeleteConfirmVisible(false)}
+                disabled={deleting}
+              >
+                <Text style={styles.leaveConfirmBtnText}>取消</Text>
+              </Pressable>
+              <Pressable
+                style={[styles.leaveConfirmBtn, styles.deleteConfirmDangerBtn]}
+                onPress={() => {
+                  deleteChatHistory().catch(() => undefined);
+                }}
+                disabled={deleting}
+              >
+                <Text style={styles.deleteConfirmDangerText}>{deleting ? '删除中...' : '确认'}</Text>
+              </Pressable>
+            </View>
           </Pressable>
         </Pressable>
       </Modal>
@@ -1186,6 +1218,15 @@ const styles = StyleSheet.create({
     fontSize: 14,
     color: '#2e86f6',
     fontWeight: '600',
+  },
+  deleteConfirmDangerBtn: {
+    backgroundColor: '#ffefef',
+    borderColor: '#ffcaca',
+  },
+  deleteConfirmDangerText: {
+    fontSize: 14,
+    color: '#d64545',
+    fontWeight: '700',
   },
   qrCard: {
     width: '100%',

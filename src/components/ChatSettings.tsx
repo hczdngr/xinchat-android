@@ -1,5 +1,15 @@
 ﻿import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Alert, Image, Platform, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
+import {
+  Alert,
+  Image,
+  Modal,
+  Platform,
+  Pressable,
+  ScrollView,
+  StyleSheet,
+  Text,
+  View,
+} from 'react-native';
 import { useNavigation, useRoute } from '@react-navigation/native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import Svg, { Path } from 'react-native-svg';
@@ -67,6 +77,7 @@ export default function ChatSettings() {
   const [muted, setMuted] = useState(false);
   const [background, setBackground] = useState<ChatBackgroundKey>('default');
   const [deleting, setDeleting] = useState(false);
+  const [deleteConfirmVisible, setDeleteConfirmVisible] = useState(false);
   const backActionHandledRef = useRef(false);
 
     const queueOpenChatOnReturn = useCallback(async () => {
@@ -287,6 +298,7 @@ export default function ChatSettings() {
 
   const deleteChatHistory = useCallback(async () => {
     if (deleting || !Number.isInteger(uid) || uid <= 0) return;
+    setDeleteConfirmVisible(false);
     setDeleting(true);
     try {
       await applyLocalDeleteAction();
@@ -303,24 +315,8 @@ export default function ChatSettings() {
       showNotice('删除失败', '聊天目标无效');
       return;
     }
-    const title = '删除聊天记录';
-    const message = '确认删除该聊天的所有消息记录？';
-    if (Platform.OS === 'web' && typeof window !== 'undefined' && typeof window.confirm === 'function') {
-      if (window.confirm(`${title}\n\n${message}`)) {
-        deleteChatHistory().catch(() => undefined);
-      }
-      return;
-    }
-    Alert.alert(
-      title,
-      message,
-      [
-        { text: '取消', style: 'cancel' },
-        { text: '删除', style: 'destructive', onPress: () => deleteChatHistory() },
-      ],
-      { cancelable: true }
-    );
-  }, [deleteChatHistory, showNotice, uid]);
+    setDeleteConfirmVisible(true);
+  }, [showNotice, uid]);
 
   return (
     <View style={[styles.page, { paddingTop: insets.top }]}>
@@ -423,6 +419,47 @@ export default function ChatSettings() {
           </Pressable>
         </View>
       </ScrollView>
+
+      <Modal
+        transparent
+        visible={deleteConfirmVisible}
+        animationType="fade"
+        onRequestClose={() => {
+          if (deleting) return;
+          setDeleteConfirmVisible(false);
+        }}
+      >
+        <Pressable
+          style={styles.modalMask}
+          onPress={() => {
+            if (deleting) return;
+            setDeleteConfirmVisible(false);
+          }}
+        >
+          <Pressable style={styles.deleteConfirmCard} onPress={() => undefined}>
+            <Text style={styles.deleteConfirmTitle}>删除聊天记录</Text>
+            <Text style={styles.deleteConfirmDesc}>确认删除该聊天的所有消息记录？</Text>
+            <View style={styles.deleteConfirmActions}>
+              <Pressable
+                style={styles.deleteConfirmBtn}
+                onPress={() => setDeleteConfirmVisible(false)}
+                disabled={deleting}
+              >
+                <Text style={styles.deleteConfirmBtnText}>取消</Text>
+              </Pressable>
+              <Pressable
+                style={[styles.deleteConfirmBtn, styles.deleteConfirmDangerBtn]}
+                onPress={() => {
+                  deleteChatHistory().catch(() => undefined);
+                }}
+                disabled={deleting}
+              >
+                <Text style={styles.deleteConfirmDangerText}>{deleting ? '删除中...' : '确认'}</Text>
+              </Pressable>
+            </View>
+          </Pressable>
+        </Pressable>
+      </Modal>
     </View>
   );
 }
@@ -601,6 +638,69 @@ const styles = StyleSheet.create({
   },
   switchKnobOn: {
     marginLeft: 18,
+  },
+  modalMask: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.28)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 18,
+  },
+  deleteConfirmCard: {
+    width: '100%',
+    maxWidth: 340,
+    borderRadius: 14,
+    backgroundColor: '#fff',
+    borderWidth: 1,
+    borderColor: '#e8edf7',
+    paddingHorizontal: 16,
+    paddingTop: 14,
+    paddingBottom: 12,
+    gap: 10,
+  },
+  deleteConfirmTitle: {
+    fontSize: 17,
+    color: '#24364a',
+    fontWeight: '700',
+    textAlign: 'center',
+  },
+  deleteConfirmDesc: {
+    fontSize: 14,
+    color: '#5e6f84',
+    lineHeight: 20,
+    textAlign: 'center',
+  },
+  deleteConfirmActions: {
+    flexDirection: 'row',
+    justifyContent: 'center',
+    alignItems: 'center',
+    gap: 8,
+    marginTop: 4,
+  },
+  deleteConfirmBtn: {
+    minWidth: 92,
+    height: 36,
+    borderRadius: 10,
+    paddingHorizontal: 14,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#f3f5f9',
+    borderWidth: 1,
+    borderColor: '#d9dfe9',
+  },
+  deleteConfirmBtnText: {
+    fontSize: 14,
+    color: '#4d5a6b',
+    fontWeight: '600',
+  },
+  deleteConfirmDangerBtn: {
+    backgroundColor: '#ffefef',
+    borderColor: '#ffcaca',
+  },
+  deleteConfirmDangerText: {
+    fontSize: 14,
+    color: '#d64545',
+    fontWeight: '700',
   },
 });
 

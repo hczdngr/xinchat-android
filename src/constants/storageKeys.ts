@@ -1,5 +1,7 @@
 export const STORAGE_KEYS = {
   token: 'xinchat.token',
+  chatDeviceId: 'xinchat.chatDeviceId',
+  chatDeviceCreatedAtMs: 'xinchat.chatDeviceCreatedAtMs',
   profile: 'xinchat.profile',
   readAt: 'xinchat.readAt',
   chatDeleteCutoff: 'xinchat.chatDeleteCutoff',

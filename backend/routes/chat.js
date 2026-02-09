@@ -5,7 +5,7 @@ import path from 'path';
 import crypto from 'crypto';
 import { fileURLToPath } from 'url';
 import initSqlJs from 'sql.js';
-import { createAuthenticateMiddleware } from './session.js';
+import { createAuthenticateMiddleware, extractToken } from './session.js';
 import { getGroupById, readGroups } from './groups.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -42,6 +42,8 @@ const MAX_STICKER_BYTES = 20 * 1024 * 1024;
 const MAX_STICKERS_PER_USER = 300;
 const MAX_STICKER_BATCH_UPLOAD = 9;
 const ALLOWED_STICKER_EXTS = new Set(['png', 'jpg', 'jpeg', 'gif', 'webp']);
+const MAX_DEVICE_ID_LENGTH = 128;
+const MAX_DEVICE_CREATED_AT_FUTURE_DRIFT_MS = 5 * 60 * 1000;
 
 let sqlModule = null;
 let db = null;
@@ -513,6 +515,26 @@ const openDb = async () => {
       ON messages (targetType, senderUid, targetUid, createdAtMs);
     CREATE INDEX IF NOT EXISTS idx_messages_group
       ON messages (targetType, targetUid, createdAtMs);
+    CREATE TABLE IF NOT EXISTS chat_delete_cutoffs (
+      uid INTEGER NOT NULL,
+      deviceId TEXT NOT NULL,
+      targetType TEXT NOT NULL,
+      targetUid INTEGER NOT NULL,
+      cutoffMs INTEGER NOT NULL,
+      updatedAt TEXT NOT NULL,
+      PRIMARY KEY (uid, deviceId, targetType, targetUid)
+    );
+    CREATE TABLE IF NOT EXISTS chat_device_state (
+      uid INTEGER NOT NULL,
+      deviceId TEXT NOT NULL,
+      createdAtMs INTEGER NOT NULL,
+      updatedAt TEXT NOT NULL,
+      PRIMARY KEY (uid, deviceId)
+    );
+    CREATE INDEX IF NOT EXISTS idx_chat_delete_cutoffs_lookup
+      ON chat_delete_cutoffs (uid, deviceId, targetType, targetUid);
+    CREATE INDEX IF NOT EXISTS idx_chat_device_state_lookup
+      ON chat_device_state (uid, deviceId);
   `);
   return db;
 };
@@ -686,6 +708,228 @@ const parseReadAtMap = (value) => {
   return result;
 };
 
+const normalizeDeviceId = (value) => {
+  if (typeof value !== 'string') return '';
+  const trimmed = value.trim();
+  if (!trimmed) return '';
+  let sanitized = '';
+  for (const char of trimmed) {
+    const code = char.charCodeAt(0);
+    if (code <= 31 || code === 127) continue;
+    if (sanitized.length >= MAX_DEVICE_ID_LENGTH) break;
+    sanitized += char;
+  }
+  return sanitized;
+};
+
+const resolveDeleteCutoffDeviceHeaderId = (req) =>
+  normalizeDeviceId(String(req.headers['x-xinchat-device-id'] || '')) ||
+  normalizeDeviceId(String(req.headers['x-device-id'] || ''));
+
+const resolveDeleteCutoffDeviceId = (req) => {
+  const fromHeader = resolveDeleteCutoffDeviceHeaderId(req);
+  if (fromHeader) return fromHeader;
+  const token = String(extractToken(req) || '').trim();
+  if (!token) return '';
+  const hash = crypto.createHash('sha256').update(token).digest('hex').slice(0, 48);
+  return hash ? `tok:${hash}` : '';
+};
+
+const extractDeviceCreatedAtMsFromId = (deviceId) => {
+  if (typeof deviceId !== 'string') return 0;
+  const match = deviceId.trim().match(/^dev_([0-9a-z]+)_/i);
+  if (!match) return 0;
+  const parsed = parseInt(match[1], 36);
+  if (!Number.isFinite(parsed) || parsed <= 0) return 0;
+  return Math.floor(parsed);
+};
+
+const normalizeDeviceCreatedAtMs = (value) => {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed <= 0) return 0;
+  const floored = Math.floor(parsed);
+  const maxAllowed = Date.now() + MAX_DEVICE_CREATED_AT_FUTURE_DRIFT_MS;
+  return floored > maxAllowed ? maxAllowed : floored;
+};
+
+const resolveDeviceCreatedAtMsFromRequest = (req, deviceId) => {
+  const fromHeader =
+    normalizeDeviceCreatedAtMs(req.headers['x-xinchat-device-created-at']) ||
+    normalizeDeviceCreatedAtMs(req.headers['x-device-created-at']);
+  if (fromHeader > 0) return fromHeader;
+  const fromQuery = normalizeDeviceCreatedAtMs(req.query?.deviceCreatedAtMs);
+  if (fromQuery > 0) return fromQuery;
+  const fromBody = normalizeDeviceCreatedAtMs(req.body?.deviceCreatedAtMs);
+  if (fromBody > 0) return fromBody;
+  const fromDeviceId = extractDeviceCreatedAtMsFromId(deviceId);
+  if (fromDeviceId > 0) return fromDeviceId;
+  return Date.now();
+};
+
+const getDeviceBaselineCutoff = (database, { uid, deviceId }) => {
+  if (!database) return 0;
+  if (!Number.isInteger(uid) || uid <= 0 || !deviceId) return 0;
+  const stmt = database.prepare(`
+    SELECT createdAtMs
+    FROM chat_device_state
+    WHERE uid = ? AND deviceId = ?
+    LIMIT 1
+  `);
+  stmt.bind([uid, deviceId]);
+  let cutoffMs = 0;
+  if (stmt.step()) {
+    const row = stmt.getAsObject();
+    const parsed = Number(row?.createdAtMs);
+    cutoffMs = Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : 0;
+  }
+  stmt.free();
+  return cutoffMs;
+};
+
+const ensureDeviceBaselineCutoff = (database, { uid, deviceId, createdAtMs }) => {
+  if (!database) return { cutoffMs: 0, inserted: false };
+  if (!Number.isInteger(uid) || uid <= 0 || !deviceId) {
+    return { cutoffMs: 0, inserted: false };
+  }
+  const existing = getDeviceBaselineCutoff(database, { uid, deviceId });
+  if (existing > 0) {
+    return { cutoffMs: existing, inserted: false };
+  }
+  const normalized = normalizeDeviceCreatedAtMs(createdAtMs) || Date.now();
+  const nowIso = new Date().toISOString();
+  const stmt = database.prepare(`
+    INSERT INTO chat_device_state (uid, deviceId, createdAtMs, updatedAt)
+    VALUES (?, ?, ?, ?)
+    ON CONFLICT(uid, deviceId)
+    DO UPDATE SET
+      createdAtMs = CASE
+        WHEN excluded.createdAtMs < chat_device_state.createdAtMs THEN excluded.createdAtMs
+        ELSE chat_device_state.createdAtMs
+      END,
+      updatedAt = excluded.updatedAt
+  `);
+  stmt.run([uid, deviceId, normalized, nowIso]);
+  stmt.free();
+  const finalCutoff = getDeviceBaselineCutoff(database, { uid, deviceId });
+  return {
+    cutoffMs: finalCutoff > 0 ? finalCutoff : normalized,
+    inserted: true,
+  };
+};
+
+const normalizeDeleteCutoffEntry = (entry) => {
+  if (!entry || typeof entry !== 'object') return null;
+  const targetType = String(entry.targetType || '').trim();
+  const targetUid = Number(entry.targetUid);
+  const cutoffMs = Number(entry.cutoffMs);
+  if (!isValidTargetType(targetType)) return null;
+  if (!Number.isInteger(targetUid) || targetUid <= 0) return null;
+  if (!Number.isFinite(cutoffMs) || cutoffMs <= 0) return null;
+  return {
+    targetType,
+    targetUid,
+    cutoffMs: Math.max(1, Math.floor(cutoffMs)),
+  };
+};
+
+const parseDeleteCutoffList = (value) => {
+  let source = value;
+  if (typeof source === 'string') {
+    try {
+      source = JSON.parse(source || '[]');
+    } catch {
+      source = [];
+    }
+  }
+  if (!Array.isArray(source)) return [];
+  const dedup = new Map();
+  source.forEach((raw) => {
+    const normalized = normalizeDeleteCutoffEntry(raw);
+    if (!normalized) return;
+    const key = `${normalized.targetType}:${normalized.targetUid}`;
+    const current = dedup.get(key);
+    if (!current || normalized.cutoffMs > current.cutoffMs) {
+      dedup.set(key, normalized);
+    }
+  });
+  return Array.from(dedup.values());
+};
+
+const upsertDeleteCutoff = (database, { uid, deviceId, targetType, targetUid, cutoffMs }) => {
+  if (!database) return;
+  if (!Number.isInteger(uid) || uid <= 0) return;
+  if (!deviceId || !isValidTargetType(targetType)) return;
+  if (!Number.isInteger(targetUid) || targetUid <= 0) return;
+  if (!Number.isFinite(cutoffMs) || cutoffMs <= 0) return;
+  const nowIso = new Date().toISOString();
+  const stmt = database.prepare(`
+    INSERT INTO chat_delete_cutoffs (uid, deviceId, targetType, targetUid, cutoffMs, updatedAt)
+    VALUES (?, ?, ?, ?, ?, ?)
+    ON CONFLICT(uid, deviceId, targetType, targetUid)
+    DO UPDATE SET
+      cutoffMs = CASE
+        WHEN excluded.cutoffMs > chat_delete_cutoffs.cutoffMs THEN excluded.cutoffMs
+        ELSE chat_delete_cutoffs.cutoffMs
+      END,
+      updatedAt = excluded.updatedAt
+  `);
+  stmt.run([uid, deviceId, targetType, targetUid, Math.floor(cutoffMs), nowIso]);
+  stmt.free();
+};
+
+const getDeleteCutoffForTarget = (database, { uid, deviceId, targetType, targetUid }) => {
+  if (!database) return 0;
+  if (!Number.isInteger(uid) || uid <= 0) return 0;
+  if (!deviceId || !isValidTargetType(targetType)) return 0;
+  if (!Number.isInteger(targetUid) || targetUid <= 0) return 0;
+  const stmt = database.prepare(`
+    SELECT cutoffMs
+    FROM chat_delete_cutoffs
+    WHERE uid = ? AND deviceId = ? AND targetType = ? AND targetUid = ?
+    LIMIT 1
+  `);
+  stmt.bind([uid, deviceId, targetType, targetUid]);
+  let cutoffMs = 0;
+  if (stmt.step()) {
+    const row = stmt.getAsObject();
+    const parsed = Number(row?.cutoffMs);
+    cutoffMs = Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : 0;
+  }
+  stmt.free();
+  return cutoffMs;
+};
+
+const loadDeleteCutoffMapByDevice = (database, { uid, deviceId }) => {
+  const result = {
+    private: new Map(),
+    group: new Map(),
+  };
+  if (!database) return result;
+  if (!Number.isInteger(uid) || uid <= 0 || !deviceId) return result;
+  const stmt = database.prepare(`
+    SELECT targetType, targetUid, cutoffMs
+    FROM chat_delete_cutoffs
+    WHERE uid = ? AND deviceId = ?
+  `);
+  stmt.bind([uid, deviceId]);
+  while (stmt.step()) {
+    const row = stmt.getAsObject();
+    const targetType = String(row?.targetType || '');
+    const targetUid = Number(row?.targetUid);
+    const cutoffMs = Number(row?.cutoffMs);
+    if (!isValidTargetType(targetType)) continue;
+    if (!Number.isInteger(targetUid) || targetUid <= 0) continue;
+    if (!Number.isFinite(cutoffMs) || cutoffMs <= 0) continue;
+    const map = targetType === 'group' ? result.group : result.private;
+    const current = Number(map.get(targetUid)) || 0;
+    if (cutoffMs > current) {
+      map.set(targetUid, Math.floor(cutoffMs));
+    }
+  }
+  stmt.free();
+  return result;
+};
+
 router.post('/send', authenticate, async (req, res) => {
   try {
     await ensureChatStorage();
@@ -707,7 +951,7 @@ router.post('/send', authenticate, async (req, res) => {
       return;
     }
 
-    const { user, users } = req.auth;
+	    const { user, users } = req.auth;
     if (user.uid !== senderUid) {
       res.status(403).json({ success: false, message: '请求失败。' });
       return;
@@ -729,8 +973,8 @@ router.post('/send', authenticate, async (req, res) => {
         res.status(403).json({ success: false, message: '请求失败。' });
         return;
       }
-    } else {
-      const group = await getGroupById(targetUid);
+	    } else {
+	      const group = await getGroupById(targetUid);
       if (!group) {
         res.status(404).json({ success: false, message: '群聊不存在。' });
         return;
@@ -1317,13 +1561,39 @@ router.get('/get', authenticate, async (req, res) => {
         return;
       }
       const memberSet = new Set(Array.isArray(group.memberUids) ? group.memberUids : []);
-      if (!memberSet.has(user.uid)) {
-        res.status(403).json({ success: false, message: '你不在该群聊中。' });
-        return;
-      }
-    }
+	      if (!memberSet.has(user.uid)) {
+	        res.status(403).json({ success: false, message: '你不在该群聊中。' });
+	        return;
+	      }
+	    }
 
+    const deviceHeaderId = resolveDeleteCutoffDeviceHeaderId(req);
+    const deviceId = deviceHeaderId || resolveDeleteCutoffDeviceId(req);
     const database = await openDb();
+    let deviceBaselineCutoffMs = 0;
+    if (deviceHeaderId) {
+      const baseline = ensureDeviceBaselineCutoff(database, {
+        uid: user.uid,
+        deviceId,
+        createdAtMs: resolveDeviceCreatedAtMsFromRequest(req, deviceId),
+      });
+      deviceBaselineCutoffMs = baseline.cutoffMs;
+      if (baseline.inserted) {
+        scheduleFlush();
+      }
+    } else if (deviceId) {
+      deviceBaselineCutoffMs = getDeviceBaselineCutoff(database, {
+        uid: user.uid,
+        deviceId,
+      });
+    }
+    const targetDeleteCutoffMs = getDeleteCutoffForTarget(database, {
+      uid: user.uid,
+      deviceId,
+      targetType,
+      targetUid,
+    });
+    const effectiveDeleteCutoffMs = Math.max(deviceBaselineCutoffMs, targetDeleteCutoffMs);
     if (sinceId) {
       const sinceStmt = database.prepare('SELECT createdAtMs FROM messages WHERE id = ?');
       sinceStmt.bind([sinceId]);
@@ -1370,6 +1640,10 @@ router.get('/get', authenticate, async (req, res) => {
     if (beforeMs > 0) {
       sql += ' AND createdAtMs < ?';
       params.push(beforeMs);
+    }
+    if (effectiveDeleteCutoffMs > 0) {
+      sql += ' AND createdAtMs > ?';
+      params.push(effectiveDeleteCutoffMs);
     }
     const effectiveLimit = limit > 0 ? limit : DEFAULT_LIMIT;
     const order = sinceMs > 0 ? 'ASC' : 'DESC';
@@ -1433,14 +1707,64 @@ router.post('/overview', authenticate, async (req, res) => {
       }
     }
     const readAt = parseReadAtMap(readAtSource);
+    const deviceHeaderId = resolveDeleteCutoffDeviceHeaderId(req);
+    const deviceId = deviceHeaderId || resolveDeleteCutoffDeviceId(req);
+    const deleteCutoffs = parseDeleteCutoffList(req.body?.deleteCutoffs);
     const friendSet = new Set(friendIds);
+    const groupSet = new Set(groupIds);
     const latestMap = {};
     const unreadMap = {};
 
     const database = await openDb();
-    if (friendIds.length > 0) {
-      const placeholders = friendIds.map(() => '?').join(',');
-      const stmt = database.prepare(`
+    let shouldFlush = false;
+    let deviceBaselineCutoffMs = 0;
+    if (deviceHeaderId) {
+      const baseline = ensureDeviceBaselineCutoff(database, {
+        uid: user.uid,
+        deviceId,
+        createdAtMs: resolveDeviceCreatedAtMsFromRequest(req, deviceId),
+      });
+      deviceBaselineCutoffMs = baseline.cutoffMs;
+      if (baseline.inserted) {
+        shouldFlush = true;
+      }
+    } else if (deviceId) {
+      deviceBaselineCutoffMs = getDeviceBaselineCutoff(database, {
+        uid: user.uid,
+        deviceId,
+      });
+    }
+
+    if (deviceId && deleteCutoffs.length > 0) {
+      deleteCutoffs.forEach((entry) => {
+        if (entry.targetType === 'private') {
+          if (!friendSet.has(entry.targetUid)) return;
+        } else if (entry.targetType === 'group') {
+          if (!groupSet.has(entry.targetUid)) return;
+        } else {
+          return;
+        }
+        upsertDeleteCutoff(database, {
+          uid: user.uid,
+          deviceId,
+          targetType: entry.targetType,
+          targetUid: entry.targetUid,
+          cutoffMs: entry.cutoffMs,
+        });
+        shouldFlush = true;
+      });
+    }
+    if (shouldFlush) {
+      scheduleFlush();
+    }
+    const deleteCutoffMap = loadDeleteCutoffMapByDevice(database, {
+      uid: user.uid,
+      deviceId,
+    });
+
+	    if (friendIds.length > 0) {
+	      const placeholders = friendIds.map(() => '?').join(',');
+	      const stmt = database.prepare(`
         SELECT id, type, senderUid, targetUid, targetType, data, createdAt, createdAtMs
         FROM messages
         WHERE targetType = 'private'
@@ -1456,14 +1780,19 @@ router.post('/overview', authenticate, async (req, res) => {
         const row = stmt.getAsObject();
         const senderUid = Number(row.senderUid);
         const targetUid = Number(row.targetUid);
-        const createdAtMs = Number(row.createdAtMs) || 0;
-        const friendUid = senderUid === user.uid ? targetUid : senderUid;
-        if (!friendSet.has(friendUid)) {
+	        const createdAtMs = Number(row.createdAtMs) || 0;
+	        const friendUid = senderUid === user.uid ? targetUid : senderUid;
+	        if (!friendSet.has(friendUid)) {
+	          continue;
+	        }
+        const deleteCutoffMs = Number(deleteCutoffMap.private.get(friendUid)) || 0;
+        const effectiveCutoffMs = Math.max(deviceBaselineCutoffMs, deleteCutoffMs);
+        if (effectiveCutoffMs > 0 && createdAtMs <= effectiveCutoffMs) {
           continue;
         }
-        if (!latestMap[friendUid]) {
-          latestMap[friendUid] = toMessage(row);
-        }
+	        if (!latestMap[friendUid]) {
+	          latestMap[friendUid] = toMessage(row);
+	        }
         if (row.type === 'text' && senderUid !== user.uid) {
           const seenAt = Number(readAt[friendUid]) || 0;
           if (createdAtMs > seenAt) {
@@ -1474,10 +1803,9 @@ router.post('/overview', authenticate, async (req, res) => {
       stmt.free();
     }
 
-    if (groupIds.length > 0) {
-      const groupSet = new Set(groupIds);
-      const placeholders = groupIds.map(() => '?').join(',');
-      const groupStmt = database.prepare(`
+	    if (groupIds.length > 0) {
+	      const placeholders = groupIds.map(() => '?').join(',');
+	      const groupStmt = database.prepare(`
         SELECT id, type, senderUid, targetUid, targetType, data, createdAt, createdAtMs
         FROM messages
         WHERE targetType = 'group' AND targetUid IN (${placeholders})
@@ -1488,13 +1816,18 @@ router.post('/overview', authenticate, async (req, res) => {
         const row = groupStmt.getAsObject();
         const groupUid = Number(row.targetUid);
         const senderUid = Number(row.senderUid);
-        const createdAtMs = Number(row.createdAtMs) || 0;
-        if (!groupSet.has(groupUid)) {
+	        const createdAtMs = Number(row.createdAtMs) || 0;
+	        if (!groupSet.has(groupUid)) {
+	          continue;
+	        }
+        const deleteCutoffMs = Number(deleteCutoffMap.group.get(groupUid)) || 0;
+        const effectiveCutoffMs = Math.max(deviceBaselineCutoffMs, deleteCutoffMs);
+        if (effectiveCutoffMs > 0 && createdAtMs <= effectiveCutoffMs) {
           continue;
         }
-        if (!latestMap[groupUid]) {
-          latestMap[groupUid] = toMessage(row);
-        }
+	        if (!latestMap[groupUid]) {
+	          latestMap[groupUid] = toMessage(row);
+	        }
         if (row.type === 'text' && senderUid !== user.uid) {
           const seenAt = Number(readAt[groupUid]) || 0;
           if (createdAtMs > seenAt) {
@@ -1527,6 +1860,111 @@ router.post('/overview', authenticate, async (req, res) => {
     res.json({ success: true, data });
   } catch (error) {
     console.error('Chat overview error:', error);
+    res.status(500).json({ success: false, message: '请求失败。' });
+  }
+});
+
+router.post('/delete-cutoff', authenticate, async (req, res) => {
+  try {
+    await ensureChatStorage();
+    const targetType = String(req.body?.targetType || '').trim();
+    const targetUid = Number(req.body?.targetUid);
+    const cutoffMs = Number(req.body?.cutoffMs);
+    if (!isValidTargetType(targetType)) {
+      res.status(400).json({ success: false, message: '请求失败。' });
+      return;
+    }
+    if (!Number.isInteger(targetUid) || targetUid <= 0) {
+      res.status(400).json({ success: false, message: '请求失败。' });
+      return;
+    }
+    if (!Number.isFinite(cutoffMs) || cutoffMs <= 0) {
+      res.status(400).json({ success: false, message: '请求失败。' });
+      return;
+    }
+
+    const { user, users } = req.auth;
+    if (targetType === 'private') {
+      const targetUser = users.find((item) => item.uid === targetUid);
+      if (!targetUser) {
+        res.status(404).json({ success: false, message: '请求失败。' });
+        return;
+      }
+      const isMutualFriend =
+        Array.isArray(user.friends) &&
+        user.friends.includes(targetUid) &&
+        Array.isArray(targetUser.friends) &&
+        targetUser.friends.includes(user.uid);
+      if (!isMutualFriend) {
+        res.status(403).json({ success: false, message: '请求失败。' });
+        return;
+      }
+    } else {
+      const group = await getGroupById(targetUid);
+      if (!group) {
+        res.status(404).json({ success: false, message: '群聊不存在。' });
+        return;
+      }
+      const memberSet = new Set(Array.isArray(group.memberUids) ? group.memberUids : []);
+      if (!memberSet.has(user.uid)) {
+        res.status(403).json({ success: false, message: '你不在该群聊中。' });
+        return;
+      }
+    }
+
+    const deviceHeaderId = resolveDeleteCutoffDeviceHeaderId(req);
+    const deviceId = deviceHeaderId || resolveDeleteCutoffDeviceId(req);
+    if (!deviceId) {
+      res.status(400).json({ success: false, message: '请求失败。' });
+      return;
+    }
+    const database = await openDb();
+    let shouldFlush = false;
+    let deviceBaselineCutoffMs = 0;
+    if (deviceHeaderId) {
+      const baseline = ensureDeviceBaselineCutoff(database, {
+        uid: user.uid,
+        deviceId,
+        createdAtMs: resolveDeviceCreatedAtMsFromRequest(req, deviceId),
+      });
+      deviceBaselineCutoffMs = baseline.cutoffMs;
+      if (baseline.inserted) {
+        shouldFlush = true;
+      }
+    } else {
+      deviceBaselineCutoffMs = getDeviceBaselineCutoff(database, {
+        uid: user.uid,
+        deviceId,
+      });
+    }
+    upsertDeleteCutoff(database, {
+      uid: user.uid,
+      deviceId,
+      targetType,
+      targetUid,
+      cutoffMs,
+    });
+    shouldFlush = true;
+    if (shouldFlush) {
+      scheduleFlush();
+    }
+    const targetCutoffMs = getDeleteCutoffForTarget(database, {
+      uid: user.uid,
+      deviceId,
+      targetType,
+      targetUid,
+    });
+    const effectiveCutoffMs = Math.max(deviceBaselineCutoffMs, targetCutoffMs);
+    res.json({
+      success: true,
+      data: {
+        targetType,
+        targetUid,
+        cutoffMs: effectiveCutoffMs,
+      },
+    });
+  } catch (error) {
+    console.error('Chat delete cutoff error:', error);
     res.status(500).json({ success: false, message: '请求失败。' });
   }
 });

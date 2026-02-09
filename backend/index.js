@@ -113,11 +113,11 @@ app.use((req, res, next) => {
   if (requestHeaders) {
     res.setHeader('Access-Control-Allow-Headers', requestHeaders);
   } else {
-    res.setHeader(
-      'Access-Control-Allow-Headers',
-      'Content-Type, Authorization, X-File-Ext, X-File-Hash, X-File-Name, X-File-Type'
-    );
-  }
+	    res.setHeader(
+	      'Access-Control-Allow-Headers',
+	      'Content-Type, Authorization, X-File-Ext, X-File-Hash, X-File-Name, X-File-Type, X-Xinchat-Device-Id, X-Device-Id, X-Xinchat-Device-Created-At, X-Device-Created-At'
+	    );
+	  }
   if (req.method === 'OPTIONS') {
     res.status(204).end();
     return;

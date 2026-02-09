@@ -963,6 +963,32 @@ const getMessageRenderKey = (message: Message): string => {
   return `msg:${String(message?.id ?? '')}`;
 };
 
+const createChatDeviceId = () => {
+  const nowPart = Date.now().toString(36);
+  const randA = Math.random().toString(36).slice(2, 10);
+  const randB = Math.random().toString(36).slice(2, 10);
+  return `dev_${nowPart}_${randA}${randB}`.slice(0, 96);
+};
+
+const MAX_DEVICE_CREATED_AT_FUTURE_DRIFT_MS = 5 * 60 * 1000;
+
+const extractDeviceCreatedAtMsFromId = (deviceId: string): number => {
+  if (typeof deviceId !== 'string') return 0;
+  const match = deviceId.trim().match(/^dev_([0-9a-z]+)_/i);
+  if (!match) return 0;
+  const parsed = parseInt(match[1], 36);
+  if (!Number.isFinite(parsed) || parsed <= 0) return 0;
+  return Math.floor(parsed);
+};
+
+const normalizeDeviceCreatedAtMs = (raw: any): number => {
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed) || parsed <= 0) return 0;
+  const floored = Math.floor(parsed);
+  const maxAllowed = Date.now() + MAX_DEVICE_CREATED_AT_FUTURE_DRIFT_MS;
+  return floored > maxAllowed ? maxAllowed : floored;
+};
+
 const withOutgoingEnterAnimation = (
   entry: any,
   options?: { clientMessageId?: string; appearAtMs?: number }
@@ -1231,6 +1257,7 @@ export default function Home({ profile }: { profile: Profile }) {
   const navPad = Math.min(insets.bottom, 6);
   const tokenRef = useRef<string>('');
   const [tokenReady, setTokenReady] = useState(false);
+  const [deviceReady, setDeviceReady] = useState(false);
   const [profileData, setProfileData] = useState<Profile>({
     username: '',
     nickname: '',
@@ -1279,6 +1306,7 @@ export default function Home({ profile }: { profile: Profile }) {
   const [chatImageSending, setChatImageSending] = useState(false);
   const [imagePreviewVisible, setImagePreviewVisible] = useState(false);
   const [imagePreviewUrl, setImagePreviewUrl] = useState('');
+  const [deleteChatPromptUid, setDeleteChatPromptUid] = useState<number | null>(null);
   const [retryPromptMessage, setRetryPromptMessage] = useState<Message | null>(null);
   const [voicePanelVisible, setVoicePanelVisible] = useState(false);
   const [voiceRecording, setVoiceRecording] = useState(false);
@@ -1453,6 +1481,8 @@ export default function Home({ profile }: { profile: Profile }) {
   const focusChatInputTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const locateChatTaskIdRef = useRef(0);
   const clientMessageSeqRef = useRef(0);
+  const deviceIdRef = useRef('');
+  const deviceCreatedAtMsRef = useRef(0);
 
   useEffect(
     () => () => {
@@ -1471,6 +1501,54 @@ export default function Home({ profile }: { profile: Profile }) {
     },
     []
   );
+
+  useEffect(() => {
+    let cancelled = false;
+    const ensureDeviceId = async () => {
+      let deviceId = String(await storage.getString(STORAGE_KEYS.chatDeviceId)).trim();
+      let createdAtMs = normalizeDeviceCreatedAtMs(
+        await storage.getString(STORAGE_KEYS.chatDeviceCreatedAtMs)
+      );
+      let shouldPersistDeviceId = false;
+      let shouldPersistCreatedAt = false;
+      if (!deviceId) {
+        deviceId = createChatDeviceId();
+        createdAtMs = Date.now();
+        shouldPersistDeviceId = true;
+        shouldPersistCreatedAt = true;
+      }
+      if (!createdAtMs) {
+        createdAtMs = extractDeviceCreatedAtMsFromId(deviceId) || Date.now();
+        shouldPersistCreatedAt = true;
+      }
+      if (shouldPersistDeviceId) {
+        await storage.setString(STORAGE_KEYS.chatDeviceId, deviceId);
+      }
+      if (shouldPersistCreatedAt) {
+        await storage.setString(STORAGE_KEYS.chatDeviceCreatedAtMs, String(createdAtMs));
+      }
+      if (cancelled) return;
+      deviceIdRef.current = deviceId;
+      deviceCreatedAtMsRef.current = createdAtMs;
+    };
+    ensureDeviceId()
+      .catch(() => {
+        if (cancelled) return;
+        const fallbackDeviceId = deviceIdRef.current || createChatDeviceId();
+        const fallbackCreatedAtMs =
+          extractDeviceCreatedAtMsFromId(fallbackDeviceId) || Date.now();
+        deviceIdRef.current = fallbackDeviceId;
+        deviceCreatedAtMsRef.current = fallbackCreatedAtMs;
+      })
+      .finally(() => {
+        if (!cancelled) {
+          setDeviceReady(true);
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   useEffect(() => {
     if (!activeChatUid) {
@@ -2069,7 +2147,19 @@ export default function Home({ profile }: { profile: Profile }) {
 
   const authHeaders = useCallback((): Record<string, string> => {
     const token = tokenRef.current;
-    return token ? { Authorization: `Bearer ${token}` } : {};
+    const deviceId = String(deviceIdRef.current || '').trim();
+    const deviceCreatedAtMs = normalizeDeviceCreatedAtMs(deviceCreatedAtMsRef.current);
+    const headers: Record<string, string> = {};
+    if (token) {
+      headers.Authorization = `Bearer ${token}`;
+    }
+    if (deviceId) {
+      headers['x-xinchat-device-id'] = deviceId;
+    }
+    if (deviceCreatedAtMs > 0) {
+      headers['x-xinchat-device-created-at'] = String(deviceCreatedAtMs);
+    }
+    return headers;
   }, []);
 
   const createClientMessageId = useCallback(() => {
@@ -2380,21 +2470,46 @@ export default function Home({ profile }: { profile: Profile }) {
     return Number.isFinite(value) && value > 0 ? value : 0;
   }, []);
 
+  const syncDeleteCutoffToServer = useCallback(
+    async (uid: number, cutoffMs: number) => {
+      if (!tokenRef.current) return;
+      if (!uid || !Number.isFinite(cutoffMs) || cutoffMs <= 0) return;
+      const { targetUid, targetType } = decodeChatUid(uid);
+      if (!Number.isInteger(targetUid) || targetUid <= 0) return;
+      try {
+        await fetch(`${API_BASE}/api/chat/delete-cutoff`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', ...authHeaders() },
+          body: JSON.stringify({
+            targetUid,
+            targetType,
+            cutoffMs: Math.max(1, Math.floor(cutoffMs)),
+          }),
+        });
+      } catch {}
+    },
+    [authHeaders]
+  );
+
   const setDeleteCutoff = useCallback(
     (uid: number, cutoffMs: number) => {
       if (!uid || !Number.isFinite(cutoffMs) || cutoffMs <= 0) return;
+      const current = Number(deleteCutoffMapRef.current[uid]);
+      const currentSafe = Number.isFinite(current) && current > 0 ? current : 0;
+      const nextValue = Math.max(currentSafe, cutoffMs);
+      if (nextValue === currentSafe) return;
       setDeleteCutoffMap((prev) => {
-        const current = Number(prev[uid]);
-        const currentSafe = Number.isFinite(current) && current > 0 ? current : 0;
-        const nextValue = Math.max(currentSafe, cutoffMs);
-        if (nextValue === currentSafe) return prev;
+        const prevValue = Number(prev[uid]);
+        const prevSafe = Number.isFinite(prevValue) && prevValue > 0 ? prevValue : 0;
+        if (nextValue <= prevSafe) return prev;
         const next = { ...prev, [uid]: nextValue };
         deleteCutoffMapRef.current = next;
         persistDeleteCutoffMap(next).catch(() => undefined);
         return next;
       });
+      syncDeleteCutoffToServer(uid, nextValue).catch(() => undefined);
     },
-    [persistDeleteCutoffMap]
+    [persistDeleteCutoffMap, syncDeleteCutoffToServer]
   );
 
   const getReadAt = useCallback((uid: number) => {
@@ -2862,10 +2977,29 @@ export default function Home({ profile }: { profile: Profile }) {
         const current = Number(serverReadAt[targetUid]) || 0;
         serverReadAt[targetUid] = Math.max(current, ts);
       });
+      const deleteCutoffs = Object.entries(deleteCutoffMapRef.current)
+        .map(([rawChatUid, rawCutoff]) => {
+          const chatUid = Number(rawChatUid);
+          const cutoffMs = Number(rawCutoff);
+          if (!Number.isInteger(chatUid) || chatUid <= 0) return null;
+          if (!Number.isFinite(cutoffMs) || cutoffMs <= 0) return null;
+          const { targetUid, targetType } = decodeChatUid(chatUid);
+          if (!Number.isInteger(targetUid) || targetUid <= 0) return null;
+          return {
+            targetUid,
+            targetType,
+            cutoffMs: Math.max(1, Math.floor(cutoffMs)),
+          };
+        })
+        .filter(Boolean) as Array<{
+        targetUid: number;
+        targetType: ChatTargetType;
+        cutoffMs: number;
+      }>;
       const response = await fetch(`${API_BASE}/api/chat/overview`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', ...authHeaders() },
-        body: JSON.stringify({ readAt: serverReadAt }),
+        body: JSON.stringify({ readAt: serverReadAt, deleteCutoffs }),
       });
       const data = await response.json().catch(() => ({}));
       if (!response.ok || !data?.success || !Array.isArray(data?.data)) {
@@ -3749,9 +3883,6 @@ export default function Home({ profile }: { profile: Profile }) {
             persistHiddenMap(next).catch(() => undefined);
             return next;
           });
-          if (activeChatUidRef.current === actionUid) {
-            setActiveChatUid(null);
-          }
           return;
         }
 
@@ -3773,9 +3904,6 @@ export default function Home({ profile }: { profile: Profile }) {
             return next;
           });
           setUnreadMap((prev) => ({ ...prev, [actionChatUid]: 0 }));
-          if (activeChatUidRef.current === actionChatUid) {
-            setActiveChatUid(null);
-          }
           return;
         }
 
@@ -5450,7 +5578,7 @@ export default function Home({ profile }: { profile: Profile }) {
   }, [stopHeartbeat]);
 
   useEffect(() => {
-    if (!tokenReady || !tokenRef.current) return;
+    if (!tokenReady || !tokenRef.current || !deviceReady) return;
     let cancelled = false;
     const bootstrapHome = async () => {
       setLoadingFriends(true);
@@ -5475,7 +5603,7 @@ export default function Home({ profile }: { profile: Profile }) {
       }
       teardownWs();
     };
-  }, [connectWs, hydrateHomeCache, loadFriends, loadGroups, teardownWs, tokenReady]);
+  }, [connectWs, deviceReady, hydrateHomeCache, loadFriends, loadGroups, teardownWs, tokenReady]);
 
   const messageItems = useMemo<MessageListItem[]>(() => {
     const privateItems: MessageListItem[] = friends
@@ -5777,20 +5905,23 @@ export default function Home({ profile }: { profile: Profile }) {
     [persistHiddenMap, setDeleteCutoff, setReadAt]
   );
 
+  const closeDeleteChatPrompt = useCallback(() => {
+    setDeleteChatPromptUid(null);
+  }, []);
+
+  const confirmDeleteChatPrompt = useCallback(() => {
+    const uid = deleteChatPromptUid;
+    setDeleteChatPromptUid(null);
+    if (!uid) return;
+    applyLocalDeleteChat(uid);
+  }, [applyLocalDeleteChat, deleteChatPromptUid]);
+
   const deleteChat = useCallback(() => {
     if (!chatMenuTargetUid) return;
     const uid = chatMenuTargetUid;
     closeChatMenu();
-    Alert.alert(
-      '删除聊天记录',
-      '仅删除本地聊天记录，服务器记录不会删除。确认继续？',
-      [
-        { text: '取消', style: 'cancel' },
-        { text: '删除', style: 'destructive', onPress: () => applyLocalDeleteChat(uid) },
-      ],
-      { cancelable: true }
-    );
-  }, [applyLocalDeleteChat, chatMenuTargetUid, closeChatMenu]);
+    setDeleteChatPromptUid(uid);
+  }, [chatMenuTargetUid, closeChatMenu]);
 
   const renderedActiveChatMessages = useMemo(() => {
     if (!activeChatUid) return [];
@@ -6645,6 +6776,37 @@ export default function Home({ profile }: { profile: Profile }) {
           </View>
         </View>
       ) : null}
+
+      <Modal
+        transparent
+        visible={deleteChatPromptUid !== null}
+        animationType="fade"
+        onRequestClose={closeDeleteChatPrompt}
+      >
+        <View style={styles.retryPromptOverlay}>
+          <Pressable style={styles.retryPromptBackdrop} onPress={closeDeleteChatPrompt} />
+          <View style={styles.retryPromptCard}>
+            <Text style={styles.retryPromptTitle}>删除聊天记录</Text>
+            <Text style={styles.deleteChatPromptText}>
+              仅删除本地聊天记录，服务器记录不会删除。确认继续？
+            </Text>
+            <View style={styles.retryPromptActions}>
+              <Pressable
+                style={[styles.retryPromptBtn, styles.retryPromptBtnCancel]}
+                onPress={closeDeleteChatPrompt}
+              >
+                <Text style={styles.retryPromptBtnCancelText}>取消</Text>
+              </Pressable>
+              <Pressable
+                style={[styles.retryPromptBtn, styles.deleteChatPromptBtnConfirm]}
+                onPress={confirmDeleteChatPrompt}
+              >
+                <Text style={styles.retryPromptBtnConfirmText}>删除</Text>
+              </Pressable>
+            </View>
+          </View>
+        </View>
+      </Modal>
 
       <Modal
         transparent
@@ -7640,6 +7802,13 @@ const styles = StyleSheet.create({
     color: '#1f2c3c',
     textAlign: 'center',
   },
+  deleteChatPromptText: {
+    marginTop: 9,
+    textAlign: 'center',
+    color: '#64748b',
+    fontSize: 13,
+    lineHeight: 19,
+  },
   retryPromptActions: {
     flexDirection: 'row',
     justifyContent: 'center',
@@ -7661,6 +7830,9 @@ const styles = StyleSheet.create({
   },
   retryPromptBtnConfirm: {
     backgroundColor: '#2f8bff',
+  },
+  deleteChatPromptBtnConfirm: {
+    backgroundColor: '#ef4444',
   },
   retryPromptBtnCancelText: {
     color: '#4d5a6b',
