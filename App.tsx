@@ -17,6 +17,7 @@ import ChatSettings from './src/components/ChatSettings';
 import CreateGroup from './src/components/CreateGroup';
 import GroupChatSettings from './src/components/GroupChatSettings';
 import GroupChatSearch from './src/components/GroupChatSearch';
+import TranslationScreen from './src/components/TranslationScreen';
 import { API_BASE } from './src/config';
 import { STORAGE_KEYS } from './src/constants/storageKeys';
 import type { RootStackParamList } from './src/navigation/types';
@@ -483,6 +484,11 @@ function App() {
                 <Stack.Screen name="QRScan" component={QRScan} />
                 <Stack.Screen name="ObjectInsight" component={ObjectInsight} />
                 <Stack.Screen name="InAppBrowser" component={InAppBrowser} />
+                <Stack.Screen
+                  name="Translation"
+                  component={TranslationScreen}
+                  options={{ title: '翻译', headerShown: true }}
+                />
               </Stack.Navigator>
             </NavigationContainer>
           </View>

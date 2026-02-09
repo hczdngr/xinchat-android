@@ -219,6 +219,8 @@ type PreparedForwardMessage = {
   localData: Record<string, any>;
   payload: Record<string, any>;
 };
+type PendingSingleDelete = { chatUid: number; messageId: string } | null;
+type PendingMultiDelete = { chatUid: number; messageIds: string[] } | null;
 
 const CHAT_HISTORY_PAGE_SIZE = 50;
 const CHAT_RENDER_CHUNK_SIZE = 50;
@@ -282,7 +284,6 @@ const BUBBLE_MENU_ITEMS: ReadonlyArray<MessageBubbleMenuItem> = [
   { key: 'favorite', label: '收藏' },
   { key: 'quote', label: '引用' },
   { key: 'multi', label: '多选' },
-  { key: 'remind', label: '提醒' },
   { key: 'translate', label: '翻译' },
   { key: 'delete', label: '删除', danger: true },
 ] as const;
@@ -1705,6 +1706,8 @@ export default function Home({
   const [imagePreviewUrl, setImagePreviewUrl] = useState('');
   const [deleteChatPromptUid, setDeleteChatPromptUid] = useState<number | null>(null);
   const [retryPromptMessage, setRetryPromptMessage] = useState<Message | null>(null);
+  const [pendingSingleDelete, setPendingSingleDelete] = useState<PendingSingleDelete>(null);
+  const [pendingMultiDelete, setPendingMultiDelete] = useState<PendingMultiDelete>(null);
   const [voicePanelVisible, setVoicePanelVisible] = useState(false);
   const [voiceRecording, setVoiceRecording] = useState(false);
   const [voiceProcessing, setVoiceProcessing] = useState(false);
@@ -6881,22 +6884,19 @@ export default function Home({
   );
 
   const deleteMessageLocally = useCallback(
-    (chatUid: number, messageId: string) => {
+    (chatUid: number, messageId: string): boolean => {
       if (!chatUid || !messageId) return false;
       const normalizedId = String(messageId).trim();
       if (!normalizedId) return false;
 
-      let removed = false;
-      let nextBucket: Message[] = [];
-      setMessagesByUid((prev) => {
-        const bucket = Array.isArray(prev[chatUid]) ? prev[chatUid] : [];
-        const filtered = bucket.filter((entry) => String(entry?.id || '') !== normalizedId);
-        if (filtered.length === bucket.length) return prev;
-        removed = true;
-        nextBucket = filtered;
-        return { ...prev, [chatUid]: filtered };
-      });
-      if (!removed) return false;
+      const bucket = messagesByUidRef.current[chatUid] || [];
+      const nextBucket = bucket.filter((entry) => String(entry?.id || '') !== normalizedId);
+
+      if (nextBucket.length === bucket.length) {
+        return false;
+      }
+
+      setMessagesByUid((prev) => ({ ...prev, [chatUid]: nextBucket }));
 
       const nextIdSet = new Set<number | string>();
       nextBucket.forEach((entry) => {
@@ -7250,30 +7250,18 @@ export default function Home({
         return;
       }
 
-      if (action === 'remind') {
-        closeMessageMenu();
-        openReminderPicker(target.chatUid, target.message);
-        return;
-      }
-
       if (action === 'translate') {
         closeMessageMenu();
-        openMessageTranslate(target.message);
+        navigation.navigate('Translation', { textToTranslate: target.message.content });
         return;
       }
 
       if (action === 'delete') {
         closeMessageMenu();
-        Alert.alert('删除消息', '仅删除本地消息，服务器记录不会删除。', [
-          { text: '取消', style: 'cancel' },
-          {
-            text: '删除',
-            style: 'destructive',
-            onPress: () => {
-              deleteMessageLocally(target.chatUid, target.messageId);
-            },
-          },
-        ]);
+        setPendingSingleDelete({
+          chatUid: target.chatUid,
+          messageId: target.messageId,
+        });
         return;
       }
     },
@@ -7283,10 +7271,9 @@ export default function Home({
       focusChatInput,
       messageMenuSourceText,
       messageMenuTarget,
+      navigation,
       openForwardPicker,
-      openMessageTranslate,
       openMultiSelectMode,
-      openReminderPicker,
       toggleFavoriteMessage,
     ]
   );
@@ -7325,19 +7312,9 @@ export default function Home({
     const chatUid = Number(activeChatUidRef.current);
     if (!chatUid || !multiSelectedMessages.length) return;
     const ids = multiSelectedMessages.map((item) => String(item.id || '').trim()).filter(Boolean);
-    Alert.alert('删除消息', `确认删除已选 ${ids.length} 条消息？`, [
-      { text: '取消', style: 'cancel' },
-      {
-        text: '删除',
-        style: 'destructive',
-        onPress: () => {
-          const removedCount = deleteMessagesLocally(chatUid, ids);
-          closeMultiSelectMode();
-          Alert.alert('删除完成', `已删除 ${removedCount} 条消息。`);
-        },
-      },
-    ]);
-  }, [closeMultiSelectMode, deleteMessagesLocally, multiSelectedMessages]);
+    if (ids.length === 0) return;
+    setPendingMultiDelete({ chatUid, messageIds: ids });
+  }, [multiSelectedMessages]);
 
   const closeChatMenu = useCallback(() => {
     setChatMenuVisible(false);
@@ -7417,6 +7394,24 @@ export default function Home({
     if (!uid) return;
     applyLocalDeleteChat(uid);
   }, [applyLocalDeleteChat, deleteChatPromptUid]);
+
+  const confirmSingleDelete = useCallback(() => {
+    if (!pendingSingleDelete) return;
+    const { chatUid, messageId } = pendingSingleDelete;
+    deleteMessageLocally(chatUid, messageId);
+    setPendingSingleDelete(null);
+  }, [pendingSingleDelete]);
+
+  const confirmMultiDelete = useCallback(() => {
+    if (!pendingMultiDelete) return;
+    const { chatUid, messageIds } = pendingMultiDelete;
+    if (chatUid && messageIds?.length > 0) {
+      deleteMessagesLocally(chatUid, messageIds);
+    }
+    setMultiSelectMode(false);
+    setMultiSelectedMessageIds([]);
+    setPendingMultiDelete(null);
+  }, [pendingMultiDelete]);
 
   const deleteChat = useCallback(() => {
     if (!chatMenuTargetUid) return;
@@ -8483,6 +8478,70 @@ export default function Home({
                 onPress={confirmRetryPrompt}
               >
                 <Text style={styles.retryPromptBtnConfirmText}>确认</Text>
+              </Pressable>
+            </View>
+          </View>
+        </View>
+      </Modal>
+
+      <Modal
+        transparent
+        visible={!!pendingSingleDelete}
+        animationType="fade"
+        onRequestClose={() => setPendingSingleDelete(null)}
+      >
+        <View style={styles.retryPromptOverlay}>
+          <Pressable style={styles.retryPromptBackdrop} onPress={() => setPendingSingleDelete(null)} />
+          <View style={styles.retryPromptCard}>
+            <Text style={styles.retryPromptTitle}>删除消息</Text>
+            <Text style={styles.deleteChatPromptText}>
+              确认继续？
+            </Text>
+            <View style={styles.retryPromptActions}>
+              <Pressable
+                style={[styles.retryPromptBtn, styles.retryPromptBtnCancel]}
+                onPress={() => setPendingSingleDelete(null)}
+              >
+                <Text style={styles.retryPromptBtnCancelText}>取消</Text>
+              </Pressable>
+              <Pressable
+                style={[styles.retryPromptBtn, styles.deleteChatPromptBtnConfirm]}
+                onPress={confirmSingleDelete}
+              >
+                <Text style={styles.retryPromptBtnConfirmText}>删除</Text>
+              </Pressable>
+            </View>
+          </View>
+        </View>
+      </Modal>
+
+      <Modal
+        transparent
+        visible={!!pendingMultiDelete}
+        animationType="fade"
+        onRequestClose={() => setPendingMultiDelete(null)}
+      >
+        <View style={styles.retryPromptOverlay}>
+          <Pressable style={styles.retryPromptBackdrop} onPress={() => setPendingMultiDelete(null)} />
+          <View style={styles.retryPromptCard}>
+            <Text style={styles.retryPromptTitle}>删除消息</Text>
+            <Text style={styles.deleteChatPromptText}>
+              {`确认删除已选 ${
+                pendingMultiDelete?.messageIds?.length ?? 0
+              } 条消息？\n仅删除本地消息。`}
+            </Text>
+            <View style={styles.retryPromptActions}>
+              <Pressable
+                style={[styles.retryPromptBtn, styles.retryPromptBtnCancel]}
+                onPress={() => setPendingMultiDelete(null)}
+              >
+                <Text style={styles.retryPromptBtnCancelText}>取消</Text>
+              </Pressable>
+              <Pressable
+                style={[styles.retryPromptBtn, styles.deleteChatPromptBtnConfirm]}
+                onPress={confirmMultiDelete}
+              >
+                <Text style={styles.retryPromptBtnConfirmText}>删除</Text>
               </Pressable>
             </View>
           </View>

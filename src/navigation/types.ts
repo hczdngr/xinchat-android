@@ -90,6 +90,9 @@ export type RootStackParamList = {
     url: string;
     title?: string;
   };
+  Translation: {
+    textToTranslate: string;
+  };
 };
 
 export type RootNavigation = NativeStackNavigationProp<RootStackParamList>;
