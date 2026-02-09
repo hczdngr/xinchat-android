@@ -116,6 +116,7 @@ type HiddenMap = Record<number, boolean>;
 type MutedMap = Record<number, boolean>;
 type ChatBackgroundMap = Record<number, ChatBackgroundKey>;
 type DeleteCutoffMap = Record<number, number>;
+type LocalDeletedMessageMap = Record<number, string[]>;
 type MessageListItem = {
   uid: number;
   targetUid: number;
@@ -269,6 +270,7 @@ const BUBBLE_MENU_MARGIN = 10;
 const BUBBLE_MENU_HEIGHT = 108;
 const BUBBLE_MENU_ARROW_SIZE = 7;
 const MAX_FAVORITE_MESSAGES = 800;
+const MAX_LOCAL_DELETED_MESSAGES_PER_CHAT = 500;
 const REMINDER_DELAY_OPTIONS = [
   { label: '5分钟', delayMs: 5 * 60 * 1000 },
   { label: '30分钟', delayMs: 30 * 60 * 1000 },
@@ -906,6 +908,42 @@ const sanitizeMessageReminders = (list: any): MessageReminderEntry[] => {
     });
   }
   next.sort((a, b) => a.remindAtMs - b.remindAtMs);
+  return next;
+};
+
+const sanitizeLocalDeletedMessageMap = (input: any): LocalDeletedMessageMap => {
+  if (!input || typeof input !== 'object') return {};
+  const next: LocalDeletedMessageMap = {};
+  Object.entries(input).forEach(([rawUid, rawList]) => {
+    const uid = Number(rawUid);
+    if (!Number.isInteger(uid) || uid <= 0 || !Array.isArray(rawList)) return;
+    const seen = new Set<string>();
+    const normalized: string[] = [];
+    rawList.forEach((rawId) => {
+      const id = String(rawId || '').trim();
+      if (!id || seen.has(id)) return;
+      seen.add(id);
+      normalized.push(id);
+    });
+    if (!normalized.length) return;
+    next[uid] =
+      normalized.length > MAX_LOCAL_DELETED_MESSAGES_PER_CHAT
+        ? normalized.slice(normalized.length - MAX_LOCAL_DELETED_MESSAGES_PER_CHAT)
+        : normalized;
+  });
+  return next;
+};
+
+const buildLocalDeletedMessageSetMap = (map: LocalDeletedMessageMap): Map<number, Set<string>> => {
+  const next = new Map<number, Set<string>>();
+  Object.entries(map).forEach(([rawUid, rawIds]) => {
+    const uid = Number(rawUid);
+    if (!Number.isInteger(uid) || uid <= 0 || !Array.isArray(rawIds) || rawIds.length === 0) return;
+    const idSet = new Set(rawIds.map((id) => String(id || '').trim()).filter(Boolean));
+    if (idSet.size > 0) {
+      next.set(uid, idSet);
+    }
+  });
   return next;
 };
 
@@ -1798,6 +1836,8 @@ export default function Home({
   const messagesByUidRef = useRef<BucketMap>({});
   const readAtMapRef = useRef<ReadAtMap>({});
   const deleteCutoffMapRef = useRef<DeleteCutoffMap>({});
+  const localDeletedMessageMapRef = useRef<LocalDeletedMessageMap>({});
+  const localDeletedMessageSetMapRef = useRef<Map<number, Set<string>>>(new Map());
   const mutedMapRef = useRef<MutedMap>({});
   const appStateRef = useRef<string>(AppState.currentState || 'active');
   const friendsRef = useRef<Friend[]>([]);
@@ -2553,6 +2593,10 @@ export default function Home({
     () => `${STORAGE_KEYS.messageRemindersPrefix}${Number(selfUid) || 0}`,
     [selfUid]
   );
+  const localDeletedMessageIdsStorageKey = useMemo(
+    () => `${STORAGE_KEYS.localDeletedMessageIdsPrefix}${Number(selfUid) || 0}`,
+    [selfUid]
+  );
   const canSend = useMemo(() => draftMessage.trim().length > 0, [draftMessage]);
   const activeChatTitle = useMemo(() => {
     if (activeChatGroup) {
@@ -2693,6 +2737,7 @@ export default function Home({
       cachedPending,
       cachedGroupRemarks,
       cachedDeleteCutoff,
+      cachedLocalDeletedMessageMap,
     ] =
       await Promise.all([
         storage.getJson<Friend[]>(STORAGE_KEYS.homeFriendsCache),
@@ -2703,12 +2748,15 @@ export default function Home({
         storage.getJson<number>(STORAGE_KEYS.homePendingRequestsCache),
         storage.getJson<Record<number, string>>(STORAGE_KEYS.groupRemarks),
         storage.getJson<DeleteCutoffMap>(STORAGE_KEYS.chatDeleteCutoff),
+        storage.getJson<LocalDeletedMessageMap>(localDeletedMessageIdsStorageKey),
       ]);
 
     const nextFriends = sanitizeFriends(Array.isArray(cachedFriends) ? cachedFriends : []);
     const nextGroups = sanitizeGroups(Array.isArray(cachedGroups) ? cachedGroups : []);
     let nextMessages = sanitizeCachedMessages(cachedMessages);
     const nextDeleteCutoff = sanitizeDeleteCutoffMap(cachedDeleteCutoff);
+    const nextLocalDeletedMessageMap = sanitizeLocalDeletedMessageMap(cachedLocalDeletedMessageMap);
+    const nextLocalDeletedMessageSetMap = buildLocalDeletedMessageSetMap(nextLocalDeletedMessageMap);
     const friendIdSet = new Set(nextFriends.map((friend) => Number(friend.uid)));
     const groupIdSet = new Set(nextGroups.map((group) => Number(group.id)));
 
@@ -2813,8 +2861,37 @@ export default function Home({
       const uid = Number(rawUid);
       if (!Number.isInteger(uid) || uid <= 0 || !Array.isArray(list)) return;
       const cutoff = Number(nextDeleteCutoff[uid]) || 0;
-      if (!Number.isFinite(cutoff) || cutoff <= 0) return;
-      nextMessages[uid] = list.filter((item) => resolveMessageCreatedAtMs(item) > cutoff);
+      const localDeletedIdSet = nextLocalDeletedMessageSetMap.get(uid);
+      const filteredList = list.filter((item) => {
+        if (!item) return false;
+        if (Number.isFinite(cutoff) && cutoff > 0 && resolveMessageCreatedAtMs(item) <= cutoff) {
+          return false;
+        }
+        if (!localDeletedIdSet || localDeletedIdSet.size === 0) return true;
+        const itemId = String(item.id ?? '').trim();
+        return itemId ? !localDeletedIdSet.has(itemId) : false;
+      });
+      const changed = filteredList.length !== list.length;
+      nextMessages[uid] = filteredList;
+      if (changed) {
+        const tail = filteredList[filteredList.length - 1];
+        if (!tail) {
+          delete nextLatest[uid];
+          nextUnread[uid] = 0;
+          return;
+        }
+        const tailMs = Number.isFinite(Number(tail.createdAtMs))
+          ? Number(tail.createdAtMs)
+          : Number.isFinite(Date.parse(String(tail.createdAt || '')))
+            ? Date.parse(String(tail.createdAt || ''))
+            : Date.now();
+        nextLatest[uid] = {
+          text: String(tail.content || '').trim() || '暂无消息',
+          time: new Date(tailMs).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' }),
+          ts: tailMs,
+        };
+      }
+      if (!changed && (!Number.isFinite(cutoff) || cutoff <= 0)) return;
       const latest = nextLatest[uid];
       if (!latest || Number(latest.ts) <= cutoff) {
         delete nextLatest[uid];
@@ -2837,6 +2914,8 @@ export default function Home({
 
     messageIdSetsRef.current = nextIdSets;
     deleteCutoffMapRef.current = nextDeleteCutoff;
+    localDeletedMessageMapRef.current = nextLocalDeletedMessageMap;
+    localDeletedMessageSetMapRef.current = nextLocalDeletedMessageSetMap;
     setFriends(nextFriends);
     setGroups(nextGroups);
     setMessagesByUid(nextMessages);
@@ -2855,7 +2934,7 @@ export default function Home({
       Object.keys(nextUnread).length > 0 ||
       Math.max(0, Number(cachedPending) || 0) > 0
     );
-  }, []);
+  }, [localDeletedMessageIdsStorageKey]);
 
   const normalizeMessage = useCallback((entry: any): Message => {
     const createdAt = entry?.createdAt || '';
@@ -2945,6 +3024,55 @@ export default function Home({
   const persistDeleteCutoffMap = useCallback(async (nextMap: DeleteCutoffMap) => {
     await storage.setJson(STORAGE_KEYS.chatDeleteCutoff, nextMap);
   }, []);
+
+  const persistLocalDeletedMessageMap = useCallback(
+    async (nextMap: LocalDeletedMessageMap) => {
+      await storage.setJson(localDeletedMessageIdsStorageKey, nextMap);
+    },
+    [localDeletedMessageIdsStorageKey]
+  );
+
+  const isMessageDeletedLocally = useCallback((chatUid: number, messageId: any) => {
+    if (!chatUid) return false;
+    const normalizedId = String(messageId ?? '').trim();
+    if (!normalizedId) return false;
+    const idSet = localDeletedMessageSetMapRef.current.get(chatUid);
+    return Boolean(idSet?.has(normalizedId));
+  }, []);
+
+  const rememberMessageDeletedLocally = useCallback(
+    (chatUid: number, messageId: string) => {
+      if (!chatUid) return;
+      const normalizedId = String(messageId || '').trim();
+      if (!normalizedId) return;
+      const currentMap = localDeletedMessageMapRef.current;
+      const currentList = Array.isArray(currentMap[chatUid]) ? currentMap[chatUid] : [];
+      if (currentList.includes(normalizedId)) return;
+      const nextList = [...currentList, normalizedId];
+      const trimmed =
+        nextList.length > MAX_LOCAL_DELETED_MESSAGES_PER_CHAT
+          ? nextList.slice(nextList.length - MAX_LOCAL_DELETED_MESSAGES_PER_CHAT)
+          : nextList;
+      const nextMap: LocalDeletedMessageMap = { ...currentMap, [chatUid]: trimmed };
+      localDeletedMessageMapRef.current = nextMap;
+      localDeletedMessageSetMapRef.current = buildLocalDeletedMessageSetMap(nextMap);
+      persistLocalDeletedMessageMap(nextMap).catch(() => undefined);
+    },
+    [persistLocalDeletedMessageMap]
+  );
+
+  const clearLocallyDeletedMessagesByChatUid = useCallback(
+    (chatUid: number) => {
+      if (!chatUid) return;
+      if (!Object.prototype.hasOwnProperty.call(localDeletedMessageMapRef.current, chatUid)) return;
+      const nextMap = { ...localDeletedMessageMapRef.current };
+      delete nextMap[chatUid];
+      localDeletedMessageMapRef.current = nextMap;
+      localDeletedMessageSetMapRef.current = buildLocalDeletedMessageSetMap(nextMap);
+      persistLocalDeletedMessageMap(nextMap).catch(() => undefined);
+    },
+    [persistLocalDeletedMessageMap]
+  );
 
   const getDeleteCutoff = useCallback((uid: number) => {
     const value = Number(deleteCutoffMapRef.current[uid]);
@@ -3099,6 +3227,7 @@ export default function Home({
           (entry) =>
             entry.id &&
             !idSet?.has(entry.id) &&
+            !isMessageDeletedLocally(uid, entry.id) &&
             (deleteCutoff <= 0 || Number(entry.createdAtMs) > deleteCutoff)
         )
         .sort((a, b) => a.createdAtMs - b.createdAtMs);
@@ -3119,6 +3248,7 @@ export default function Home({
     [
       ensureMessageBucket,
       getDeleteCutoff,
+      isMessageDeletedLocally,
       listAffectsUnread,
       normalizeMessage,
       recalcUnread,
@@ -3512,6 +3642,25 @@ export default function Home({
             unreadPatch[uid] = 0;
             return;
           }
+          if (isMessageDeletedLocally(uid, normalized.id)) {
+            const bucket = messagesByUidRef.current[uid] || [];
+            const fallbackLatest = bucket[bucket.length - 1];
+            if (fallbackLatest) {
+              latestPatch[uid] = {
+                text: fallbackLatest.content || formatMessage(fallbackLatest.raw || fallbackLatest) || '暂无消息',
+                time: formatTime(fallbackLatest.createdAt, fallbackLatest.createdAtMs),
+                ts: Number(fallbackLatest.createdAtMs) || Date.now(),
+              };
+              unreadPatch[uid] = bucket.filter(
+                (item) =>
+                  Number(item.senderUid) !== Number(selfUid) &&
+                  Number(item.createdAtMs) > getReadAt(uid)
+              ).length;
+            } else {
+              unreadPatch[uid] = 0;
+            }
+            return;
+          }
           unreadPatch[uid] = nextUnread;
           latestPatch[uid] = {
             text: normalized.content || formatMessage(normalized.raw || normalized) || '暂无消息',
@@ -3534,7 +3683,10 @@ export default function Home({
     formatMessage,
     formatTime,
     getDeleteCutoff,
+    getReadAt,
+    isMessageDeletedLocally,
     normalizeMessage,
+    selfUid,
     unhideChat,
     handleAuthFailure,
   ]);
@@ -6779,13 +6931,14 @@ export default function Home({
         });
       }
       recalcUnread(chatUid, nextBucket);
+      rememberMessageDeletedLocally(chatUid, normalizedId);
       setFocusedMessageId((prev) => (prev === normalizedId ? null : prev));
       if (playingVoiceMessageIdRef.current === normalizedId) {
         stopPlayingVoice().catch(() => undefined);
       }
       return true;
     },
-    [recalcUnread, stopPlayingVoice, updateLatest]
+    [recalcUnread, rememberMessageDeletedLocally, stopPlayingVoice, updateLatest]
   );
 
   const deleteMessagesLocally = useCallback(
@@ -6864,7 +7017,7 @@ export default function Home({
         }
       }
       const sourceText = messageMenuSourceText(message);
-      const content = sourceText ? `【转发】${sourceText}` : '【转发消息】';
+      const content = sourceText || '[消息]';
       return {
         type: 'text',
         localData: { content },
@@ -7220,6 +7373,7 @@ export default function Home({
       const deletedAt = Date.now();
       setDeleteCutoff(uid, deletedAt);
       setReadAt(uid, deletedAt);
+      clearLocallyDeletedMessagesByChatUid(uid);
       messageIdSetsRef.current.delete(uid);
       messageOffsetMapRef.current.delete(uid);
       setChatRenderLimitMap((prev) => {
@@ -7250,7 +7404,7 @@ export default function Home({
         setActiveChatUid(null);
       }
     },
-    [persistHiddenMap, setDeleteCutoff, setReadAt]
+    [clearLocallyDeletedMessagesByChatUid, persistHiddenMap, setDeleteCutoff, setReadAt]
   );
 
   const closeDeleteChatPrompt = useCallback(() => {

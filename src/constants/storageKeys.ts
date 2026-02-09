@@ -20,6 +20,7 @@ export const STORAGE_KEYS = {
   customStickersPrefix: 'xinchat.customStickers.',
   favoriteMessagesPrefix: 'xinchat.favoriteMessages.',
   messageRemindersPrefix: 'xinchat.messageReminders.',
+  localDeletedMessageIdsPrefix: 'xinchat.localDeletedMessageIds.',
   groupRemarks: 'xinchat.groupRemarks',
   pendingChatSettingsAction: 'xinchat.pendingChatSettingsAction',
 } as const;
