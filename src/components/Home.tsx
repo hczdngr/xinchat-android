@@ -1954,14 +1954,11 @@ export default function Home({ profile }: { profile: Profile }) {
     }
     messageOffsetMapRef.current.set(activeChatUid, bucket);
   }, [activeChatUid, activeChatVisibleMessages]);
-  const isPrivateChat = useMemo(
-    () => Boolean(activeChatUid && activeChatTarget.targetType === 'private'),
-    [activeChatTarget.targetType, activeChatUid]
-  );
+  const canUseEmojiPanel = useMemo(() => Boolean(activeChatUid), [activeChatUid]);
   useEffect(() => {
-    if (isPrivateChat) return;
+    if (canUseEmojiPanel) return;
     setEmojiPanelVisible(false);
-  }, [isPrivateChat]);
+  }, [canUseEmojiPanel]);
   useEffect(() => {
     recentEmojisRef.current = recentEmojis;
   }, [recentEmojis]);
@@ -6029,15 +6026,15 @@ export default function Home({ profile }: { profile: Profile }) {
                 <ToolCameraIcon />
               </Pressable>
               <Pressable
-                style={[styles.chatToolBtn, isPrivateChat && emojiPanelVisible && styles.chatToolBtnActive]}
+                style={[styles.chatToolBtn, canUseEmojiPanel && emojiPanelVisible && styles.chatToolBtnActive]}
                 onPress={() => {
-                  if (!isPrivateChat) return;
+                  if (!canUseEmojiPanel) return;
                   dismissChatKeyboard();
                   closeVoicePanel().catch(() => undefined);
                   setEmojiPanelVisible((prev) => !prev);
                 }}
               >
-                <ToolEmojiIcon active={isPrivateChat && emojiPanelVisible} />
+                <ToolEmojiIcon active={canUseEmojiPanel && emojiPanelVisible} />
               </Pressable>
               <Pressable
                 style={styles.chatToolBtn}
@@ -6050,7 +6047,7 @@ export default function Home({ profile }: { profile: Profile }) {
                 <ToolPlusIcon />
               </Pressable>
             </View>
-            {isPrivateChat && emojiPanelVisible ? (
+            {canUseEmojiPanel && emojiPanelVisible ? (
               <View style={styles.emojiPanel}>
                 <View style={styles.emojiPanelContent}>
                   {emojiActiveCategory === 'custom' ? (
