@@ -23,7 +23,7 @@ import {
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useFocusEffect, useNavigation, useRoute } from '@react-navigation/native';
 import type { HomeRoute, RootNavigation } from '../navigation/types';
-import Svg, { Line, Path } from 'react-native-svg';
+import Svg, { Circle, Line, Path, Polyline, Rect } from 'react-native-svg';
 import { API_BASE, normalizeImageUrl } from '../config';
 import {
   CHAT_BACKGROUND_COLORS,
@@ -167,6 +167,57 @@ type CustomSticker = {
   createdAt?: string;
   updatedAt?: string;
 };
+type BubbleAnchorRect = {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+};
+type MessageBubbleMenuActionKey =
+  | 'copy'
+  | 'forward'
+  | 'favorite'
+  | 'quote'
+  | 'multi'
+  | 'remind'
+  | 'translate'
+  | 'delete';
+type MessageBubbleMenuItem = {
+  key: MessageBubbleMenuActionKey;
+  label: string;
+  danger?: boolean;
+};
+type FavoriteMessageEntry = {
+  key: string;
+  chatUid: number;
+  messageId: string;
+  targetUid: number;
+  targetType: ChatTargetType;
+  senderUid: number;
+  messageType: string;
+  content: string;
+  imageUrl?: string;
+  voiceUrl?: string;
+  voiceDurationSec?: number;
+  createdAt?: string;
+  createdAtMs: number;
+  favoritedAtMs: number;
+};
+type MessageReminderEntry = {
+  key: string;
+  chatUid: number;
+  messageId: string;
+  targetType: ChatTargetType;
+  title: string;
+  body: string;
+  remindAtMs: number;
+  createdAtMs: number;
+};
+type PreparedForwardMessage = {
+  type: 'text' | 'image' | 'voice';
+  localData: Record<string, any>;
+  payload: Record<string, any>;
+};
 
 const CHAT_HISTORY_PAGE_SIZE = 50;
 const CHAT_RENDER_CHUNK_SIZE = 50;
@@ -214,6 +265,25 @@ const MAX_STICKER_BATCH_PICK = 9;
 const MAX_CHAT_IMAGE_PICK = 9;
 const OUTGOING_MESSAGE_ENTER_MS = 500;
 const OUTGOING_MESSAGE_ENTER_WINDOW_MS = 3000;
+const BUBBLE_MENU_MARGIN = 10;
+const BUBBLE_MENU_HEIGHT = 108;
+const BUBBLE_MENU_ARROW_SIZE = 7;
+const MAX_FAVORITE_MESSAGES = 800;
+const REMINDER_DELAY_OPTIONS = [
+  { label: '5分钟', delayMs: 5 * 60 * 1000 },
+  { label: '30分钟', delayMs: 30 * 60 * 1000 },
+  { label: '1小时', delayMs: 60 * 60 * 1000 },
+] as const;
+const BUBBLE_MENU_ITEMS: ReadonlyArray<MessageBubbleMenuItem> = [
+  { key: 'copy', label: '复制' },
+  { key: 'forward', label: '转发' },
+  { key: 'favorite', label: '收藏' },
+  { key: 'quote', label: '引用' },
+  { key: 'multi', label: '多选' },
+  { key: 'remind', label: '提醒' },
+  { key: 'translate', label: '翻译' },
+  { key: 'delete', label: '删除', danger: true },
+] as const;
 const dedupeEmojiList = (list: string[]) =>
   Array.from(new Set(list.map((item) => String(item || '').trim()).filter(Boolean)));
 const DEFAULT_RECENT_EMOJIS = ['🥹', '😭', '😱', '🥺', '😂', '😍', '👍', '🤔', '😎', '🙏', '🥰', '🤗', '😆', '🤭'];
@@ -761,6 +831,84 @@ const sanitizeCustomStickers = (list: any): CustomSticker[] => {
   return next;
 };
 
+const buildMessageActionKey = (chatUid: number, messageId: string) =>
+  `${Math.max(0, Number(chatUid) || 0)}:${String(messageId || '').trim()}`;
+
+const sanitizeFavoriteMessages = (list: any): FavoriteMessageEntry[] => {
+  if (!Array.isArray(list)) return [];
+  const seen = new Set<string>();
+  const next: FavoriteMessageEntry[] = [];
+  for (const item of list) {
+    const chatUid = Number(item?.chatUid);
+    const messageId = String(item?.messageId || '').trim();
+    const key = buildMessageActionKey(chatUid, messageId);
+    if (!chatUid || !messageId || seen.has(key)) continue;
+    const createdAtMs = resolveMessageCreatedAtMs(item);
+    const favoritedAtMsRaw = Number(item?.favoritedAtMs);
+    const favoritedAtMs =
+      Number.isFinite(favoritedAtMsRaw) && favoritedAtMsRaw > 0 ? favoritedAtMsRaw : Date.now();
+    const targetType: ChatTargetType = item?.targetType === 'group' ? 'group' : 'private';
+    const targetUidRaw = Number(item?.targetUid);
+    const senderUidRaw = Number(item?.senderUid);
+    const voiceDurationRaw = Number(item?.voiceDurationSec);
+    seen.add(key);
+    next.push({
+      key,
+      chatUid,
+      messageId,
+      targetUid:
+        Number.isInteger(targetUidRaw) && targetUidRaw > 0
+          ? targetUidRaw
+          : decodeChatUid(chatUid).targetUid,
+      targetType,
+      senderUid: Number.isInteger(senderUidRaw) ? senderUidRaw : 0,
+      messageType: String(item?.messageType || item?.type || 'text'),
+      content: String(item?.content || '').trim(),
+      imageUrl: String(item?.imageUrl || '').trim(),
+      voiceUrl: String(item?.voiceUrl || '').trim(),
+      voiceDurationSec:
+        Number.isFinite(voiceDurationRaw) && voiceDurationRaw > 0
+          ? Math.max(1, Math.round(voiceDurationRaw))
+          : 0,
+      createdAt: String(item?.createdAt || ''),
+      createdAtMs: createdAtMs > 0 ? createdAtMs : Date.now(),
+      favoritedAtMs,
+    });
+    if (next.length >= MAX_FAVORITE_MESSAGES) break;
+  }
+  next.sort((a, b) => b.favoritedAtMs - a.favoritedAtMs);
+  return next;
+};
+
+const sanitizeMessageReminders = (list: any): MessageReminderEntry[] => {
+  if (!Array.isArray(list)) return [];
+  const seen = new Set<string>();
+  const now = Date.now();
+  const next: MessageReminderEntry[] = [];
+  for (const item of list) {
+    const chatUid = Number(item?.chatUid);
+    const messageId = String(item?.messageId || '').trim();
+    const key = buildMessageActionKey(chatUid, messageId);
+    const remindAtMs = Number(item?.remindAtMs);
+    if (!chatUid || !messageId || !Number.isFinite(remindAtMs) || remindAtMs <= now || seen.has(key)) {
+      continue;
+    }
+    seen.add(key);
+    next.push({
+      key,
+      chatUid,
+      messageId,
+      targetType: item?.targetType === 'group' ? 'group' : 'private',
+      title: String(item?.title || '消息提醒').trim() || '消息提醒',
+      body: String(item?.body || '').trim(),
+      remindAtMs,
+      createdAtMs: Number(item?.createdAtMs) || now,
+    });
+  }
+  next.sort((a, b) => a.remindAtMs - b.remindAtMs);
+  return next;
+};
+
 const sanitizeCachedMessages = (input: any): BucketMap => {
   if (!input || typeof input !== 'object') return {};
   const next: BucketMap = {};
@@ -1156,6 +1304,10 @@ type ChatMessageRowProps = {
   openImagePreview: (url?: string) => void;
   onPressVoiceMessage: (message: Message) => void;
   onPressFailedMessage: (message: Message) => void;
+  onLongPressMessage: (message: Message, rect: BubbleAnchorRect) => void;
+  multiSelectMode: boolean;
+  multiSelected: boolean;
+  onToggleMultiSelectMessage: (message: Message) => void;
 };
 
 const ChatMessageRow = React.memo(
@@ -1177,6 +1329,10 @@ const ChatMessageRow = React.memo(
     openImagePreview,
     onPressVoiceMessage,
     onPressFailedMessage,
+    onLongPressMessage,
+    multiSelectMode,
+    multiSelected,
+    onToggleMultiSelectMessage,
   }: ChatMessageRowProps) {
     const isSelf = Number(message.senderUid) === Number(selfUid);
     const itemId = String(message.id);
@@ -1204,6 +1360,102 @@ const ChatMessageRow = React.memo(
     const avatarLabel = isSelf
       ? getAvatarText(profileDisplayName || '我')
       : getAvatarText(senderName || '群友');
+    const bubbleRef = useRef<View | null>(null);
+    const skipPressRef = useRef(false);
+    const skipPressTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+    const armSkipPressOnce = useCallback(() => {
+      skipPressRef.current = true;
+      if (skipPressTimerRef.current) {
+        clearTimeout(skipPressTimerRef.current);
+      }
+      skipPressTimerRef.current = setTimeout(() => {
+        skipPressRef.current = false;
+        skipPressTimerRef.current = null;
+      }, 260);
+    }, []);
+
+    const consumeSkipPress = useCallback(() => {
+      if (!skipPressRef.current) return false;
+      skipPressRef.current = false;
+      if (skipPressTimerRef.current) {
+        clearTimeout(skipPressTimerRef.current);
+        skipPressTimerRef.current = null;
+      }
+      return true;
+    }, []);
+
+    useEffect(
+      () => () => {
+        if (skipPressTimerRef.current) {
+          clearTimeout(skipPressTimerRef.current);
+          skipPressTimerRef.current = null;
+        }
+      },
+      []
+    );
+
+    const triggerLongPressMenu = useCallback(
+      (event?: any) => {
+        if (multiSelectMode) {
+          onToggleMultiSelectMessage(message);
+          return;
+        }
+        armSkipPressOnce();
+        const pageX = Number(event?.nativeEvent?.pageX || 0);
+        const pageY = Number(event?.nativeEvent?.pageY || 0);
+        const fallbackRect: BubbleAnchorRect = {
+          x: Math.max(0, pageX - 20),
+          y: Math.max(0, pageY - 20),
+          width: 40,
+          height: 40,
+        };
+        const bubbleNode = bubbleRef.current as
+          | (View & {
+              measureInWindow?: (
+                callback: (x: number, y: number, width: number, height: number) => void
+              ) => void;
+            })
+          | null;
+        if (!bubbleNode || typeof bubbleNode.measureInWindow !== 'function') {
+          onLongPressMessage(message, fallbackRect);
+          return;
+        }
+        bubbleNode.measureInWindow((x, y, width, height) => {
+          const safeRect: BubbleAnchorRect = {
+            x: Number.isFinite(x) ? x : fallbackRect.x,
+            y: Number.isFinite(y) ? y : fallbackRect.y,
+            width: Number.isFinite(width) && width > 0 ? width : fallbackRect.width,
+            height: Number.isFinite(height) && height > 0 ? height : fallbackRect.height,
+          };
+          onLongPressMessage(message, safeRect);
+        });
+      },
+      [armSkipPressOnce, message, multiSelectMode, onLongPressMessage, onToggleMultiSelectMessage]
+    );
+
+    const onPressImageMessage = useCallback(() => {
+      if (multiSelectMode) {
+        onToggleMultiSelectMessage(message);
+        return;
+      }
+      if (consumeSkipPress()) return;
+      openImagePreview(message.imageUrl);
+    }, [consumeSkipPress, message, multiSelectMode, onToggleMultiSelectMessage, openImagePreview]);
+
+    const onPressVoiceMessageInner = useCallback(() => {
+      if (multiSelectMode) {
+        onToggleMultiSelectMessage(message);
+        return;
+      }
+      if (consumeSkipPress()) return;
+      onPressVoiceMessage(message);
+    }, [consumeSkipPress, message, multiSelectMode, onPressVoiceMessage, onToggleMultiSelectMessage]);
+
+    const onPressBubbleInMultiSelect = useCallback(() => {
+      if (!multiSelectMode) return;
+      onToggleMultiSelectMessage(message);
+    }, [message, multiSelectMode, onToggleMultiSelectMessage]);
 
     return (
       <>
@@ -1228,42 +1480,72 @@ const ChatMessageRow = React.memo(
           </View>
           <View style={[styles.bubbleWrap, isSelf && styles.selfBubbleWrap]}>
             {isGroupChat && !isSelf ? <Text style={styles.groupSenderName}>{senderName}</Text> : null}
-            <View
-              style={[
-                styles.bubble,
-                isSelf && styles.selfBubble,
-                isFocused && !isSelf && styles.bubbleFocused,
-                isFocused && isSelf && styles.selfBubbleFocused,
-                message.type === 'image' && styles.imageBubble,
-              ]}
-            >
-              {message.type === 'image' && message.imageUrl ? (
-                <Pressable
-                  style={styles.chatImagePressable}
-                  onPress={() => openImagePreview(message.imageUrl)}
-                >
-                  <Image source={{ uri: message.imageUrl }} style={styles.chatImageMessage} />
-                </Pressable>
-              ) : message.type === 'voice' ? (
+            <View style={[styles.bubbleSelectRow, isSelf && styles.selfBubbleSelectRow]}>
+              {multiSelectMode ? (
                 <Pressable
                   style={[
-                    styles.voiceMessageBubble,
-                    isPlayingVoice && styles.voiceMessageBubblePlaying,
+                    styles.multiSelectBadge,
+                    isSelf && styles.multiSelectBadgeSelf,
+                    multiSelected && styles.multiSelectBadgeSelected,
                   ]}
-                  onPress={() => onPressVoiceMessage(message)}
+                  onPress={onPressBubbleInMultiSelect}
+                  hitSlop={6}
                 >
-                  <View style={styles.voiceWaveTrack}>
-                    <VoiceWaveIcon active={isPlayingVoice} isSelf={isSelf} />
-                  </View>
-                  <Text style={[styles.voiceMessageDuration, isSelf && styles.selfText]}>
-                    {message.voiceDurationSec
-                      ? `${Math.max(1, Math.round(message.voiceDurationSec))}"`
-                      : '[语音]'}
-                  </Text>
+                  {multiSelected ? <MultiSelectCheckIcon /> : null}
                 </Pressable>
-              ) : (
-                <Text style={[styles.messageText, isSelf && styles.selfText]}>{message.content}</Text>
-              )}
+              ) : null}
+              <Pressable
+                style={({ pressed }) => [styles.bubblePressable, pressed && styles.bubblePressing]}
+                onPress={multiSelectMode ? onPressBubbleInMultiSelect : undefined}
+                onLongPress={triggerLongPressMenu}
+                delayLongPress={500}
+              >
+                <View
+                  ref={bubbleRef}
+                  collapsable={false}
+                  style={[
+                    styles.bubble,
+                    isSelf && styles.selfBubble,
+                    isFocused && !isSelf && styles.bubbleFocused,
+                    isFocused && isSelf && styles.selfBubbleFocused,
+                    message.type === 'image' && styles.imageBubble,
+                    multiSelectMode && multiSelected && styles.bubbleMultiSelected,
+                    multiSelectMode && isSelf && multiSelected && styles.selfBubbleMultiSelected,
+                  ]}
+                >
+                  {message.type === 'image' && message.imageUrl ? (
+                    <Pressable
+                      style={styles.chatImagePressable}
+                      onPress={onPressImageMessage}
+                      onLongPress={triggerLongPressMenu}
+                      delayLongPress={500}
+                    >
+                      <Image source={{ uri: message.imageUrl }} style={styles.chatImageMessage} />
+                    </Pressable>
+                  ) : message.type === 'voice' ? (
+                    <Pressable
+                      style={[
+                        styles.voiceMessageBubble,
+                        isPlayingVoice && styles.voiceMessageBubblePlaying,
+                      ]}
+                      onPress={onPressVoiceMessageInner}
+                      onLongPress={triggerLongPressMenu}
+                      delayLongPress={500}
+                    >
+                      <View style={styles.voiceWaveTrack}>
+                        <VoiceWaveIcon active={isPlayingVoice} isSelf={isSelf} />
+                      </View>
+                      <Text style={[styles.voiceMessageDuration, isSelf && styles.selfText]}>
+                        {message.voiceDurationSec
+                          ? `${Math.max(1, Math.round(message.voiceDurationSec))}"`
+                          : '[语音]'}
+                      </Text>
+                    </Pressable>
+                  ) : (
+                    <Text style={[styles.messageText, isSelf && styles.selfText]}>{message.content}</Text>
+                  )}
+                </View>
+              </Pressable>
             </View>
           </View>
           {isSelf && isFailed ? (
@@ -1296,7 +1578,11 @@ const ChatMessageRow = React.memo(
     prev.recordMessageOffset === next.recordMessageOffset &&
     prev.openImagePreview === next.openImagePreview &&
     prev.onPressVoiceMessage === next.onPressVoiceMessage &&
-    prev.onPressFailedMessage === next.onPressFailedMessage
+    prev.onPressFailedMessage === next.onPressFailedMessage &&
+    prev.onLongPressMessage === next.onLongPressMessage &&
+    prev.multiSelectMode === next.multiSelectMode &&
+    prev.multiSelected === next.multiSelected &&
+    prev.onToggleMultiSelectMessage === next.onToggleMultiSelectMessage
 );
 
 export default function Home({
@@ -1339,6 +1625,25 @@ export default function Home({
   const [chatMenuVisible, setChatMenuVisible] = useState(false);
   const [chatMenuTargetUid, setChatMenuTargetUid] = useState<number | null>(null);
   const [chatMenuPosition, setChatMenuPosition] = useState({ x: 0, y: 0 });
+  const [messageMenuVisible, setMessageMenuVisible] = useState(false);
+  const [messageMenuTarget, setMessageMenuTarget] = useState<{
+    chatUid: number;
+    messageId: string;
+    message: Message;
+  } | null>(null);
+  const [messageMenuPosition, setMessageMenuPosition] = useState({
+    x: 0,
+    y: 0,
+    arrowLeft: 0,
+    placeBelow: false,
+  });
+  const [forwardPickerVisible, setForwardPickerVisible] = useState(false);
+  const [forwardDraftMessages, setForwardDraftMessages] = useState<Message[]>([]);
+  const [forwardSubmitting, setForwardSubmitting] = useState(false);
+  const [multiSelectMode, setMultiSelectMode] = useState(false);
+  const [multiSelectedMessageIds, setMultiSelectedMessageIds] = useState<string[]>([]);
+  const [favoriteMessages, setFavoriteMessages] = useState<FavoriteMessageEntry[]>([]);
+  const [messageReminders, setMessageReminders] = useState<MessageReminderEntry[]>([]);
   const [quickMenuVisible, setQuickMenuVisible] = useState(false);
   const [quickMenuMounted, setQuickMenuMounted] = useState(false);
   const quickMenuAnim = useRef(new Animated.Value(0)).current;
@@ -1537,6 +1842,7 @@ export default function Home({
   const playingVoiceMessageIdRef = useRef('');
   const voicePlaybackSessionRef = useRef(0);
   const voicePlaybackTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const messageReminderTimerMapRef = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map());
   const scrollToBottomTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const focusChatInputTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const locateChatTaskIdRef = useRef(0);
@@ -2237,6 +2543,14 @@ export default function Home({
   );
   const customStickerStorageKey = useMemo(
     () => `${STORAGE_KEYS.customStickersPrefix}${Number(selfUid) || 0}`,
+    [selfUid]
+  );
+  const favoriteMessagesStorageKey = useMemo(
+    () => `${STORAGE_KEYS.favoriteMessagesPrefix}${Number(selfUid) || 0}`,
+    [selfUid]
+  );
+  const messageRemindersStorageKey = useMemo(
+    () => `${STORAGE_KEYS.messageRemindersPrefix}${Number(selfUid) || 0}`,
     [selfUid]
   );
   const canSend = useMemo(() => draftMessage.trim().length > 0, [draftMessage]);
@@ -6081,6 +6395,797 @@ export default function Home({
     [closeSearchPanel, friends, getDeleteCutoff, groups, locateChatMessage, openChat, openChatFromPayload]
   );
 
+  const messageMenuWidth = useMemo(
+    () => Math.max(220, Math.min(windowWidth - BUBBLE_MENU_MARGIN * 2, 360)),
+    [windowWidth]
+  );
+
+  const messageMenuSourceText = useCallback((message: Message | null) => {
+    if (!message) return '';
+    const raw = String(message.content || '').trim();
+    if (raw) return raw;
+    if (message.type === 'image') return '[图片]';
+    if (message.type === 'voice') {
+      return message.voiceDurationSec
+        ? `[语音 ${Math.max(1, Math.round(Number(message.voiceDurationSec) || 0))}s]`
+        : '[语音]';
+    }
+    return '[消息]';
+  }, []);
+
+  const favoriteMessageKeySet = useMemo(
+    () => new Set(favoriteMessages.map((entry) => entry.key)),
+    [favoriteMessages]
+  );
+
+  const multiSelectedMessageSet = useMemo(
+    () => new Set(multiSelectedMessageIds.map((id) => String(id || '').trim()).filter(Boolean)),
+    [multiSelectedMessageIds]
+  );
+
+  const multiSelectedMessages = useMemo(() => {
+    if (!multiSelectMode || multiSelectedMessageSet.size === 0) return [] as Message[];
+    return activeChatMessages.filter((message) => multiSelectedMessageSet.has(String(message.id || '').trim()));
+  }, [activeChatMessages, multiSelectMode, multiSelectedMessageSet]);
+
+  const forwardTargetItems = useMemo(() => {
+    const list = [...messageItems];
+    if (
+      activeChatUid &&
+      !list.some((item) => Number(item.uid) === Number(activeChatUid))
+    ) {
+      const decoded = decodeChatUid(activeChatUid);
+      if (decoded.targetUid > 0) {
+        const targetType = decoded.targetType;
+        const fallbackFriend =
+          targetType === 'private'
+            ? friends.find((friend) => Number(friend.uid) === Number(decoded.targetUid))
+            : undefined;
+        const fallbackGroup =
+          targetType === 'group'
+            ? groups.find((group) => Number(group.id) === Number(decoded.targetUid))
+            : undefined;
+        list.unshift({
+          uid: activeChatUid,
+          targetUid: decoded.targetUid,
+          targetType,
+          title:
+            targetType === 'group'
+              ? getGroupDisplayName(fallbackGroup)
+              : fallbackFriend?.nickname || fallbackFriend?.username || activeChatTitle,
+          preview: latestMap[activeChatUid]?.text || '暂无消息',
+          latest: latestMap[activeChatUid],
+          pinned: Boolean(pinnedMap[activeChatUid]),
+          unread: unreadMap[activeChatUid] || 0,
+          friend: fallbackFriend,
+          group: fallbackGroup,
+        });
+      }
+    }
+    return list;
+  }, [activeChatTitle, activeChatUid, friends, groups, latestMap, messageItems, pinnedMap, unreadMap]);
+
+  const persistFavoriteMessages = useCallback(
+    async (nextItems: FavoriteMessageEntry[]) => {
+      if (!selfUid) return;
+      await storage.setJson(favoriteMessagesStorageKey, nextItems);
+    },
+    [favoriteMessagesStorageKey, selfUid]
+  );
+
+  const persistMessageReminders = useCallback(
+    async (nextItems: MessageReminderEntry[]) => {
+      if (!selfUid) return;
+      await storage.setJson(messageRemindersStorageKey, nextItems);
+    },
+    [messageRemindersStorageKey, selfUid]
+  );
+
+  const clearReminderTimer = useCallback((key: string) => {
+    const timer = messageReminderTimerMapRef.current.get(key);
+    if (!timer) return;
+    clearTimeout(timer);
+    messageReminderTimerMapRef.current.delete(key);
+  }, []);
+
+  const scheduleReminderTimer = useCallback(
+    (entry: MessageReminderEntry) => {
+      if (!entry?.key) return;
+      clearReminderTimer(entry.key);
+      const delayMs = Number(entry.remindAtMs) - Date.now();
+      if (!(Number.isFinite(delayMs) && delayMs > 0)) return;
+      const timer = setTimeout(() => {
+        messageReminderTimerMapRef.current.delete(entry.key);
+        setMessageReminders((prev) => {
+          const next = prev.filter((item) => item.key !== entry.key);
+          persistMessageReminders(next).catch(() => undefined);
+          return next;
+        });
+        notifyIncomingSystemMessage({
+          chatUid: entry.chatUid,
+          title: entry.title || '消息提醒',
+          body: entry.body || '你有一条待处理消息',
+          targetType: entry.targetType,
+        }).catch(() => undefined);
+        Alert.alert(entry.title || '消息提醒', entry.body || '你设置的消息提醒已到时间。');
+      }, delayMs);
+      messageReminderTimerMapRef.current.set(entry.key, timer);
+    },
+    [clearReminderTimer, persistMessageReminders]
+  );
+
+  useEffect(() => {
+    if (!selfUid) {
+      setFavoriteMessages([]);
+      return;
+    }
+    storage
+      .getJson<FavoriteMessageEntry[]>(favoriteMessagesStorageKey)
+      .then((stored) => {
+        setFavoriteMessages(sanitizeFavoriteMessages(stored));
+      })
+      .catch(() => undefined);
+  }, [favoriteMessagesStorageKey, selfUid]);
+
+  useEffect(() => {
+    const timerMap = messageReminderTimerMapRef.current;
+    timerMap.forEach((timer) => clearTimeout(timer));
+    timerMap.clear();
+    if (!selfUid) {
+      setMessageReminders([]);
+      return () => undefined;
+    }
+    let cancelled = false;
+    storage
+      .getJson<MessageReminderEntry[]>(messageRemindersStorageKey)
+      .then((stored) => {
+        if (cancelled) return;
+        const sanitized = sanitizeMessageReminders(stored);
+        setMessageReminders(sanitized);
+        sanitized.forEach((item) => scheduleReminderTimer(item));
+        if (Array.isArray(stored) && sanitized.length !== stored.length) {
+          persistMessageReminders(sanitized).catch(() => undefined);
+        }
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+      timerMap.forEach((timer) => clearTimeout(timer));
+      timerMap.clear();
+    };
+  }, [messageRemindersStorageKey, persistMessageReminders, scheduleReminderTimer, selfUid]);
+
+  const closeMessageMenu = useCallback(() => {
+    setMessageMenuVisible(false);
+    setMessageMenuTarget(null);
+  }, []);
+
+  const closeForwardPicker = useCallback(() => {
+    if (forwardSubmitting) return;
+    setForwardPickerVisible(false);
+    setForwardDraftMessages([]);
+  }, [forwardSubmitting]);
+
+  const closeMultiSelectMode = useCallback(() => {
+    setMultiSelectMode(false);
+    setMultiSelectedMessageIds([]);
+  }, []);
+
+  useEffect(() => {
+    closeMultiSelectMode();
+  }, [activeChatUid, closeMultiSelectMode]);
+
+  const openMultiSelectMode = useCallback((message: Message) => {
+    const messageId = String(message?.id || '').trim();
+    if (!messageId) return;
+    setMultiSelectMode(true);
+    setMultiSelectedMessageIds([messageId]);
+  }, []);
+
+  const toggleMultiSelectMessage = useCallback((message: Message) => {
+    const messageId = String(message?.id || '').trim();
+    if (!messageId) return;
+    setMultiSelectMode(true);
+    setMultiSelectedMessageIds((prev) => {
+      const exists = prev.includes(messageId);
+      if (exists) {
+        return prev.filter((item) => item !== messageId);
+      }
+      return [...prev, messageId];
+    });
+  }, []);
+
+  const createFavoriteMessageEntry = useCallback(
+    (chatUid: number, message: Message): FavoriteMessageEntry | null => {
+      const messageId = String(message?.id || '').trim();
+      if (!chatUid || !messageId) return null;
+      const key = buildMessageActionKey(chatUid, messageId);
+      const decoded = decodeChatUid(chatUid);
+      const rawData =
+        message?.raw?.data && typeof message.raw.data === 'object' ? message.raw.data : {};
+      return {
+        key,
+        chatUid,
+        messageId,
+        targetUid: decoded.targetUid,
+        targetType: decoded.targetType,
+        senderUid: Number(message.senderUid) || 0,
+        messageType: String(message.type || 'text'),
+        content: messageMenuSourceText(message),
+        imageUrl: String(rawData?.url || message.imageUrl || '').trim(),
+        voiceUrl: String(rawData?.url || message.voiceUrl || '').trim(),
+        voiceDurationSec: Math.max(0, Math.round(Number(message.voiceDurationSec) || 0)),
+        createdAt: String(message.createdAt || ''),
+        createdAtMs: Number(message.createdAtMs) || Date.now(),
+        favoritedAtMs: Date.now(),
+      };
+    },
+    [messageMenuSourceText]
+  );
+
+  const addMessagesToFavorites = useCallback(
+    (chatUid: number, messages: Message[]) => {
+      if (!selfUid || !chatUid || !Array.isArray(messages) || messages.length === 0) return 0;
+      const entries = messages
+        .map((message) => createFavoriteMessageEntry(chatUid, message))
+        .filter(Boolean) as FavoriteMessageEntry[];
+      if (!entries.length) return 0;
+      const entryMap = new Map(entries.map((entry) => [entry.key, entry]));
+      const addedCount = Array.from(entryMap.keys()).filter((key) => !favoriteMessageKeySet.has(key)).length;
+      setFavoriteMessages((prev) => {
+        const prevMap = new Map(prev.map((entry) => [entry.key, entry]));
+        entryMap.forEach((entry, key) => {
+          prevMap.set(key, entry);
+        });
+        const next = Array.from(prevMap.values())
+          .sort((a, b) => b.favoritedAtMs - a.favoritedAtMs)
+          .slice(0, MAX_FAVORITE_MESSAGES);
+        persistFavoriteMessages(next).catch(() => undefined);
+        return next;
+      });
+      return addedCount;
+    },
+    [createFavoriteMessageEntry, favoriteMessageKeySet, persistFavoriteMessages, selfUid]
+  );
+
+  const removeFavoriteMessageByKey = useCallback(
+    (key: string) => {
+      if (!key) return;
+      setFavoriteMessages((prev) => {
+        const next = prev.filter((item) => item.key !== key);
+        persistFavoriteMessages(next).catch(() => undefined);
+        return next;
+      });
+    },
+    [persistFavoriteMessages]
+  );
+
+  const toggleFavoriteMessage = useCallback(
+    (chatUid: number, message: Message) => {
+      if (!selfUid) return false;
+      const messageId = String(message?.id || '').trim();
+      if (!chatUid || !messageId) return false;
+      const key = buildMessageActionKey(chatUid, messageId);
+      if (favoriteMessageKeySet.has(key)) {
+        removeFavoriteMessageByKey(key);
+        return false;
+      }
+      addMessagesToFavorites(chatUid, [message]);
+      return true;
+    },
+    [addMessagesToFavorites, favoriteMessageKeySet, removeFavoriteMessageByKey, selfUid]
+  );
+
+  const setReminderForMessage = useCallback(
+    (chatUid: number, message: Message, delayMs: number, label: string) => {
+      const messageId = String(message?.id || '').trim();
+      if (!chatUid || !messageId || !Number.isFinite(delayMs) || delayMs <= 0) return;
+      const remindAtMs = Date.now() + delayMs;
+      const decoded = decodeChatUid(chatUid);
+      const entry: MessageReminderEntry = {
+        key: buildMessageActionKey(chatUid, messageId),
+        chatUid,
+        messageId,
+        targetType: decoded.targetType,
+        title: '消息提醒',
+        body: messageMenuSourceText(message).slice(0, 120) || '[消息]',
+        remindAtMs,
+        createdAtMs: Date.now(),
+      };
+      scheduleReminderTimer(entry);
+      setMessageReminders((prev) => {
+        const next = [entry, ...prev.filter((item) => item.key !== entry.key)].sort(
+          (a, b) => a.remindAtMs - b.remindAtMs
+        );
+        persistMessageReminders(next).catch(() => undefined);
+        return next;
+      });
+      Alert.alert('提醒已设置', `${label}后提醒你处理这条消息。`);
+    },
+    [messageMenuSourceText, persistMessageReminders, scheduleReminderTimer]
+  );
+
+  const openReminderPicker = useCallback(
+    (chatUid: number, message: Message) => {
+      const messageId = String(message?.id || '').trim();
+      const reminderKey = buildMessageActionKey(chatUid, messageId);
+      const existing = messageReminders.find((item) => item.key === reminderKey);
+      const description = existing
+        ? `已设置提醒：${formatTime('', existing.remindAtMs)}，可重新设置覆盖。`
+        : '请选择提醒时间';
+      Alert.alert(
+        '设置提醒',
+        description,
+        [
+          ...REMINDER_DELAY_OPTIONS.map((option) => ({
+            text: option.label,
+            onPress: () => setReminderForMessage(chatUid, message, option.delayMs, option.label),
+          })),
+          { text: '取消', style: 'cancel' as const },
+        ]
+      );
+    },
+    [formatTime, messageReminders, setReminderForMessage]
+  );
+
+  const deleteMessageLocally = useCallback(
+    (chatUid: number, messageId: string) => {
+      if (!chatUid || !messageId) return false;
+      const normalizedId = String(messageId).trim();
+      if (!normalizedId) return false;
+
+      let removed = false;
+      let nextBucket: Message[] = [];
+      setMessagesByUid((prev) => {
+        const bucket = Array.isArray(prev[chatUid]) ? prev[chatUid] : [];
+        const filtered = bucket.filter((entry) => String(entry?.id || '') !== normalizedId);
+        if (filtered.length === bucket.length) return prev;
+        removed = true;
+        nextBucket = filtered;
+        return { ...prev, [chatUid]: filtered };
+      });
+      if (!removed) return false;
+
+      const nextIdSet = new Set<number | string>();
+      nextBucket.forEach((entry) => {
+        if (typeof entry?.id === 'number' || typeof entry?.id === 'string') {
+          nextIdSet.add(entry.id);
+        }
+      });
+      if (nextIdSet.size > 0) {
+        messageIdSetsRef.current.set(chatUid, nextIdSet);
+      } else {
+        messageIdSetsRef.current.delete(chatUid);
+      }
+
+      const offsetBucket = messageOffsetMapRef.current.get(chatUid);
+      if (offsetBucket) {
+        offsetBucket.delete(normalizedId);
+        if (offsetBucket.size > 0) {
+          messageOffsetMapRef.current.set(chatUid, offsetBucket);
+        } else {
+          messageOffsetMapRef.current.delete(chatUid);
+        }
+      }
+
+      if (nextBucket.length > 0) {
+        updateLatest(chatUid, nextBucket[nextBucket.length - 1]);
+      } else {
+        setLatestMap((prev) => {
+          if (!Object.prototype.hasOwnProperty.call(prev, chatUid)) return prev;
+          const next = { ...prev };
+          delete next[chatUid];
+          return next;
+        });
+      }
+      recalcUnread(chatUid, nextBucket);
+      setFocusedMessageId((prev) => (prev === normalizedId ? null : prev));
+      if (playingVoiceMessageIdRef.current === normalizedId) {
+        stopPlayingVoice().catch(() => undefined);
+      }
+      return true;
+    },
+    [recalcUnread, stopPlayingVoice, updateLatest]
+  );
+
+  const deleteMessagesLocally = useCallback(
+    (chatUid: number, messageIds: string[]) => {
+      if (!chatUid || !Array.isArray(messageIds) || messageIds.length === 0) return 0;
+      let removedCount = 0;
+      messageIds.forEach((messageId) => {
+        if (deleteMessageLocally(chatUid, messageId)) {
+          removedCount += 1;
+        }
+      });
+      return removedCount;
+    },
+    [deleteMessageLocally]
+  );
+
+  const buildForwardMessage = useCallback(
+    (message: Message): PreparedForwardMessage => {
+      const sourceType = String(message?.type || 'text');
+      const rawData =
+        message?.raw?.data && typeof message.raw.data === 'object' ? message.raw.data : {};
+      if (sourceType === 'image') {
+        const imageUrl = String(rawData?.url || message.imageUrl || '').trim();
+        if (imageUrl) {
+          return {
+            type: 'image',
+            localData: {
+              url: imageUrl,
+              hash: typeof rawData?.hash === 'string' ? rawData.hash : undefined,
+              mime: typeof rawData?.mime === 'string' ? rawData.mime : undefined,
+              content: '[图片]',
+            },
+            payload: {
+              type: 'image',
+              url: imageUrl,
+              hash: rawData?.hash,
+              mime: rawData?.mime,
+            },
+          };
+        }
+      }
+      if (sourceType === 'voice') {
+        const voiceUrl = String(rawData?.url || message.voiceUrl || '').trim();
+        if (voiceUrl) {
+          const rawDurationMs = Number(rawData?.durationMs || rawData?.duration || 0);
+          const durationSec = Math.max(0, Math.round(Number(message.voiceDurationSec) || 0));
+          const durationMs = Number.isFinite(rawDurationMs) && rawDurationMs > 0
+            ? rawDurationMs
+            : durationSec > 0
+              ? durationSec * 1000
+              : 0;
+          const content =
+            String(rawData?.content || message.content || '').trim() ||
+            (durationSec > 0 ? `[语音 ${durationSec}s]` : '[语音]');
+          return {
+            type: 'voice',
+            localData: {
+              url: voiceUrl,
+              durationMs,
+              mime: typeof rawData?.mime === 'string' ? rawData.mime : 'audio/mp4',
+              name:
+                typeof rawData?.name === 'string' && rawData.name
+                  ? rawData.name
+                  : `voice-${Date.now()}.m4a`,
+              content,
+            },
+            payload: {
+              type: 'voice',
+              url: voiceUrl,
+              durationMs,
+              mime: rawData?.mime,
+              name: rawData?.name,
+              content,
+            },
+          };
+        }
+      }
+      const sourceText = messageMenuSourceText(message);
+      const content = sourceText ? `【转发】${sourceText}` : '【转发消息】';
+      return {
+        type: 'text',
+        localData: { content },
+        payload: {
+          type: 'text',
+          content,
+        },
+      };
+    },
+    [messageMenuSourceText]
+  );
+
+  const sendPreparedMessageToChat = useCallback(
+    async (chatUid: number, prepared: PreparedForwardMessage) => {
+      if (!selfUid || !chatUid || !prepared) return false;
+      const { targetUid, targetType } = decodeChatUid(chatUid);
+      if (!Number.isInteger(targetUid) || targetUid <= 0) return false;
+
+      const clientMessageId = createClientMessageId();
+      const localMessageId = `local:${clientMessageId}`;
+      const localCreatedAtMs = Date.now();
+      const localCreatedAt = new Date(localCreatedAtMs).toISOString();
+      insertMessages(chatUid, [
+        {
+          id: localMessageId,
+          type: prepared.type,
+          senderUid: selfUid,
+          targetUid,
+          targetType,
+          data: {
+            ...prepared.localData,
+            clientMessageId,
+            clientPending: true,
+            clientFailed: false,
+            clientAnimateIn: true,
+            clientAppearAtMs: localCreatedAtMs,
+          },
+          createdAt: localCreatedAt,
+          createdAtMs: localCreatedAtMs,
+        },
+      ]);
+      if (activeChatUidRef.current === chatUid) {
+        scrollToBottom();
+      }
+      return submitTextMessageWithLocalId({
+        chatUid,
+        localMessageId,
+        clientMessageId,
+        payload: {
+          senderUid: selfUid,
+          targetUid,
+          targetType,
+          ...prepared.payload,
+          clientMessageId,
+        },
+      });
+    },
+    [createClientMessageId, insertMessages, scrollToBottom, selfUid, submitTextMessageWithLocalId]
+  );
+
+  const forwardMessagesToChat = useCallback(
+    async (chatUid: number, messages: Message[]) => {
+      if (!Array.isArray(messages) || messages.length === 0) return 0;
+      let successCount = 0;
+      for (const message of messages) {
+        const prepared = buildForwardMessage(message);
+        const sent = await sendPreparedMessageToChat(chatUid, prepared);
+        if (sent) successCount += 1;
+      }
+      return successCount;
+    },
+    [buildForwardMessage, sendPreparedMessageToChat]
+  );
+
+  const openForwardPicker = useCallback((messages: Message[]) => {
+    if (!Array.isArray(messages) || messages.length === 0) {
+      Alert.alert('无法转发', '没有可转发的消息。');
+      return;
+    }
+    const seen = new Set<string>();
+    const next = messages.filter((message) => {
+      const id = String(message?.id || '').trim();
+      if (!id || seen.has(id)) return false;
+      seen.add(id);
+      return true;
+    });
+    if (next.length === 0) {
+      Alert.alert('无法转发', '没有可转发的消息。');
+      return;
+    }
+    setForwardDraftMessages(next);
+    setForwardPickerVisible(true);
+  }, []);
+
+  const onSelectForwardTarget = useCallback(
+    async (chatUid: number) => {
+      if (forwardSubmitting) return;
+      if (!chatUid || !forwardDraftMessages.length) return;
+      setForwardSubmitting(true);
+      try {
+        const successCount = await forwardMessagesToChat(chatUid, forwardDraftMessages);
+        const totalCount = forwardDraftMessages.length;
+        setForwardPickerVisible(false);
+        setForwardDraftMessages([]);
+        if (successCount > 0) {
+          Alert.alert('转发完成', `成功转发 ${successCount}/${totalCount} 条消息。`);
+        } else {
+          Alert.alert('转发失败', '消息发送失败，请稍后重试。');
+        }
+      } finally {
+        setForwardSubmitting(false);
+      }
+    },
+    [forwardDraftMessages, forwardMessagesToChat, forwardSubmitting]
+  );
+
+  const openMessageTranslate = useCallback(
+    (message: Message) => {
+      const text = messageMenuSourceText(message).trim();
+      if (!text) {
+        Alert.alert('无法翻译', '该消息没有可翻译内容。');
+        return;
+      }
+      const url = `https://translate.google.com/?sl=auto&tl=zh-CN&text=${encodeURIComponent(
+        text.slice(0, 1200)
+      )}&op=translate`;
+      navigation.navigate('InAppBrowser', {
+        title: '翻译',
+        url,
+      });
+    },
+    [messageMenuSourceText, navigation]
+  );
+
+  const openMessageMenu = useCallback(
+    (message: Message, rect: BubbleAnchorRect) => {
+      if (multiSelectMode) return;
+      const activeUid = Number(activeChatUidRef.current);
+      if (!Number.isInteger(activeUid) || activeUid <= 0) return;
+
+      const safeWidth = Number.isFinite(rect.width) && rect.width > 0 ? rect.width : 40;
+      const safeHeight = Number.isFinite(rect.height) && rect.height > 0 ? rect.height : 40;
+      const safeX = Number.isFinite(rect.x) ? rect.x : 0;
+      const safeY = Number.isFinite(rect.y) ? rect.y : 0;
+      const centerX = safeX + safeWidth / 2;
+
+      let x = centerX - messageMenuWidth / 2;
+      x = Math.max(BUBBLE_MENU_MARGIN, Math.min(x, windowWidth - messageMenuWidth - BUBBLE_MENU_MARGIN));
+
+      let y = safeY - BUBBLE_MENU_HEIGHT - 12;
+      const minTop = Math.max(8, insets.top + 4);
+      let placeBelow = false;
+      if (y < minTop) {
+        placeBelow = true;
+        y = safeY + safeHeight + 12;
+        const maxY = windowHeight - BUBBLE_MENU_HEIGHT - Math.max(insets.bottom + 8, 14);
+        y = Math.min(Math.max(minTop, y), maxY);
+      }
+
+      const arrowCenter = Math.max(
+        x + 18,
+        Math.min(centerX, x + messageMenuWidth - 18)
+      );
+      setMessageMenuPosition({
+        x,
+        y,
+        arrowLeft: arrowCenter - x - BUBBLE_MENU_ARROW_SIZE,
+        placeBelow,
+      });
+      setMessageMenuTarget({
+        chatUid: activeUid,
+        messageId: String(message.id || ''),
+        message,
+      });
+      setMessageMenuVisible(true);
+    },
+    [insets.bottom, insets.top, messageMenuWidth, multiSelectMode, windowHeight, windowWidth]
+  );
+
+  const onPressMessageMenuAction = useCallback(
+    async (action: MessageBubbleMenuActionKey) => {
+      const target = messageMenuTarget;
+      if (!target) return;
+      const sourceText = messageMenuSourceText(target.message);
+
+      if (action === 'copy') {
+        closeMessageMenu();
+        if (!sourceText) {
+          Alert.alert('无法复制', '这条消息没有可复制文本。');
+          return;
+        }
+        if (Platform.OS === 'web' && typeof navigator !== 'undefined' && navigator.clipboard?.writeText) {
+          try {
+            await navigator.clipboard.writeText(sourceText);
+            Alert.alert('已复制', '消息内容已复制到剪贴板。');
+            return;
+          } catch {}
+        }
+        setDraftMessage(sourceText);
+        focusChatInput();
+        Alert.alert('复制受限', '当前环境无法直接写入剪贴板，已填入输入框。');
+        return;
+      }
+
+      if (action === 'quote') {
+        closeMessageMenu();
+        if (!sourceText) return;
+        const snippet = sourceText.length > 64 ? `${sourceText.slice(0, 64)}...` : sourceText;
+        setDraftMessage((prev) => `「${snippet}」 ${String(prev || '').trimStart()}`);
+        focusChatInput();
+        return;
+      }
+
+      if (action === 'forward') {
+        closeMessageMenu();
+        openForwardPicker([target.message]);
+        return;
+      }
+
+      if (action === 'favorite') {
+        closeMessageMenu();
+        const added = toggleFavoriteMessage(target.chatUid, target.message);
+        Alert.alert(added ? '已收藏' : '已取消收藏', added ? '消息已加入收藏。' : '消息已从收藏移除。');
+        return;
+      }
+
+      if (action === 'multi') {
+        closeMessageMenu();
+        openMultiSelectMode(target.message);
+        return;
+      }
+
+      if (action === 'remind') {
+        closeMessageMenu();
+        openReminderPicker(target.chatUid, target.message);
+        return;
+      }
+
+      if (action === 'translate') {
+        closeMessageMenu();
+        openMessageTranslate(target.message);
+        return;
+      }
+
+      if (action === 'delete') {
+        closeMessageMenu();
+        Alert.alert('删除消息', '仅删除本地消息，服务器记录不会删除。', [
+          { text: '取消', style: 'cancel' },
+          {
+            text: '删除',
+            style: 'destructive',
+            onPress: () => {
+              deleteMessageLocally(target.chatUid, target.messageId);
+            },
+          },
+        ]);
+        return;
+      }
+    },
+    [
+      closeMessageMenu,
+      deleteMessageLocally,
+      focusChatInput,
+      messageMenuSourceText,
+      messageMenuTarget,
+      openForwardPicker,
+      openMessageTranslate,
+      openMultiSelectMode,
+      openReminderPicker,
+      toggleFavoriteMessage,
+    ]
+  );
+
+  useEffect(() => {
+    if (activeChatUid || !messageMenuVisible) return;
+    closeMessageMenu();
+  }, [activeChatUid, closeMessageMenu, messageMenuVisible]);
+
+  useEffect(() => {
+    if (!multiSelectMode) return;
+    if (multiSelectedMessageIds.length > 0) return;
+    setMultiSelectMode(false);
+  }, [multiSelectMode, multiSelectedMessageIds]);
+
+  useEffect(() => {
+    if (!multiSelectMode) return;
+    const validIdSet = new Set(activeChatMessages.map((item) => String(item.id || '').trim()));
+    setMultiSelectedMessageIds((prev) => prev.filter((id) => validIdSet.has(String(id || '').trim())));
+  }, [activeChatMessages, multiSelectMode]);
+
+  const onMultiSelectForward = useCallback(() => {
+    if (!multiSelectedMessages.length) return;
+    openForwardPicker(multiSelectedMessages);
+    closeMultiSelectMode();
+  }, [closeMultiSelectMode, multiSelectedMessages, openForwardPicker]);
+
+  const onMultiSelectFavorite = useCallback(() => {
+    const chatUid = Number(activeChatUidRef.current);
+    if (!chatUid || !multiSelectedMessages.length) return;
+    const addedCount = addMessagesToFavorites(chatUid, multiSelectedMessages);
+    Alert.alert('收藏完成', `新增收藏 ${Math.max(0, addedCount)} 条。`);
+  }, [addMessagesToFavorites, multiSelectedMessages]);
+
+  const onMultiSelectDelete = useCallback(() => {
+    const chatUid = Number(activeChatUidRef.current);
+    if (!chatUid || !multiSelectedMessages.length) return;
+    const ids = multiSelectedMessages.map((item) => String(item.id || '').trim()).filter(Boolean);
+    Alert.alert('删除消息', `确认删除已选 ${ids.length} 条消息？`, [
+      { text: '取消', style: 'cancel' },
+      {
+        text: '删除',
+        style: 'destructive',
+        onPress: () => {
+          const removedCount = deleteMessagesLocally(chatUid, ids);
+          closeMultiSelectMode();
+          Alert.alert('删除完成', `已删除 ${removedCount} 条消息。`);
+        },
+      },
+    ]);
+  }, [closeMultiSelectMode, deleteMessagesLocally, multiSelectedMessages]);
+
   const closeChatMenu = useCallback(() => {
     setChatMenuVisible(false);
     setChatMenuTargetUid(null);
@@ -6199,6 +7304,10 @@ export default function Home({
           openImagePreview={openImagePreview}
           onPressVoiceMessage={onPressVoiceMessage}
           onPressFailedMessage={onPressFailedMessage}
+          onLongPressMessage={openMessageMenu}
+          multiSelectMode={multiSelectMode}
+          multiSelected={multiSelectedMessageSet.has(itemId)}
+          onToggleMultiSelectMessage={toggleMultiSelectMessage}
         />
       );
     });
@@ -6216,6 +7325,10 @@ export default function Home({
     onPressVoiceMessage,
     onPressFailedMessage,
     openImagePreview,
+    openMessageMenu,
+    multiSelectMode,
+    multiSelectedMessageSet,
+    toggleMultiSelectMessage,
     playingVoiceMessageId,
     profileDisplayName,
     recordMessageOffset,
@@ -6343,6 +7456,50 @@ export default function Home({
             ) : null}
             {renderedActiveChatMessages}
           </ScrollView>
+
+          {multiSelectMode ? (
+            <View style={styles.multiSelectToolbar}>
+              <Pressable style={styles.multiSelectToolbarBtn} onPress={closeMultiSelectMode}>
+                <Text style={styles.multiSelectToolbarBtnText}>取消</Text>
+              </Pressable>
+              <Text style={styles.multiSelectToolbarTitle}>
+                已选 {multiSelectedMessages.length} 条
+              </Text>
+              <View style={styles.multiSelectToolbarActions}>
+                <Pressable
+                  style={[
+                    styles.multiSelectActionBtn,
+                    multiSelectedMessages.length === 0 && styles.multiSelectActionBtnDisabled,
+                  ]}
+                  onPress={onMultiSelectForward}
+                  disabled={multiSelectedMessages.length === 0}
+                >
+                  <Text style={styles.multiSelectActionText}>转发</Text>
+                </Pressable>
+                <Pressable
+                  style={[
+                    styles.multiSelectActionBtn,
+                    multiSelectedMessages.length === 0 && styles.multiSelectActionBtnDisabled,
+                  ]}
+                  onPress={onMultiSelectFavorite}
+                  disabled={multiSelectedMessages.length === 0}
+                >
+                  <Text style={styles.multiSelectActionText}>收藏</Text>
+                </Pressable>
+                <Pressable
+                  style={[
+                    styles.multiSelectActionBtn,
+                    styles.multiSelectActionBtnDanger,
+                    multiSelectedMessages.length === 0 && styles.multiSelectActionBtnDisabled,
+                  ]}
+                  onPress={onMultiSelectDelete}
+                  disabled={multiSelectedMessages.length === 0}
+                >
+                  <Text style={[styles.multiSelectActionText, styles.multiSelectActionTextDanger]}>删除</Text>
+                </Pressable>
+              </View>
+            </View>
+          ) : null}
 
           <View
             style={[
@@ -7003,6 +8160,55 @@ export default function Home({
         </Animated.View>
       ) : null}
 
+      {messageMenuVisible && messageMenuTarget ? (
+        <View style={styles.messageMenuOverlay}>
+          <Pressable style={styles.messageMenuBackdrop} onPress={closeMessageMenu} />
+          <View
+            style={[
+              styles.messageMenuPanel,
+              {
+                width: messageMenuWidth,
+                left: messageMenuPosition.x,
+                top: messageMenuPosition.y,
+              },
+            ]}
+          >
+            <ScrollView
+              horizontal
+              style={styles.messageMenuScroll}
+              contentContainerStyle={styles.messageMenuScrollContent}
+              showsHorizontalScrollIndicator={false}
+              keyboardShouldPersistTaps="always"
+            >
+              {BUBBLE_MENU_ITEMS.map((item) => (
+                <Pressable
+                  key={`message-menu-${item.key}`}
+                  style={({ pressed }) => [
+                    styles.messageMenuItem,
+                    pressed && styles.messageMenuItemPressed,
+                  ]}
+                  onPress={() => onPressMessageMenuAction(item.key)}
+                >
+                  <MessageBubbleMenuIcon action={item.key} danger={Boolean(item.danger)} />
+                  <Text style={[styles.messageMenuText, item.danger && styles.messageMenuTextDanger]}>
+                    {item.label}
+                  </Text>
+                </Pressable>
+              ))}
+            </ScrollView>
+            <View
+              style={[
+                styles.messageMenuArrow,
+                messageMenuPosition.placeBelow
+                  ? styles.messageMenuArrowTop
+                  : styles.messageMenuArrowBottom,
+                { left: messageMenuPosition.arrowLeft },
+              ]}
+            />
+          </View>
+        </View>
+      ) : null}
+
       {chatMenuVisible && chatMenuTargetUid ? (
         <View style={styles.menuOverlay}>
           <Pressable style={styles.menuBackdrop} onPress={closeChatMenu} />
@@ -7019,6 +8225,56 @@ export default function Home({
           </View>
         </View>
       ) : null}
+
+      <Modal
+        transparent
+        visible={forwardPickerVisible}
+        animationType="fade"
+        onRequestClose={closeForwardPicker}
+      >
+        <View style={styles.forwardPickerOverlay}>
+          <Pressable style={styles.retryPromptBackdrop} onPress={closeForwardPicker} />
+          <View style={styles.forwardPickerCard}>
+            <Text style={styles.forwardPickerTitle}>选择转发会话</Text>
+            <Text style={styles.forwardPickerSubTitle}>
+              待转发 {forwardDraftMessages.length} 条消息
+            </Text>
+            <ScrollView style={styles.forwardPickerList} contentContainerStyle={styles.forwardPickerListInner}>
+              {forwardTargetItems.length === 0 ? (
+                <Text style={styles.forwardPickerEmpty}>暂无可转发会话</Text>
+              ) : (
+                forwardTargetItems.map((item) => (
+                  <Pressable
+                    key={`forward-target-${item.uid}`}
+                    style={styles.forwardPickerRow}
+                    onPress={() => onSelectForwardTarget(item.uid)}
+                    disabled={forwardSubmitting}
+                  >
+                    <View style={styles.forwardPickerRowInfo}>
+                      <Text style={styles.forwardPickerRowTitle} numberOfLines={1}>
+                        {item.title}
+                      </Text>
+                      <Text style={styles.forwardPickerRowSub} numberOfLines={1}>
+                        {item.preview || '暂无消息'}
+                      </Text>
+                    </View>
+                    <ForwardIndicatorIcon />
+                  </Pressable>
+                ))
+              )}
+            </ScrollView>
+            <View style={styles.forwardPickerActions}>
+              <Pressable
+                style={[styles.retryPromptBtn, styles.retryPromptBtnCancel, styles.forwardPickerCancelBtn]}
+                onPress={closeForwardPicker}
+                disabled={forwardSubmitting}
+              >
+                <Text style={styles.retryPromptBtnCancelText}>取消</Text>
+              </Pressable>
+            </View>
+          </View>
+        </View>
+      </Modal>
 
       <Modal
         transparent
@@ -7750,6 +9006,81 @@ const styles = StyleSheet.create({
     backgroundColor: '#e5ebf3',
     marginHorizontal: 12,
   },
+  messageMenuOverlay: {
+    ...StyleSheet.absoluteFillObject,
+    zIndex: 120,
+  },
+  messageMenuBackdrop: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: 'transparent',
+  },
+  messageMenuPanel: {
+    position: 'absolute',
+    maxWidth: 360,
+    borderRadius: 14,
+    backgroundColor: 'rgba(255,255,255,0.96)',
+    borderWidth: 1,
+    borderColor: 'rgba(0,0,0,0.05)',
+    overflow: 'visible',
+    ...(Platform.OS === 'web'
+      ? ({
+          boxShadow: '0px 12px 40px rgba(0,0,0,0.12)',
+          backdropFilter: 'blur(20px)',
+        } as any)
+      : {
+          shadowColor: '#000',
+          shadowOpacity: 0.12,
+          shadowOffset: { width: 0, height: 12 },
+          shadowRadius: 24,
+          elevation: 14,
+        }),
+  },
+  messageMenuArrow: {
+    position: 'absolute',
+    width: 0,
+    height: 0,
+    borderLeftWidth: BUBBLE_MENU_ARROW_SIZE,
+    borderRightWidth: BUBBLE_MENU_ARROW_SIZE,
+    borderLeftColor: 'transparent',
+    borderRightColor: 'transparent',
+  },
+  messageMenuArrowBottom: {
+    bottom: -BUBBLE_MENU_ARROW_SIZE,
+    borderTopWidth: BUBBLE_MENU_ARROW_SIZE,
+    borderTopColor: 'rgba(255,255,255,0.96)',
+  },
+  messageMenuArrowTop: {
+    top: -BUBBLE_MENU_ARROW_SIZE,
+    borderBottomWidth: BUBBLE_MENU_ARROW_SIZE,
+    borderBottomColor: 'rgba(255,255,255,0.96)',
+  },
+  messageMenuScroll: {
+    width: '100%',
+  },
+  messageMenuScrollContent: {
+    paddingHorizontal: 6,
+    paddingVertical: 6,
+    alignItems: 'center',
+  },
+  messageMenuItem: {
+    width: 64,
+    paddingVertical: 8,
+    borderRadius: 8,
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 5,
+  },
+  messageMenuItemPressed: {
+    backgroundColor: 'rgba(0,0,0,0.05)',
+  },
+  messageMenuText: {
+    fontSize: 11,
+    color: '#333',
+    fontWeight: '500',
+  },
+  messageMenuTextDanger: {
+    color: '#ff4d4f',
+  },
   menuOverlay: {
     ...StyleSheet.absoluteFillObject,
     zIndex: 100,
@@ -7849,6 +9180,69 @@ const styles = StyleSheet.create({
     paddingHorizontal: 12,
     paddingTop: 12,
   },
+  multiSelectToolbar: {
+    borderTopWidth: 1,
+    borderTopColor: '#e4ebf5',
+    borderBottomWidth: 1,
+    borderBottomColor: '#e4ebf5',
+    backgroundColor: '#f8fbff',
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  multiSelectToolbarBtn: {
+    height: 30,
+    borderRadius: 8,
+    paddingHorizontal: 12,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#eef3fb',
+    borderWidth: 1,
+    borderColor: '#dae5f3',
+  },
+  multiSelectToolbarBtnText: {
+    color: '#43566f',
+    fontSize: 13,
+    fontWeight: '600',
+  },
+  multiSelectToolbarTitle: {
+    flex: 1,
+    color: '#2d3f57',
+    fontSize: 13,
+    fontWeight: '600',
+  },
+  multiSelectToolbarActions: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+  },
+  multiSelectActionBtn: {
+    height: 30,
+    borderRadius: 8,
+    paddingHorizontal: 10,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#e9f2ff',
+    borderWidth: 1,
+    borderColor: '#c9defa',
+  },
+  multiSelectActionBtnDanger: {
+    backgroundColor: '#fff0f0',
+    borderColor: '#ffcfcf',
+  },
+  multiSelectActionBtnDisabled: {
+    opacity: 0.45,
+  },
+  multiSelectActionText: {
+    color: '#256eb8',
+    fontSize: 12,
+    fontWeight: '700',
+  },
+  multiSelectActionTextDanger: {
+    color: '#e03f3f',
+  },
   chatTimeDivider: {
     alignSelf: 'center',
     marginBottom: 8,
@@ -7873,6 +9267,32 @@ const styles = StyleSheet.create({
   },
   selfBubbleWrap: {
     alignItems: 'flex-end',
+  },
+  bubbleSelectRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+  },
+  selfBubbleSelectRow: {
+    flexDirection: 'row-reverse',
+  },
+  multiSelectBadge: {
+    width: 22,
+    height: 22,
+    borderRadius: 11,
+    borderWidth: 1,
+    borderColor: '#b8c7db',
+    backgroundColor: '#f8fbff',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  multiSelectBadgeSelected: {
+    borderColor: '#2f8bff',
+    backgroundColor: '#2f8bff',
+  },
+  multiSelectBadgeSelf: {
+    borderColor: '#9ac7ff',
+    backgroundColor: '#e8f2ff',
   },
   groupSenderName: {
     fontSize: 11,
@@ -7908,6 +9328,22 @@ const styles = StyleSheet.create({
     color: '#2f6bd9',
     fontSize: 12,
     fontWeight: '700',
+  },
+  bubblePressable: {
+    borderRadius: 14,
+    alignSelf: 'flex-start',
+  },
+  bubblePressing: {
+    opacity: 0.9,
+    transform: [{ scale: 0.985 }],
+  },
+  bubbleMultiSelected: {
+    borderColor: '#66aef6',
+    backgroundColor: '#f0f7ff',
+  },
+  selfBubbleMultiSelected: {
+    borderColor: '#8fc6ff',
+    backgroundColor: '#3e8de1',
   },
   bubble: {
     maxWidth: '100%',
@@ -8086,6 +9522,93 @@ const styles = StyleSheet.create({
     color: '#fff',
     fontSize: 14,
     fontWeight: '700',
+  },
+  forwardPickerOverlay: {
+    flex: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+    paddingHorizontal: 20,
+    position: 'relative',
+  },
+  forwardPickerCard: {
+    width: '100%',
+    maxWidth: 360,
+    borderRadius: 14,
+    backgroundColor: '#fff',
+    borderWidth: 1,
+    borderColor: '#e8edf7',
+    paddingHorizontal: 14,
+    paddingTop: 14,
+    paddingBottom: 12,
+    ...(Platform.OS === 'web'
+      ? { boxShadow: '0px 14px 30px rgba(20, 36, 64, 0.18)' }
+      : {
+          shadowColor: '#000',
+          shadowOpacity: 0.14,
+          shadowOffset: { width: 0, height: 8 },
+          shadowRadius: 20,
+          elevation: 8,
+        }),
+  },
+  forwardPickerTitle: {
+    textAlign: 'center',
+    color: '#1f2c3c',
+    fontSize: 16,
+    fontWeight: '700',
+  },
+  forwardPickerSubTitle: {
+    marginTop: 6,
+    textAlign: 'center',
+    color: '#64748b',
+    fontSize: 12,
+  },
+  forwardPickerList: {
+    marginTop: 10,
+    maxHeight: 320,
+  },
+  forwardPickerListInner: {
+    gap: 6,
+    paddingBottom: 6,
+  },
+  forwardPickerEmpty: {
+    textAlign: 'center',
+    color: '#8b97a8',
+    fontSize: 13,
+    paddingVertical: 18,
+  },
+  forwardPickerRow: {
+    minHeight: 52,
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: '#e4ebf5',
+    backgroundColor: '#f8fbff',
+    paddingHorizontal: 12,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 10,
+  },
+  forwardPickerRowInfo: {
+    flex: 1,
+    minWidth: 0,
+  },
+  forwardPickerRowTitle: {
+    color: '#26384e',
+    fontSize: 14,
+    fontWeight: '600',
+  },
+  forwardPickerRowSub: {
+    marginTop: 2,
+    color: '#7f8da0',
+    fontSize: 12,
+  },
+  forwardPickerActions: {
+    marginTop: 12,
+    flexDirection: 'row',
+    justifyContent: 'center',
+  },
+  forwardPickerCancelBtn: {
+    minWidth: 120,
   },
   selfText: {
     color: '#fff',
@@ -8658,6 +10181,94 @@ function QuickScanIcon() {
       <Path d="M7 12h10" stroke="#31527f" strokeWidth={2} strokeLinecap="round" />
     </Svg>
   );
+}
+
+function MultiSelectCheckIcon() {
+  return (
+    <Svg width={14} height={14} viewBox="0 0 24 24" fill="none">
+      <Path
+        d="M20 6L9 17L4 12"
+        stroke="#ffffff"
+        strokeWidth={2.6}
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </Svg>
+  );
+}
+
+function MessageBubbleMenuIcon({
+  action,
+  danger = false,
+}: {
+  action: MessageBubbleMenuActionKey;
+  danger?: boolean;
+}) {
+  const stroke = danger ? '#ff4d4f' : '#333';
+  switch (action) {
+    case 'copy':
+      return (
+        <Svg width={22} height={22} viewBox="0 0 24 24" fill="none">
+          <Rect x={9} y={9} width={13} height={13} rx={2} ry={2} stroke={stroke} strokeWidth={1.8} />
+          <Path d="M15 5V4a2 2 0 0 0-2-2H4a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h1" stroke={stroke} strokeWidth={1.8} strokeLinecap="round" />
+        </Svg>
+      );
+    case 'forward':
+      return (
+        <Svg width={22} height={22} viewBox="0 0 24 24" fill="none">
+          <Path d="M4 12v8a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-8" stroke={stroke} strokeWidth={1.8} strokeLinecap="round" />
+          <Polyline points="16 6 12 2 8 6" stroke={stroke} strokeWidth={1.8} fill="none" />
+          <Path d="M12 2v13" stroke={stroke} strokeWidth={1.8} strokeLinecap="round" />
+        </Svg>
+      );
+    case 'favorite':
+      return (
+        <Svg width={22} height={22} viewBox="0 0 24 24" fill="none">
+          <Path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z" stroke={stroke} strokeWidth={1.8} />
+        </Svg>
+      );
+    case 'quote':
+      return (
+        <Svg width={22} height={22} viewBox="0 0 24 24" fill="none">
+          <Path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" stroke={stroke} strokeWidth={1.8} strokeLinejoin="round" />
+        </Svg>
+      );
+    case 'multi':
+      return (
+        <Svg width={22} height={22} viewBox="0 0 24 24" fill="none">
+          <Path d="M22 11.08V12a10 10 0 1 1-5.93-9.14" stroke={stroke} strokeWidth={1.8} strokeLinecap="round" />
+          <Polyline points="22 4 12 14.01 9 11.01" stroke={stroke} strokeWidth={1.8} fill="none" />
+        </Svg>
+      );
+    case 'remind':
+      return (
+        <Svg width={22} height={22} viewBox="0 0 24 24" fill="none">
+          <Circle cx={12} cy={12} r={10} stroke={stroke} strokeWidth={1.8} />
+          <Path d="M12 6v6l4 2" stroke={stroke} strokeWidth={1.8} strokeLinecap="round" />
+        </Svg>
+      );
+    case 'translate':
+      return (
+        <Svg width={22} height={22} viewBox="0 0 24 24" fill="none">
+          <Circle cx={12} cy={12} r={10} stroke={stroke} strokeWidth={1.8} />
+          <Path d="M2 12h20" stroke={stroke} strokeWidth={1.8} strokeLinecap="round" />
+          <Path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10Z" stroke={stroke} strokeWidth={1.8} />
+        </Svg>
+      );
+    case 'delete':
+      return (
+        <Svg width={22} height={22} viewBox="0 0 24 24" fill="none">
+          <Polyline points="3 6 5 6 21 6" stroke={stroke} strokeWidth={1.8} fill="none" />
+          <Path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" stroke={stroke} strokeWidth={1.8} strokeLinecap="round" />
+        </Svg>
+      );
+    default:
+      return (
+        <Svg width={22} height={22} viewBox="0 0 24 24" fill="none">
+          <Circle cx={12} cy={12} r={10} stroke={stroke} strokeWidth={1.8} />
+        </Svg>
+      );
+  }
 }
 
 

@@ -18,6 +18,8 @@ export const STORAGE_KEYS = {
   chatMuted: 'xinchat.chatMuted',
   chatBackground: 'xinchat.chatBackground',
   customStickersPrefix: 'xinchat.customStickers.',
+  favoriteMessagesPrefix: 'xinchat.favoriteMessages.',
+  messageRemindersPrefix: 'xinchat.messageReminders.',
   groupRemarks: 'xinchat.groupRemarks',
   pendingChatSettingsAction: 'xinchat.pendingChatSettingsAction',
 } as const;
