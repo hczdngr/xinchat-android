@@ -565,7 +565,6 @@ export default function QRScanWeb() {
             <div style={styles.pendingCore} />
           </div>
           <div style={styles.pendingTitle}>AI Vision Scanning</div>
-          <div style={styles.pendingSubtitle}>{QR_SCAN_TEXT.arRecognizing}</div>
         </div>
       ) : null}
     </div>
@@ -858,12 +857,6 @@ const styles: Record<string, React.CSSProperties> = {
     fontSize: 18,
     fontWeight: 700,
     letterSpacing: '0.6px',
-  },
-  pendingSubtitle: {
-    marginTop: 7,
-    color: '#8cc7e8',
-    fontSize: 13,
-    letterSpacing: '0.4px',
   },
 };
 
