@@ -20,12 +20,34 @@ const toText = (value: unknown, max = 400) => {
   return text.length > max ? `${text.slice(0, max)}...` : text;
 };
 
+const normalizeConfidenceValue = (raw: number) => {
+  if (!Number.isFinite(raw)) return 0;
+  let next = raw;
+  // Model may return 0-100 even when asked for 0-1.
+  if (next > 1 && next <= 100) {
+    next /= 100;
+  }
+  if (next < 0) return 0;
+  if (next > 1) return 1;
+  return next;
+};
+
 const toConfidence = (value: unknown) => {
-  const num = Number(value);
-  if (!Number.isFinite(num)) return 0;
-  if (num < 0) return 0;
-  if (num > 1) return 1;
-  return num;
+  if (typeof value === 'number') {
+    return normalizeConfidenceValue(value);
+  }
+  const text = String(value ?? '').trim();
+  if (!text) return 0;
+
+  const normalized = text.replace(/％/g, '%').replace(/,/g, '.');
+  const hasPercent = normalized.includes('%');
+  const matched = normalized.match(/-?\d+(?:\.\d+)?(?:e[+-]?\d+)?/i);
+  if (!matched) return 0;
+
+  const parsed = Number(matched[0]);
+  if (!Number.isFinite(parsed)) return 0;
+  const raw = hasPercent ? parsed / 100 : parsed;
+  return normalizeConfidenceValue(raw);
 };
 
 const extractBalancedObject = (text: string) => {

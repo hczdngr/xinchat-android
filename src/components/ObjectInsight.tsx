@@ -170,9 +170,10 @@ export default function ObjectInsight() {
           {detectObjects.length > 0 ? (
             <View style={styles.tagWrap}>
               {detectObjects.map((item, index) => {
-                const score = Number.isFinite(item.confidence)
-                  ? `${Math.round(item.confidence * 100)}%`
-                  : '';
+                const percent = Number.isFinite(item.confidence)
+                  ? Math.round(item.confidence * 100)
+                  : 0;
+                const score = percent >= 1 && percent <= 100 ? `${percent}%` : '';
                 return (
                   <View key={`obj-${index}-${item.name}`} style={styles.tag}>
                     <Text style={styles.tagText}>{`${item.name}${score ? ` ${score}` : ''}`}</Text>

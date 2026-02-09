@@ -497,8 +497,9 @@ export default function QRScanWeb() {
             {arSummary ? <div style={styles.arResultSummary}>{arSummary}</div> : null}
             {arScene ? <div style={styles.arResultScene}>{`场景：${arScene}`}</div> : null}
             {arObjects.slice(0, 4).map((item, index) => {
-              const confidence = Number(item?.confidence || 0);
-              const suffix = Number.isFinite(confidence) ? ` (${Math.round(confidence * 100)}%)` : '';
+              const confidence = Number(item?.confidence);
+              const percent = Number.isFinite(confidence) ? Math.round(confidence * 100) : 0;
+              const suffix = percent >= 1 && percent <= 100 ? ` (${percent}%)` : '';
               return (
                 <div key={`ar-obj-${index}-${item?.name || 'unknown'}`} style={styles.arObjectItem}>
                   {`\u2022 ${item?.name || '未知物体'}${suffix}`}

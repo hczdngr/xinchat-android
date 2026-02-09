@@ -258,12 +258,35 @@ const parseImageInput = (body = {}) => {
   return { mimeType, base64 };
 };
 
-const toConfidence = (value) => {
-  const parsed = Number(value);
+const normalizeConfidenceValue = (raw) => {
+  const parsed = Number(raw);
   if (!Number.isFinite(parsed)) return 0;
-  if (parsed < 0) return 0;
-  if (parsed > 1) return 1;
-  return parsed;
+  let next = parsed;
+  // Model may return 0-100 even when asked for 0-1.
+  if (next > 1 && next <= 100) {
+    next /= 100;
+  }
+  if (next < 0) return 0;
+  if (next > 1) return 1;
+  return next;
+};
+
+const toConfidence = (value) => {
+  if (typeof value === 'number') {
+    return normalizeConfidenceValue(value);
+  }
+  const text = String(value ?? '').trim();
+  if (!text) return 0;
+
+  const normalized = text.replace(/％/g, '%').replace(/,/g, '.');
+  const hasPercent = normalized.includes('%');
+  const matched = normalized.match(/-?\d+(?:\.\d+)?(?:e[+-]?\d+)?/i);
+  if (!matched) return 0;
+
+  const parsed = Number(matched[0]);
+  if (!Number.isFinite(parsed)) return 0;
+  const raw = hasPercent ? parsed / 100 : parsed;
+  return normalizeConfidenceValue(raw);
 };
 
 const normalizeObjectDetectResult = (parsed, fallbackSummary = '') => {
@@ -922,7 +945,6 @@ router.get('/encyclopedia', authenticate, async (req, res) => {
     ];
 
     let result = null;
-    let lastError = null;
     for (const provider of providers) {
       try {
         result = await fetchWikiSummary({
@@ -932,7 +954,7 @@ router.get('/encyclopedia', authenticate, async (req, res) => {
         });
         if (result) break;
       } catch (error) {
-        lastError = error;
+        // Try next provider.
       }
     }
 
