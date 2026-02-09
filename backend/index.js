@@ -21,6 +21,7 @@ import voiceRouter from './routes/voice.js';
 import voiceTranscribeRouter from './routes/voiceTranscribe.js';
 import insightApiRouter, { prewarmWarmTipCache } from './routes/insightApi.js';
 import { startInsightWorker } from './routes/insight.js';
+import { getTokenId, onTokenRevoked } from './tokenRevocation.js';
 import {
   markDisconnected,
   isUserOnline,
@@ -36,12 +37,38 @@ const PORT = process.env.PORT || 3001;
 const NODE_ENV = process.env.NODE_ENV || 'development';
 const ROUTE_INSPECTOR_ENABLED =
   NODE_ENV !== 'production' || process.env.ENABLE_ROUTE_INSPECTOR === 'true';
+const AUTH_COOKIE_NAME =
+  String(process.env.AUTH_COOKIE_NAME || 'xinchat_token').trim() || 'xinchat_token';
 const parsePositiveInt = (value, fallback, min = 1) => {
   const parsed = Number.parseInt(String(value || ''), 10);
   if (!Number.isFinite(parsed) || parsed < min) {
     return fallback;
   }
   return parsed;
+};
+const parseCookieHeader = (raw) => {
+  const result = {};
+  const source = String(raw || '').trim();
+  if (!source) return result;
+  source.split(';').forEach((item) => {
+    const segment = String(item || '').trim();
+    if (!segment) return;
+    const splitIndex = segment.indexOf('=');
+    if (splitIndex <= 0) return;
+    const name = segment.slice(0, splitIndex).trim();
+    const valueRaw = segment.slice(splitIndex + 1).trim();
+    if (!name) return;
+    try {
+      result[name] = decodeURIComponent(valueRaw);
+    } catch {
+      result[name] = valueRaw;
+    }
+  });
+  return result;
+};
+const extractTokenFromCookieHeader = (cookieHeader) => {
+  const cookies = parseCookieHeader(cookieHeader || '');
+  return String(cookies[AUTH_COOKIE_NAME] || '').trim();
 };
 const REQUEST_BODY_LIMIT_MB = parsePositiveInt(process.env.REQUEST_BODY_LIMIT_MB, 24, 1);
 const REQUEST_BODY_LIMIT = `${REQUEST_BODY_LIMIT_MB}mb`;
@@ -99,13 +126,17 @@ app.use((req, res, next) => {
   }
   if (origin) {
     if (CORS_ALLOW_ALL) {
-      res.setHeader('Access-Control-Allow-Origin', '*');
+      res.setHeader('Access-Control-Allow-Origin', origin);
+      res.setHeader('Vary', 'Origin');
     } else if (CORS_ALLOWED_ORIGINS.length > 0) {
       res.setHeader('Access-Control-Allow-Origin', origin);
       res.setHeader('Vary', 'Origin');
     }
   } else if (CORS_ALLOW_ALL) {
     res.setHeader('Access-Control-Allow-Origin', '*');
+  }
+  if (origin) {
+    res.setHeader('Access-Control-Allow-Credentials', 'true');
   }
   res.setHeader('Access-Control-Allow-Methods', 'GET,POST,DELETE,OPTIONS');
   res.setHeader('Access-Control-Max-Age', '600');
@@ -772,10 +803,30 @@ export function startServer(port = PORT) {
     });
   };
 
+  const closeRevokedTokenConnections = (tokenId) => {
+    if (!tokenId) return;
+    connections.forEach((set, uid) => {
+      set.forEach((socket) => {
+        if (socket?._tokenId !== tokenId) return;
+        try {
+          socket.close(4001, 'Token revoked');
+        } catch {}
+        removeConnection(uid, socket);
+      });
+    });
+  };
+
+  const unsubscribeTokenRevocation = onTokenRevoked(({ tokenId }) => {
+    closeRevokedTokenConnections(tokenId);
+  });
+  server.on('close', () => {
+    unsubscribeTokenRevocation();
+  });
+
   const verifyToken = async (token) => {
     if (!token) return null;
     const users = await readUsersCached();
-    const found = findUserByToken(users, token);
+    const found = await findUserByToken(users, token);
     if (found.touched) {
       await writeUsers(users);
     }
@@ -866,14 +917,32 @@ export function startServer(port = PORT) {
         return;
       }
       const url = new URL(req.url, `http://${req.headers.host}`);
-      const token = url.searchParams.get('token') || '';
-      const user = await verifyToken(token);
+      const tokenFromQuery = String(url.searchParams.get('token') || '').trim();
+      const tokenFromCookie = extractTokenFromCookieHeader(req.headers.cookie);
+      const candidateTokens = [];
+      if (tokenFromQuery) {
+        candidateTokens.push(tokenFromQuery);
+      }
+      if (tokenFromCookie && tokenFromCookie !== tokenFromQuery) {
+        candidateTokens.push(tokenFromCookie);
+      }
+      let acceptedToken = '';
+      let user = null;
+      for (const candidate of candidateTokens) {
+        const found = await verifyToken(candidate);
+        if (found) {
+          acceptedToken = candidate;
+          user = found;
+          break;
+        }
+      }
       if (!user) {
         socket.close(1008, 'Unauthorized');
         return;
       }
       socket._user = user;
       socket._uid = user.uid;
+      socket._tokenId = getTokenId(acceptedToken);
       addConnection(user.uid, socket);
       const statusChanged = touchHeartbeat(user.uid);
       if (!statusChanged) {

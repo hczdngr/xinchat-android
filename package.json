@@ -31,6 +31,7 @@
     "react-native": "0.83.1",
     "react-native-gesture-handler": "^2.30.0",
     "react-native-image-crop-picker": "^0.51.1",
+    "react-native-quick-sqlite": "^8.2.7",
     "react-native-safe-area-context": "^5.5.2",
     "react-native-screens": "^4.22.0",
     "react-native-svg": "^15.12.0",

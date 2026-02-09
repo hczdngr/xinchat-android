@@ -18,6 +18,7 @@ import { API_BASE, normalizeImageUrl } from '../config';
 import { STORAGE_KEYS } from '../constants/storageKeys';
 import type { GroupChatSettingsRoute, RootNavigation } from '../navigation/types';
 import { storage } from '../storage';
+import { removeHomeMessageBucket } from '../storage/homeMessageBuckets';
 
 type Friend = {
   uid: number;
@@ -447,29 +448,25 @@ export default function GroupChatSettings() {
   }, [editorField, editorValue, editorVisible, saveGroupRemark, saving, updateGroup]);
 
   const clearLocalGroupCaches = useCallback(async (deletedAt: number) => {
-    const [cachedMessages, cachedLatest, cachedUnread, hiddenChats, readAtMap, deleteCutoffMap] =
-      await Promise.all([
-        storage.getJson<Record<number, any>>(STORAGE_KEYS.homeMessagesCache),
-        storage.getJson<Record<number, any>>(STORAGE_KEYS.homeLatestCache),
-        storage.getJson<Record<number, any>>(STORAGE_KEYS.homeUnreadCache),
-        storage.getJson<Record<number, any>>(STORAGE_KEYS.hiddenChats),
-        storage.getJson<NumberMap>(STORAGE_KEYS.readAt),
-        storage.getJson<NumberMap>(STORAGE_KEYS.chatDeleteCutoff),
-      ]);
-    const nextMessages = { ...(cachedMessages || {}) };
+    const [cachedLatest, cachedUnread, hiddenChats, readAtMap, deleteCutoffMap] = await Promise.all([
+      storage.getJson<Record<number, any>>(STORAGE_KEYS.homeLatestCache),
+      storage.getJson<Record<number, any>>(STORAGE_KEYS.homeUnreadCache),
+      storage.getJson<Record<number, any>>(STORAGE_KEYS.hiddenChats),
+      storage.getJson<NumberMap>(STORAGE_KEYS.readAt),
+      storage.getJson<NumberMap>(STORAGE_KEYS.chatDeleteCutoff),
+    ]);
     const nextLatest = { ...(cachedLatest || {}) };
     const nextUnread = { ...(cachedUnread || {}) };
     const nextHidden = sanitizeBoolMap(hiddenChats);
     const nextReadAt = sanitizeNumberMap(readAtMap);
     const nextDeleteCutoff = sanitizeNumberMap(deleteCutoffMap);
-    delete nextMessages[uid];
     delete nextLatest[uid];
     delete nextUnread[uid];
     delete nextHidden[uid];
     nextReadAt[uid] = deletedAt;
     nextDeleteCutoff[uid] = deletedAt;
     await Promise.all([
-      storage.setJson(STORAGE_KEYS.homeMessagesCache, nextMessages),
+      removeHomeMessageBucket(uid),
       storage.setJson(STORAGE_KEYS.homeLatestCache, nextLatest),
       storage.setJson(STORAGE_KEYS.homeUnreadCache, nextUnread),
       storage.setJson(STORAGE_KEYS.hiddenChats, nextHidden),

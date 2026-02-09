@@ -77,6 +77,20 @@ function App() {
   }, [registerUsername, registerPassword, registerConfirmPassword]);
   const isAuthed = useMemo(() => Boolean(token), [token]);
 
+  const clearAuthSession = useCallback(async () => {
+    await Promise.all([
+      storage.remove(STORAGE_KEYS.token),
+      storage.remove(STORAGE_KEYS.profile),
+    ]).catch(() => undefined);
+    setToken('');
+    setProfile(emptyProfile);
+    setView('login');
+  }, []);
+
+  const handleHomeAuthExpired = useCallback(() => {
+    clearAuthSession().catch(() => undefined);
+  }, [clearAuthSession]);
+
   useEffect(() => {
     const loadSession = async () => {
       const storedToken = (await storage.getString(STORAGE_KEYS.token)) || '';
@@ -165,6 +179,10 @@ function App() {
         headers: { Authorization: `Bearer ${authToken}` },
       });
       const data = await response.json().catch(() => ({}));
+      if (response.status === 401 || response.status === 403) {
+        await clearAuthSession();
+        return;
+      }
       if (response.ok && data?.success && data?.user) {
         setProfile((prev) => ({ ...prev, ...data.user }));
         await storage.setJson(STORAGE_KEYS.profile, {
@@ -182,7 +200,7 @@ function App() {
         });
       }
     } catch {}
-  }, [token]);
+  }, [clearAuthSession, token]);
 
   const setAuthSession = async (data: Profile & { token?: string }) => {
     const nextToken = data.token || '';
@@ -425,7 +443,7 @@ function App() {
                 }}
               >
                 <Stack.Screen name="Home">
-                  {() => <Home profile={profile} />}
+                  {() => <Home profile={profile} onAuthExpired={handleHomeAuthExpired} />}
                 </Stack.Screen>
                 <Stack.Screen name="UserCenter">
                   {({ navigation, route }) => (

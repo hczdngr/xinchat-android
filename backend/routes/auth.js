@@ -3,6 +3,7 @@ import fs from 'fs/promises';
 import path from 'path';
 import crypto from 'crypto';
 import { fileURLToPath } from 'url';
+import { isTokenRevoked, revokeToken } from '../tokenRevocation.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -22,6 +23,9 @@ const DEFAULT_SIGNATURE =
 const MAX_NICKNAME_LEN = 36;
 const MAX_SIGNATURE_LEN = 80;
 const MAX_AVATAR_BYTES = 20 * 1024 * 1024;
+const AUTH_COOKIE_NAME = String(process.env.AUTH_COOKIE_NAME || 'xinchat_token').trim() || 'xinchat_token';
+const AUTH_COOKIE_PATH = '/';
+const AUTH_COOKIE_SAME_SITE = 'Lax';
 const normalizeUsername = (value) => value.trim().toLowerCase();
 const parsePositiveInt = (value, fallback, min = 1) => {
   const parsed = Number.parseInt(String(value || ''), 10);
@@ -77,11 +81,83 @@ const normalizeAvatar = (value, baseUrl = '') => {
   return trimmed;
 };
 
+const parseCookieHeader = (raw) => {
+  const result = {};
+  const source = String(raw || '').trim();
+  if (!source) return result;
+  source.split(';').forEach((item) => {
+    const segment = String(item || '').trim();
+    if (!segment) return;
+    const splitIndex = segment.indexOf('=');
+    if (splitIndex <= 0) return;
+    const name = segment.slice(0, splitIndex).trim();
+    const valueRaw = segment.slice(splitIndex + 1).trim();
+    if (!name) return;
+    try {
+      result[name] = decodeURIComponent(valueRaw);
+    } catch {
+      result[name] = valueRaw;
+    }
+  });
+  return result;
+};
+
+const shouldUseSecureCookie = (req) => {
+  const env = String(process.env.AUTH_COOKIE_SECURE || '').trim().toLowerCase();
+  if (env === '1' || env === 'true') return true;
+  if (env === '0' || env === 'false') return false;
+  const forwardedProto = String(req?.headers?.['x-forwarded-proto'] || '').toLowerCase();
+  if (forwardedProto.includes('https')) return true;
+  if (req?.secure) return true;
+  return String(process.env.NODE_ENV || '').toLowerCase() === 'production';
+};
+
+const appendAuthCookie = (res, req, token, expiresAt) => {
+  const safeToken = String(token || '').trim();
+  const ts = expiresAt ? Date.parse(String(expiresAt)) : 0;
+  if (!safeToken || !Number.isFinite(ts) || ts <= Date.now()) return;
+  const maxAgeSec = Math.max(1, Math.floor((ts - Date.now()) / 1000));
+  const parts = [
+    `${AUTH_COOKIE_NAME}=${encodeURIComponent(safeToken)}`,
+    `Path=${AUTH_COOKIE_PATH}`,
+    `Max-Age=${maxAgeSec}`,
+    `Expires=${new Date(Date.now() + maxAgeSec * 1000).toUTCString()}`,
+    `SameSite=${AUTH_COOKIE_SAME_SITE}`,
+    'HttpOnly',
+  ];
+  if (shouldUseSecureCookie(req)) {
+    parts.push('Secure');
+  }
+  res.append('Set-Cookie', parts.join('; '));
+};
+
+const clearAuthCookie = (res, req) => {
+  const parts = [
+    `${AUTH_COOKIE_NAME}=`,
+    `Path=${AUTH_COOKIE_PATH}`,
+    'Max-Age=0',
+    'Expires=Thu, 01 Jan 1970 00:00:00 GMT',
+    `SameSite=${AUTH_COOKIE_SAME_SITE}`,
+    'HttpOnly',
+  ];
+  if (shouldUseSecureCookie(req)) {
+    parts.push('Secure');
+  }
+  res.append('Set-Cookie', parts.join('; '));
+};
+
+const extractTokenFromCookie = (req) => {
+  const cookies = parseCookieHeader(req?.headers?.cookie || '');
+  return String(cookies[AUTH_COOKIE_NAME] || '').trim();
+};
+
 const extractToken = (req) => {
   const header = req.headers.authorization || '';
   if (header.toLowerCase().startsWith('bearer ')) {
     return header.slice(7).trim();
   }
+  const cookieToken = extractTokenFromCookie(req);
+  if (cookieToken) return cookieToken;
   return req.body?.token || req.query?.token || '';
 };
 
@@ -94,12 +170,18 @@ const authenticate = async (req, res, next) => {
     }
 
     const users = await readUsers();
-    const found = findUserByToken(users, token);
+    const found = await findUserByToken(users, token);
     if (found.touched) {
       await writeUsers(users);
     }
     if (!found.user) {
-      res.status(401).json({ success: false, message: '登录令牌无效。' });
+      if (found.revoked) {
+        clearAuthCookie(res, req);
+      }
+      res.status(401).json({
+        success: false,
+        message: found.revoked ? '登录令牌已被吊销。' : '登录令牌无效。',
+      });
       return;
     }
 
@@ -426,6 +508,19 @@ const removeTokenFromUser = (user, token) => {
   return changed;
 };
 
+const resolveTokenExpiresAt = (user, token) => {
+  if (!user || !token) return null;
+  const tokens = Array.isArray(user.tokens) ? user.tokens : [];
+  const entry = tokens.find((item) => item?.token === token);
+  if (entry && typeof entry.expiresAt === 'string' && entry.expiresAt) {
+    return entry.expiresAt;
+  }
+  if (user.token === token && typeof user.tokenExpiresAt === 'string' && user.tokenExpiresAt) {
+    return user.tokenExpiresAt;
+  }
+  return null;
+};
+
 const resolveTokenState = (user, token) => {
   const tokens = Array.isArray(user?.tokens) ? user.tokens : [];
   const entry = tokens.find((item) => item?.token === token);
@@ -438,7 +533,7 @@ const resolveTokenState = (user, token) => {
   return 'missing';
 };
 
-const findUserByToken = (users, token) => {
+const findUserByTokenLocal = (users, token) => {
   if (!token) return { user: null, userIndex: -1, touched: false };
 
   const indexedUserIndex = tokenIndexCache.get(token);
@@ -473,6 +568,36 @@ const findUserByToken = (users, token) => {
     }
   }
   return { user: null, userIndex: -1, touched };
+};
+
+const findUserByToken = async (users, token) => {
+  const safeToken = String(token || '').trim();
+  if (!safeToken) {
+    return { user: null, userIndex: -1, touched: false, revoked: false };
+  }
+  if (await isTokenRevoked(safeToken)) {
+    const localFound = findUserByTokenLocal(users, safeToken);
+    let touched = localFound.touched;
+    if (localFound.user && localFound.userIndex >= 0 && localFound.userIndex < users.length) {
+      if (removeTokenFromUser(users[localFound.userIndex], safeToken)) {
+        touched = true;
+      }
+    }
+    return { user: null, userIndex: -1, touched, revoked: true };
+  }
+  const localFound = findUserByTokenLocal(users, safeToken);
+  return { ...localFound, revoked: false };
+};
+
+const revokeCurrentToken = async (users, userIndex, token) => {
+  const safeToken = String(token || '').trim();
+  if (!safeToken) {
+    return { touched: false, tokenId: '' };
+  }
+  const expiresAt = resolveTokenExpiresAt(users[userIndex], safeToken);
+  const revoked = await revokeToken(safeToken, expiresAt);
+  const touched = removeTokenFromUser(users[userIndex], safeToken);
+  return { touched, tokenId: revoked.tokenId || '' };
 };
 
 const findUserIndexByUsername = (users, normalizedUsername) => {
@@ -690,6 +815,7 @@ router.post('/login', async (req, res) => {
       online: false,
     };
     await writeUsers(users);
+    appendAuthCookie(res, req, token, expiresAt);
 
     res.json({
       success: true,
@@ -714,17 +840,23 @@ router.post('/login', async (req, res) => {
   }
 });
 
-router.post('/logout', authenticate, async (req, res) => {
+const revokeAuthenticatedSession = async (req, res, { clearCookie = true } = {}) => {
   const token = extractToken(req);
   const { users, userIndex } = req.auth;
-  if (token) {
-    const updated = removeTokenFromUser(users[userIndex], token);
-    if (updated) {
-      await writeUsers(users);
-    }
-  }
+  const revoked = await revokeCurrentToken(users, userIndex, token);
   await clearUserSession(users, userIndex);
-  res.json({ success: true });
+  if (clearCookie) {
+    clearAuthCookie(res, req);
+  }
+  res.json({ success: true, revokedTokenId: revoked.tokenId || '' });
+};
+
+router.post('/logout', authenticate, async (req, res) => {
+  await revokeAuthenticatedSession(req, res, { clearCookie: true });
+});
+
+router.post('/session/revoke', authenticate, async (req, res) => {
+  await revokeAuthenticatedSession(req, res, { clearCookie: true });
 });
 
 router.get('/profile', authenticate, async (req, res) => {

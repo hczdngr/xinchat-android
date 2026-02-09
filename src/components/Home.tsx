@@ -32,6 +32,7 @@ import {
 } from '../constants/chatSettings';
 import { STORAGE_KEYS } from '../constants/storageKeys';
 import { storage } from '../storage';
+import { loadHomeMessageBuckets, saveHomeMessageBuckets } from '../storage/homeMessageBuckets';
 import FoundFriends from './FoundFriends';
 import { getUnreadBadgeTone, shouldNotifyIncomingMessage } from '../utils/chatNotificationRules';
 import { pickImagesForPlatform } from '../utils/pickImage';
@@ -989,6 +990,53 @@ const normalizeDeviceCreatedAtMs = (raw: any): number => {
   return floored > maxAllowed ? maxAllowed : floored;
 };
 
+const normalizeTimestampMs = (value: any): number => {
+  const direct = Number(value);
+  if (Number.isFinite(direct) && direct > 0) {
+    return Math.floor(direct);
+  }
+  const text = String(value || '').trim();
+  if (!text) return 0;
+  const parsed = Date.parse(text);
+  if (!Number.isFinite(parsed) || parsed <= 0) return 0;
+  return Math.floor(parsed);
+};
+
+const inferDeviceCreatedAtMsFromLocalCache = async (): Promise<number> => {
+  let oldestMs = 0;
+  const updateOldest = (candidate: number) => {
+    if (!Number.isFinite(candidate) || candidate <= 0) return;
+    if (!oldestMs || candidate < oldestMs) {
+      oldestMs = Math.floor(candidate);
+    }
+  };
+
+  try {
+    const [cachedMessages, readAtMap] = await Promise.all([
+      loadHomeMessageBuckets(),
+      storage.getJson<Record<string, any>>(STORAGE_KEYS.readAt),
+    ]);
+
+    if (cachedMessages && typeof cachedMessages === 'object') {
+      Object.values(cachedMessages).forEach((bucket) => {
+        if (!Array.isArray(bucket)) return;
+        bucket.forEach((message) => {
+          updateOldest(normalizeTimestampMs(message?.createdAtMs));
+          updateOldest(normalizeTimestampMs(message?.createdAt));
+        });
+      });
+    }
+
+    if (readAtMap && typeof readAtMap === 'object') {
+      Object.values(readAtMap).forEach((rawTs) => {
+        updateOldest(normalizeTimestampMs(rawTs));
+      });
+    }
+  } catch {}
+
+  return oldestMs;
+};
+
 const withOutgoingEnterAnimation = (
   entry: any,
   options?: { clientMessageId?: string; appearAtMs?: number }
@@ -1251,7 +1299,13 @@ const ChatMessageRow = React.memo(
     prev.onPressFailedMessage === next.onPressFailedMessage
 );
 
-export default function Home({ profile }: { profile: Profile }) {
+export default function Home({
+  profile,
+  onAuthExpired,
+}: {
+  profile: Profile;
+  onAuthExpired?: () => void;
+}) {
   const insets = useSafeAreaInsets();
   const { height: windowHeight, width: windowWidth } = useWindowDimensions();
   const navPad = Math.min(insets.bottom, 6);
@@ -1431,6 +1485,8 @@ export default function Home({ profile }: { profile: Profile }) {
   const route = useRoute<HomeRoute>();
   const messageIdSetsRef = useRef<Map<number, Set<number | string>>>(new Map());
   const wsRef = useRef<WebSocket | null>(null);
+  const authExpiredRef = useRef(false);
+  const manualWsCloseRef = useRef(false);
   const heartbeatTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const reconnectAttemptsRef = useRef(0);
@@ -1461,6 +1517,10 @@ export default function Home({ profile }: { profile: Profile }) {
   const chatInputRef = useRef<TextInput | null>(null);
   const searchInputRef = useRef<TextInput | null>(null);
   const connectWsRef = useRef<() => void>(() => {});
+  const hydrateHomeCacheRef = useRef<() => Promise<boolean>>(async () => false);
+  const loadFriendsRef = useRef<(options?: { silent?: boolean }) => Promise<void>>(async () => {});
+  const loadGroupsRef = useRef<() => Promise<void>>(async () => {});
+  const teardownWsRef = useRef<() => void>(() => {});
   const cacheWriteTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const homeRefreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const homeCacheHydratedRef = useRef(false);
@@ -1483,6 +1543,106 @@ export default function Home({ profile }: { profile: Profile }) {
   const clientMessageSeqRef = useRef(0);
   const deviceIdRef = useRef('');
   const deviceCreatedAtMsRef = useRef(0);
+  const wsAuthProbeInFlightRef = useRef<Promise<boolean> | null>(null);
+
+  const isAuthErrorResponse = useCallback((status: number, data: any) => {
+    if (status === 401 || status === 403) return true;
+    const message = String(data?.message || data?.error || '').toLowerCase();
+    if (!message) return false;
+    return (
+      message.includes('token') ||
+      message.includes('unauthor') ||
+      message.includes('forbidden') ||
+      message.includes('登录令牌') ||
+      message.includes('令牌')
+    );
+  }, []);
+
+  const handleAuthExpired = useCallback(async () => {
+    if (authExpiredRef.current) return;
+    authExpiredRef.current = true;
+    tokenRef.current = '';
+    setTokenReady(false);
+    setLoadingFriends(false);
+    if (homeRefreshTimerRef.current) {
+      clearTimeout(homeRefreshTimerRef.current);
+      homeRefreshTimerRef.current = null;
+    }
+    if (reconnectTimerRef.current) {
+      clearTimeout(reconnectTimerRef.current);
+      reconnectTimerRef.current = null;
+    }
+    if (heartbeatTimerRef.current) {
+      clearInterval(heartbeatTimerRef.current);
+      heartbeatTimerRef.current = null;
+    }
+    if (wsRef.current) {
+      manualWsCloseRef.current = true;
+      try {
+        wsRef.current.close();
+      } catch {}
+      wsRef.current = null;
+    }
+    await Promise.all([
+      storage.remove(STORAGE_KEYS.token),
+      storage.remove(STORAGE_KEYS.profile),
+    ]).catch(() => undefined);
+    try {
+      onAuthExpired?.();
+    } catch {}
+  }, [onAuthExpired]);
+
+  const handleAuthFailure = useCallback(
+    async (response: { status?: number } | null | undefined, data: any) => {
+      const status = Number(response?.status || 0);
+      if (!isAuthErrorResponse(status, data)) return false;
+      await handleAuthExpired();
+      return true;
+    },
+    [handleAuthExpired, isAuthErrorResponse]
+  );
+
+  const syncTokenRefWithStorage = useCallback(async () => {
+    const storedToken = String((await storage.getString(STORAGE_KEYS.token)) || '').trim();
+    if (storedToken !== tokenRef.current) {
+      tokenRef.current = storedToken;
+      if (storedToken) {
+        authExpiredRef.current = false;
+      }
+    }
+    return storedToken;
+  }, []);
+
+  const validateWsSessionAfterHandshakeFailure = useCallback(async () => {
+    if (authExpiredRef.current) return false;
+    if (wsAuthProbeInFlightRef.current) {
+      return wsAuthProbeInFlightRef.current;
+    }
+    wsAuthProbeInFlightRef.current = (async () => {
+      const latestToken = await syncTokenRefWithStorage();
+      if (!latestToken) {
+        await handleAuthExpired();
+        return false;
+      }
+      try {
+        const response = await fetch(`${API_BASE}/api/profile`, {
+          headers: { Authorization: `Bearer ${latestToken}` },
+        });
+        if (response.status === 401 || response.status === 403) {
+          await handleAuthExpired();
+          return false;
+        }
+      } catch {
+        // Network jitter should not force logout; keep reconnecting.
+      }
+      return true;
+    })();
+    try {
+      return await wsAuthProbeInFlightRef.current;
+    } finally {
+      wsAuthProbeInFlightRef.current = null;
+    }
+  }, [handleAuthExpired, syncTokenRefWithStorage]);
 
   useEffect(
     () => () => {
@@ -1511,14 +1671,18 @@ export default function Home({ profile }: { profile: Profile }) {
       );
       let shouldPersistDeviceId = false;
       let shouldPersistCreatedAt = false;
+      const cachedCreatedAtMs = await inferDeviceCreatedAtMsFromLocalCache();
       if (!deviceId) {
         deviceId = createChatDeviceId();
-        createdAtMs = Date.now();
+        createdAtMs = cachedCreatedAtMs || Date.now();
         shouldPersistDeviceId = true;
         shouldPersistCreatedAt = true;
       }
       if (!createdAtMs) {
-        createdAtMs = extractDeviceCreatedAtMsFromId(deviceId) || Date.now();
+        createdAtMs =
+          extractDeviceCreatedAtMsFromId(deviceId) ||
+          cachedCreatedAtMs ||
+          Date.now();
         shouldPersistCreatedAt = true;
       }
       if (shouldPersistDeviceId) {
@@ -1774,11 +1938,11 @@ export default function Home({ profile }: { profile: Profile }) {
 
   useEffect(() => {
     const loadToken = async () => {
-      tokenRef.current = (await storage.getString(STORAGE_KEYS.token)) || '';
+      await syncTokenRefWithStorage();
       setTokenReady(true);
     };
     loadToken().catch(() => undefined);
-  }, []);
+  }, [syncTokenRefWithStorage]);
 
   useEffect(() => {
     const sub = AppState.addEventListener('change', (nextState) => {
@@ -1800,6 +1964,9 @@ export default function Home({ profile }: { profile: Profile }) {
           headers: { Authorization: `Bearer ${tokenRef.current}` },
         });
         const data = await response.json().catch(() => ({}));
+        if (await handleAuthFailure(response, data)) {
+          return;
+        }
         if (response.ok && data?.success && data?.user) {
           setProfileData((prev) => ({ ...prev, ...data.user }));
           await storage.setJson(STORAGE_KEYS.profile, {
@@ -1821,7 +1988,7 @@ export default function Home({ profile }: { profile: Profile }) {
       }
     };
     loadProfile().catch(() => undefined);
-  }, [tokenReady]);
+  }, [handleAuthFailure, tokenReady]);
 
   useEffect(() => {
     const loadReadAt = async () => {
@@ -2216,7 +2383,7 @@ export default function Home({ profile }: { profile: Profile }) {
       await Promise.all([
         storage.getJson<Friend[]>(STORAGE_KEYS.homeFriendsCache),
         storage.getJson<Group[]>(STORAGE_KEYS.homeGroupsCache),
-        storage.getJson<BucketMap>(STORAGE_KEYS.homeMessagesCache),
+        loadHomeMessageBuckets(),
         storage.getJson<LatestMap>(STORAGE_KEYS.homeLatestCache),
         storage.getJson<Record<number, number>>(STORAGE_KEYS.homeUnreadCache),
         storage.getJson<number>(STORAGE_KEYS.homePendingRequestsCache),
@@ -2935,12 +3102,13 @@ export default function Home({ profile }: { profile: Profile }) {
         headers: { ...authHeaders() },
       });
       const data = await response.json().catch(() => ({}));
+      if (await handleAuthFailure(response, data)) return;
       if (!response.ok || !data?.success) return;
       const incoming = Array.isArray(data?.incoming) ? data.incoming : [];
       const pending = incoming.filter((entry: any) => String(entry?.status || 'pending') === 'pending');
       setPendingRequestCount(Math.max(0, pending.length));
     } catch {}
-  }, [authHeaders]);
+  }, [authHeaders, handleAuthFailure]);
 
   const loadGroups = useCallback(async () => {
     if (!tokenRef.current) return;
@@ -2949,6 +3117,9 @@ export default function Home({ profile }: { profile: Profile }) {
         headers: { ...authHeaders() },
       });
       const data = await response.json().catch(() => ({}));
+      if (await handleAuthFailure(response, data)) {
+        return;
+      }
       if (!response.ok || !data?.success || !Array.isArray(data?.groups)) {
         return;
       }
@@ -2960,7 +3131,7 @@ export default function Home({ profile }: { profile: Profile }) {
         ensureMessageBucket(chatUid);
       });
     } catch {}
-  }, [authHeaders, ensureMessageBucket]);
+  }, [authHeaders, ensureMessageBucket, handleAuthFailure]);
 
   const loadOverview = useCallback(async () => {
     if (!tokenRef.current) return;
@@ -3002,6 +3173,9 @@ export default function Home({ profile }: { profile: Profile }) {
         body: JSON.stringify({ readAt: serverReadAt, deleteCutoffs }),
       });
       const data = await response.json().catch(() => ({}));
+      if (await handleAuthFailure(response, data)) {
+        return;
+      }
       if (!response.ok || !data?.success || !Array.isArray(data?.data)) {
         return;
       }
@@ -3048,6 +3222,7 @@ export default function Home({ profile }: { profile: Profile }) {
     getDeleteCutoff,
     normalizeMessage,
     unhideChat,
+    handleAuthFailure,
   ]);
 
   const loadFriends = useCallback(async ({ silent = true }: { silent?: boolean } = {}) => {
@@ -3060,6 +3235,9 @@ export default function Home({ profile }: { profile: Profile }) {
         headers: { ...authHeaders() },
       });
       const data = await response.json().catch(() => ({}));
+      if (await handleAuthFailure(response, data)) {
+        return;
+      }
       if (response.ok && data?.success && Array.isArray(data?.friends)) {
         const nextFriends = sanitizeFriends(data.friends);
         setFriends(nextFriends);
@@ -3071,10 +3249,12 @@ export default function Home({ profile }: { profile: Profile }) {
         await Promise.all([loadOverview(), loadPendingRequestCount(), loadGroups()]);
       }
     } catch {}
-    if (!silent) {
-      setLoadingFriends(false);
+    finally {
+      if (!silent) {
+        setLoadingFriends(false);
+      }
     }
-  }, [authHeaders, ensureMessageBucket, loadGroups, loadOverview, loadPendingRequestCount]);
+  }, [authHeaders, ensureMessageBucket, handleAuthFailure, loadGroups, loadOverview, loadPendingRequestCount]);
 
   const loadHistory = useCallback(
     async (uid: number, { beforeId }: { beforeId?: number | string } = {}) => {
@@ -3097,6 +3277,9 @@ export default function Home({ profile }: { profile: Profile }) {
           headers: { ...authHeaders() },
         });
         const data = await response.json().catch(() => ({}));
+        if (await handleAuthFailure(response, data)) {
+          return;
+        }
         if (response.ok && data?.success && Array.isArray(data?.data)) {
           const deleteCutoff = getDeleteCutoff(uid);
           const hasNewerThanDeleteCutoff =
@@ -3115,9 +3298,11 @@ export default function Home({ profile }: { profile: Profile }) {
           }
         }
       } catch {}
-      setHistoryLoading((prev) => ({ ...prev, [uid]: false }));
+      finally {
+        setHistoryLoading((prev) => ({ ...prev, [uid]: false }));
+      }
     },
-    [authHeaders, ensureMessageBucket, getDeleteCutoff, historyLoading, insertMessages]
+    [authHeaders, ensureMessageBucket, getDeleteCutoff, handleAuthFailure, historyLoading, insertMessages]
   );
 
 
@@ -5488,6 +5673,7 @@ export default function Home({ profile }: { profile: Profile }) {
   );
 
   const scheduleReconnect = useCallback(() => {
+    if (authExpiredRef.current) return;
     if (reconnectTimerRef.current) return;
     const delay = Math.min(
       RECONNECT_BASE_MS * (1 + reconnectAttemptsRef.current),
@@ -5500,8 +5686,15 @@ export default function Home({ profile }: { profile: Profile }) {
     }, delay);
   }, []);
 
-  const connectWs = useCallback(() => {
-    if (!tokenRef.current) return;
+  const connectWs = useCallback(async () => {
+    const previousToken = String(tokenRef.current || '').trim();
+    const latestToken = await syncTokenRefWithStorage();
+    if (!latestToken) {
+      if (previousToken) {
+        await handleAuthExpired();
+      }
+      return;
+    }
     if (
       wsRef.current &&
       (wsRef.current.readyState === WebSocket.OPEN ||
@@ -5512,13 +5705,16 @@ export default function Home({ profile }: { profile: Profile }) {
     const wsUrl = buildWsUrl();
     if (!wsUrl) return;
     try {
+      manualWsCloseRef.current = false;
       wsRef.current = new WebSocket(wsUrl);
     } catch {
       scheduleReconnect();
       return;
     }
 
+    let opened = false;
     wsRef.current.onopen = () => {
+      opened = true;
       reconnectAttemptsRef.current = 0;
       startHeartbeat();
     };
@@ -5528,19 +5724,58 @@ export default function Home({ profile }: { profile: Profile }) {
         handleWsMessage(payload);
       } catch {}
     };
-    wsRef.current.onclose = () => {
+    wsRef.current.onclose = (event) => {
       stopHeartbeat();
+      wsRef.current = null;
+      if (manualWsCloseRef.current) {
+        manualWsCloseRef.current = false;
+        return;
+      }
+      const code = Number(event?.code || 0);
+      if (code === 4001 || code === 1008) {
+        handleAuthExpired().catch(() => undefined);
+        return;
+      }
+      if (!opened) {
+        validateWsSessionAfterHandshakeFailure()
+          .then((valid) => {
+            if (!valid) return;
+            scheduleReconnect();
+          })
+          .catch(() => undefined);
+        return;
+      }
       scheduleReconnect();
     };
     wsRef.current.onerror = () => {
       stopHeartbeat();
-      scheduleReconnect();
     };
-  }, [buildWsUrl, handleWsMessage, scheduleReconnect, startHeartbeat, stopHeartbeat]);
+  }, [
+    buildWsUrl,
+    handleAuthExpired,
+    handleWsMessage,
+    scheduleReconnect,
+    startHeartbeat,
+    stopHeartbeat,
+    syncTokenRefWithStorage,
+    validateWsSessionAfterHandshakeFailure,
+  ]);
 
   useEffect(() => {
     connectWsRef.current = connectWs;
   }, [connectWs]);
+
+  useEffect(() => {
+    hydrateHomeCacheRef.current = hydrateHomeCache;
+  }, [hydrateHomeCache]);
+
+  useEffect(() => {
+    loadFriendsRef.current = loadFriends;
+  }, [loadFriends]);
+
+  useEffect(() => {
+    loadGroupsRef.current = loadGroups;
+  }, [loadGroups]);
 
   useEffect(() => {
     if (!homeCacheHydratedRef.current) return;
@@ -5552,7 +5787,7 @@ export default function Home({ profile }: { profile: Profile }) {
       cacheWriteTimerRef.current = null;
       storage.setJson(STORAGE_KEYS.homeFriendsCache, friends).catch(() => undefined);
       storage.setJson(STORAGE_KEYS.homeGroupsCache, groups).catch(() => undefined);
-      storage.setJson(STORAGE_KEYS.homeMessagesCache, messagesByUid).catch(() => undefined);
+      saveHomeMessageBuckets(messagesByUid).catch(() => undefined);
       storage.setJson(STORAGE_KEYS.homeLatestCache, latestMap).catch(() => undefined);
       storage.setJson(STORAGE_KEYS.homeUnreadCache, unreadMap).catch(() => undefined);
       storage.setJson(STORAGE_KEYS.homePendingRequestsCache, pendingRequestCount).catch(() => undefined);
@@ -5570,6 +5805,7 @@ export default function Home({ profile }: { profile: Profile }) {
       reconnectTimerRef.current = null;
     }
     if (wsRef.current) {
+      manualWsCloseRef.current = true;
       try {
         wsRef.current.close();
       } catch {}
@@ -5578,20 +5814,27 @@ export default function Home({ profile }: { profile: Profile }) {
   }, [stopHeartbeat]);
 
   useEffect(() => {
+    teardownWsRef.current = teardownWs;
+  }, [teardownWs]);
+
+  useEffect(() => {
     if (!tokenReady || !tokenRef.current || !deviceReady) return;
     let cancelled = false;
     const bootstrapHome = async () => {
       setLoadingFriends(true);
-      const hasCache = await hydrateHomeCache().catch(() => {
+      const hasCache = await hydrateHomeCacheRef.current().catch(() => {
         homeCacheHydratedRef.current = true;
         return false;
       });
       if (cancelled) return;
       setLoadingFriends(!hasCache);
-      connectWs();
+      connectWsRef.current();
       homeRefreshTimerRef.current = setTimeout(() => {
         if (cancelled) return;
-        Promise.all([loadFriends({ silent: hasCache }), loadGroups()]).catch(() => undefined);
+        Promise.all([
+          loadFriendsRef.current({ silent: hasCache }),
+          loadGroupsRef.current(),
+        ]).catch(() => undefined);
       }, HOME_REFRESH_DELAY_MS);
     };
     bootstrapHome().catch(() => undefined);
@@ -5601,9 +5844,9 @@ export default function Home({ profile }: { profile: Profile }) {
         clearTimeout(cacheWriteTimerRef.current);
         cacheWriteTimerRef.current = null;
       }
-      teardownWs();
+      teardownWsRef.current();
     };
-  }, [connectWs, deviceReady, hydrateHomeCache, loadFriends, loadGroups, teardownWs, tokenReady]);
+  }, [deviceReady, tokenReady]);
 
   const messageItems = useMemo<MessageListItem[]>(() => {
     const privateItems: MessageListItem[] = friends
