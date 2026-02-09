@@ -1,258 +1,373 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="zh-CN">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>后端管理系统</title>
+    <title>XinChat Admin Console</title>
+    <link
+      rel="stylesheet"
+      href="https://cdn.jsdelivr.net/npm/@tabler/core@1.0.0-beta20/dist/css/tabler.min.css"
+    />
     <style>
       :root {
-        --ink: #1f2a44;
-        --muted: #53607a;
-        --paper: #f4f0ea;
-        --card: #ffffff;
-        --accent: #d1495b;
-        --accent-2: #1b998b;
-        --line: rgba(31, 42, 68, 0.12);
-      }
-      * {
-        box-sizing: border-box;
+        --xin-bg: linear-gradient(120deg, #f6f9ff 0%, #eef4ff 45%, #edf7f3 100%);
       }
       body {
-        font-family: "DM Sans", "Segoe UI", sans-serif;
-        background: radial-gradient(circle at top left, #fff2d6, #f4f0ea);
-        color: var(--ink);
-        margin: 0;
-        padding: 32px;
+        background: var(--xin-bg);
       }
-      .layout {
-        max-width: 1200px;
-        margin: 0 auto;
-        display: grid;
-        gap: 24px;
+      .metric-value {
+        font-size: 1.45rem;
+        font-weight: 700;
+        line-height: 1.2;
       }
-      header {
-        background: var(--card);
-        border-radius: 20px;
-        padding: 28px 32px;
-        box-shadow: 0 14px 30px rgba(31, 42, 68, 0.08);
-        border: 1px solid var(--line);
+      .mono {
+        font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono',
+          'Courier New', monospace;
       }
-      h1 {
-        font-size: 30px;
-        margin: 0 0 8px;
+      .chart-wrap {
+        position: relative;
+        min-height: 240px;
       }
-      p {
-        line-height: 1.6;
-        margin: 0 0 12px;
-        color: var(--muted);
+      .route-list {
+        max-height: 24rem;
+        overflow: auto;
       }
-      .tag {
-        display: inline-block;
-        padding: 6px 14px;
-        border-radius: 999px;
-        background: #f8d7dc;
-        color: var(--accent);
-        font-size: 12px;
-        font-weight: 600;
-        letter-spacing: 0.02em;
-        margin-right: 8px;
-      }
-      .grid {
-        display: grid;
-        gap: 24px;
-        grid-template-columns: minmax(260px, 320px) minmax(0, 1fr);
-      }
-      .card {
-        background: var(--card);
-        border-radius: 18px;
-        padding: 22px 24px;
-        box-shadow: 0 12px 24px rgba(31, 42, 68, 0.06);
-        border: 1px solid var(--line);
-      }
-      .card h2 {
-        font-size: 18px;
-        margin: 0 0 12px;
-      }
-      ul {
-        list-style: none;
-        padding: 0;
-        margin: 0;
-        display: grid;
-        gap: 10px;
-      }
-      li {
-        display: flex;
-        align-items: center;
-        justify-content: space-between;
-        padding: 8px 10px;
-        border-radius: 12px;
-        background: #f7f7fb;
-        border: 1px solid var(--line);
-        font-size: 13px;
+      .route-item {
         cursor: pointer;
-        transition: transform 0.15s ease, box-shadow 0.15s ease;
       }
-      li:hover {
-        transform: translateY(-1px);
-        box-shadow: 0 8px 16px rgba(31, 42, 68, 0.08);
+      .response-box {
+        min-height: 12rem;
+        white-space: pre-wrap;
+        background: #0f172a;
+        color: #e2e8f0;
+        border-radius: 0.5rem;
+        padding: 0.75rem;
       }
-      li.active {
-        border-color: var(--accent);
-        background: #fff0f2;
-      }
-      code {
-        font-family: "JetBrains Mono", "Fira Code", monospace;
-        font-size: 12px;
-        color: #0f172a;
+      .table-fix {
+        max-height: 520px;
+        overflow: auto;
       }
       .pill {
-        display: inline-flex;
-        align-items: center;
-        justify-content: center;
-        padding: 2px 8px;
         border-radius: 999px;
-        background: #e6f4f1;
-        color: var(--accent-2);
-        font-size: 11px;
-        font-weight: 700;
+        padding: 0.15rem 0.5rem;
+        font-size: 0.75rem;
       }
-      .tester {
-        display: grid;
-        gap: 14px;
+      .pill-active {
+        background: #d3f9d8;
+        color: #2b8a3e;
       }
-      .template-row {
-        display: grid;
-        grid-template-columns: 140px 1fr;
-        gap: 12px;
+      .pill-blocked {
+        background: #ffe3e3;
+        color: #c92a2a;
       }
-      label {
-        font-size: 12px;
-        font-weight: 600;
-        color: var(--muted);
+      .pill-deleted {
+        background: #e9ecef;
+        color: #495057;
       }
-      input,
-      select,
-      textarea,
-      button {
-        width: 100%;
-        border-radius: 12px;
-        border: 1px solid var(--line);
-        padding: 10px 12px;
-        font-size: 13px;
-        font-family: "DM Sans", "Segoe UI", sans-serif;
-      }
-      textarea {
-        min-height: 120px;
-        resize: vertical;
-        font-family: "JetBrains Mono", monospace;
-      }
-      button {
-        background: var(--accent);
-        color: #fff;
-        font-weight: 600;
-        cursor: pointer;
-        border: none;
-      }
-      button:hover {
-        opacity: 0.9;
-      }
-      .response {
-        background: #0f172a;
-        color: #f8fafc;
-        border-radius: 12px;
-        padding: 12px;
-        font-size: 12px;
-        min-height: 120px;
-        white-space: pre-wrap;
-        font-family: "JetBrains Mono", monospace;
-      }
-      .note {
-        font-size: 12px;
-        color: var(--muted);
-      }
-      .split {
-        display: grid;
-        gap: 18px;
-      }
-      .split > div {
-        display: grid;
-        gap: 12px;
-      }
-      @media (max-width: 920px) {
-        .grid {
-          grid-template-columns: 1fr;
+      @media (max-width: 767.98px) {
+        .metric-value {
+          font-size: 1.2rem;
+        }
+        .chart-wrap {
+          min-height: 200px;
         }
       }
     </style>
   </head>
   <body>
-    <div class="layout">
-      <header>
-        <span class="tag">Backend Admin</span>
-        <span class="tag">/admin</span>
-        <h1>后端管理系统</h1>
-        <p>列出可用路径，并在本页直接发起请求进行图形化测试。</p>
+    <div class="page">
+      <header class="navbar navbar-expand-md navbar-light d-print-none">
+        <div class="container-xl">
+          <h1 class="navbar-brand mb-0">XinChat Admin Console</h1>
+          <div class="ms-auto d-flex gap-2">
+            <button id="refreshAllBtn" class="btn btn-primary">立即刷新</button>
+            <span id="globalStatus" class="text-muted small align-self-center">等待加载...</span>
+          </div>
+        </div>
       </header>
 
-      <section class="grid">
-        <div class="card">
-          <h2>可用路径</h2>
-          <ul id="routeList"></ul>
-        </div>
-
-        <div class="card">
-          <h2 id="panelTitle">接口测试</h2>
-          <div class="split">
-            <div>
-              <div>
-                <label for="template">常用模板</label>
-                <select id="template"></select>
-              </div>
-              <div class="tester">
-                <div>
-                  <label for="method">方法</label>
-                  <input id="method" readonly />
+      <div class="page-wrapper">
+        <div class="page-body">
+          <div class="container-xl">
+            <div class="card mb-3">
+              <div class="card-body">
+                <div class="row g-3 align-items-end">
+                  <div class="col-md-4">
+                    <label class="form-label">Admin Token</label>
+                    <input id="adminToken" class="form-control mono" placeholder="可留空（开发环境）" />
+                  </div>
+                  <div class="col-md-4">
+                    <label class="form-label">Bearer Token（API Lab）</label>
+                    <input id="authToken" class="form-control mono" placeholder="仅 API 调试使用" />
+                  </div>
+                  <div class="col-md-4">
+                    <label class="form-label">自动刷新间隔（秒）</label>
+                    <div class="input-group">
+                      <input id="refreshSeconds" type="number" min="3" max="120" value="10" class="form-control mono" />
+                      <button id="applyRefreshBtn" class="btn btn-outline-secondary">应用</button>
+                    </div>
+                  </div>
                 </div>
-                <div>
-                  <label for="path">路径</label>
-                  <input id="path" />
-                </div>
-                <div>
-                  <label for="payload">JSON Body</label>
-                  <textarea id="payload"></textarea>
-                </div>
-                <button id="sendBtn" class="btn btn-primary">发送请求</button>
-                <div>
-                  <label>响应</label>
-                  <div class="response" id="response">等待请求...</div>
-                </div>
-                <div class="note" id="hint"></div>
               </div>
             </div>
-            <div>
-              <h2>右侧说明</h2>
-              <div class="note" id="endpointNote">
-                请选择左侧路径以查看接口说明与请求模板。
-              </div>
+
+            <ul class="nav nav-tabs" id="mainTabs" role="tablist">
+              <li class="nav-item" role="presentation">
+                <button class="nav-link active" data-bs-toggle="tab" data-bs-target="#tab-overview" type="button" role="tab">概览</button>
+              </li>
+              <li class="nav-item" role="presentation">
+                <button class="nav-link" data-bs-toggle="tab" data-bs-target="#tab-users" type="button" role="tab">用户管理</button>
+              </li>
+              <li class="nav-item" role="presentation">
+                <button class="nav-link" data-bs-toggle="tab" data-bs-target="#tab-products" type="button" role="tab">产品管理</button>
+              </li>
+              <li class="nav-item" role="presentation">
+                <button class="nav-link" data-bs-toggle="tab" data-bs-target="#tab-api" type="button" role="tab">API Lab</button>
+              </li>
+            </ul>
+
+            <div class="tab-content pt-3">
+              <section class="tab-pane fade show active" id="tab-overview" role="tabpanel">
+                <div class="row row-deck row-cards">
+                  <div class="col-sm-6 col-lg-2">
+                    <div class="card"><div class="card-body"><div class="text-secondary mb-1">运行时长</div><div id="mUptime" class="metric-value">-</div></div></div>
+                  </div>
+                  <div class="col-sm-6 col-lg-2">
+                    <div class="card"><div class="card-body"><div class="text-secondary mb-1">WS 连接</div><div id="mWsSockets" class="metric-value">-</div></div></div>
+                  </div>
+                  <div class="col-sm-6 col-lg-2">
+                    <div class="card"><div class="card-body"><div class="text-secondary mb-1">在线用户</div><div id="mWsUsers" class="metric-value">-</div></div></div>
+                  </div>
+                  <div class="col-sm-6 col-lg-2">
+                    <div class="card"><div class="card-body"><div class="text-secondary mb-1">堆使用率</div><div id="mHeapRatio" class="metric-value">-</div></div></div>
+                  </div>
+                  <div class="col-sm-6 col-lg-2">
+                    <div class="card"><div class="card-body"><div class="text-secondary mb-1">用户总数</div><div id="mUsersTotal" class="metric-value">-</div></div></div>
+                  </div>
+                  <div class="col-sm-6 col-lg-2">
+                    <div class="card"><div class="card-body"><div class="text-secondary mb-1">产品总数</div><div id="mProductsTotal" class="metric-value">-</div></div></div>
+                  </div>
+                </div>
+
+                <div class="row row-cards mt-1">
+                  <div class="col-lg-6">
+                    <div class="card">
+                      <div class="card-header"><h3 class="card-title">连接趋势</h3></div>
+                      <div class="card-body chart-wrap"><canvas id="runtimeChart"></canvas></div>
+                    </div>
+                  </div>
+                  <div class="col-lg-6">
+                    <div class="card">
+                      <div class="card-header"><h3 class="card-title">内存趋势（MB）</h3></div>
+                      <div class="card-body chart-wrap"><canvas id="memoryChart"></canvas></div>
+                    </div>
+                  </div>
+                </div>
+
+                <div class="row row-cards mt-1">
+                  <div class="col-lg-6">
+                    <div class="card">
+                      <div class="card-header"><h3 class="card-title">慢接口 Top 10（Avg ms）</h3></div>
+                      <div class="card-body chart-wrap"><canvas id="slowChart"></canvas></div>
+                    </div>
+                  </div>
+                  <div class="col-lg-6">
+                    <div class="card">
+                      <div class="card-header"><h3 class="card-title">5xx 热点 Top 10</h3></div>
+                      <div class="card-body chart-wrap"><canvas id="errorChart"></canvas></div>
+                    </div>
+                  </div>
+                </div>
+
+                <div class="row row-cards mt-1">
+                  <div class="col-lg-6">
+                    <div class="card">
+                      <div class="card-header"><h3 class="card-title">用户状态分布</h3></div>
+                      <div class="card-body chart-wrap"><canvas id="usersPieChart"></canvas></div>
+                    </div>
+                  </div>
+                  <div class="col-lg-6">
+                    <div class="card">
+                      <div class="card-header"><h3 class="card-title">产品状态分布</h3></div>
+                      <div class="card-body chart-wrap"><canvas id="productsPieChart"></canvas></div>
+                    </div>
+                  </div>
+                </div>
+
+                <div class="row row-cards mt-1">
+                  <div class="col-lg-6">
+                    <div class="card">
+                      <div class="card-header"><h3 class="card-title">瓶颈建议</h3></div>
+                      <div class="card-body"><ul id="recommendationList" class="mb-0"></ul></div>
+                    </div>
+                  </div>
+                  <div class="col-lg-6">
+                    <div class="card">
+                      <div class="card-header"><h3 class="card-title">关键计数器 Top 12</h3></div>
+                      <div class="table-responsive table-fix">
+                        <table class="table table-vcenter card-table"><thead><tr><th>指标</th><th class="text-end">值</th></tr></thead><tbody id="counterTbody"></tbody></table>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </section>
+
+              <section class="tab-pane fade" id="tab-users" role="tabpanel">
+                <div class="card mb-3">
+                  <div class="card-body">
+                    <div class="row g-2 align-items-end">
+                      <div class="col-md-4"><label class="form-label">搜索</label><input id="usersQuery" class="form-control" placeholder="UID / username / nickname / domain" /></div>
+                      <div class="col-md-2"><label class="form-label">状态</label><select id="usersStatus" class="form-select"><option value="all">全部</option><option value="active">active</option><option value="blocked">blocked</option><option value="deleted">deleted</option></select></div>
+                      <div class="col-md-2"><label class="form-label">每页</label><select id="usersPageSize" class="form-select"><option>20</option><option>50</option><option>100</option></select></div>
+                      <div class="col-md-4 d-flex gap-2"><button id="usersSearchBtn" class="btn btn-primary">查询</button><button id="usersReloadBtn" class="btn btn-outline-secondary">刷新</button><span id="usersStatusText" class="text-muted small align-self-center"></span></div>
+                    </div>
+                  </div>
+                </div>
+
+                <div class="row row-cards">
+                  <div class="col-lg-8">
+                    <div class="card">
+                      <div class="table-responsive table-fix">
+                        <table class="table table-vcenter card-table" id="usersTable">
+                          <thead><tr><th>UID</th><th>账号</th><th>昵称</th><th>状态</th><th>在线</th><th>令牌</th><th>好友</th><th>最后登录</th><th>操作</th></tr></thead>
+                          <tbody id="usersTbody"></tbody>
+                        </table>
+                      </div>
+                    </div>
+                  </div>
+                  <div class="col-lg-4">
+                    <div class="card mb-3">
+                      <div class="card-header"><h3 class="card-title">用户编辑</h3></div>
+                      <div class="card-body">
+                        <div class="mb-2"><label class="form-label">UID</label><input id="editUid" class="form-control mono" readonly /></div>
+                        <div class="mb-2"><label class="form-label">昵称</label><input id="editNickname" class="form-control" maxlength="36" /></div>
+                        <div class="mb-2"><label class="form-label">签名</label><input id="editSignature" class="form-control" maxlength="80" /></div>
+                        <div class="mb-2"><label class="form-label">域名</label><input id="editDomain" class="form-control" maxlength="253" /></div>
+                        <div class="mb-2"><label class="form-label">状态</label><select id="editStatus" class="form-select"><option value="active">active</option><option value="blocked">blocked</option><option value="deleted">deleted</option></select></div>
+                        <div class="d-flex gap-2 mt-3"><button id="saveUserBtn" class="btn btn-primary">保存</button><button id="revokeUserBtn" class="btn btn-outline-danger">注销全部会话</button></div>
+                      </div>
+                    </div>
+                    <div class="card">
+                      <div class="card-header"><h3 class="card-title">用户详情</h3></div>
+                      <div class="card-body"><pre id="userDetailBox" class="response-box mono">请选择用户...</pre></div>
+                    </div>
+                  </div>
+                </div>
+              </section>
+              <section class="tab-pane fade" id="tab-products" role="tabpanel">
+                <div class="card mb-3">
+                  <div class="card-body">
+                    <div class="row g-2 align-items-end">
+                      <div class="col-md-4"><label class="form-label">搜索</label><input id="productsQuery" class="form-control" placeholder="ID / name / sku / category" /></div>
+                      <div class="col-md-2"><label class="form-label">状态</label><select id="productsStatus" class="form-select"><option value="all">全部</option><option value="active">active</option><option value="inactive">inactive</option><option value="draft">draft</option><option value="archived">archived</option></select></div>
+                      <div class="col-md-2"><label class="form-label">每页</label><select id="productsPageSize" class="form-select"><option>20</option><option>50</option><option>100</option></select></div>
+                      <div class="col-md-4 d-flex gap-2"><button id="productsSearchBtn" class="btn btn-primary">查询</button><button id="productsReloadBtn" class="btn btn-outline-secondary">刷新</button><span id="productsStatusText" class="text-muted small align-self-center"></span></div>
+                    </div>
+                  </div>
+                </div>
+
+                <div class="row row-cards">
+                  <div class="col-lg-8">
+                    <div class="card">
+                      <div class="table-responsive table-fix">
+                        <table class="table table-vcenter card-table">
+                          <thead><tr><th>ID</th><th>名称</th><th>SKU</th><th>状态</th><th class="text-end">价格</th><th class="text-end">库存</th><th class="text-end">销量</th><th>更新时间</th><th>操作</th></tr></thead>
+                          <tbody id="productsTbody"></tbody>
+                        </table>
+                      </div>
+                    </div>
+                  </div>
+                  <div class="col-lg-4">
+                    <div class="card">
+                      <div class="card-header"><h3 class="card-title">产品编辑 / 新建</h3></div>
+                      <div class="card-body">
+                        <div class="mb-2"><label class="form-label">ID（新建留空）</label><input id="pId" class="form-control mono" /></div>
+                        <div class="mb-2"><label class="form-label">名称</label><input id="pName" class="form-control" /></div>
+                        <div class="mb-2"><label class="form-label">SKU</label><input id="pSku" class="form-control" /></div>
+                        <div class="mb-2"><label class="form-label">分类</label><input id="pCategory" class="form-control" /></div>
+                        <div class="mb-2"><label class="form-label">状态</label><select id="pStatus" class="form-select"><option value="active">active</option><option value="inactive">inactive</option><option value="draft">draft</option><option value="archived">archived</option></select></div>
+                        <div class="row g-2">
+                          <div class="col-6"><label class="form-label">价格</label><input id="pPrice" class="form-control mono" value="0" /></div>
+                          <div class="col-6"><label class="form-label">成本</label><input id="pCost" class="form-control mono" value="0" /></div>
+                          <div class="col-6"><label class="form-label">库存</label><input id="pStock" class="form-control mono" value="0" /></div>
+                          <div class="col-6"><label class="form-label">销量</label><input id="pSales" class="form-control mono" value="0" /></div>
+                        </div>
+                        <div class="mb-2 mt-2"><label class="form-label">标签（逗号分隔）</label><input id="pTags" class="form-control" /></div>
+                        <div class="mb-2"><label class="form-label">描述</label><textarea id="pDesc" rows="3" class="form-control"></textarea></div>
+                        <div class="d-flex gap-2"><button id="saveProductBtn" class="btn btn-primary">保存</button><button id="createProductBtn" class="btn btn-outline-success">新建</button><button id="clearProductBtn" class="btn btn-outline-secondary">清空</button></div>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </section>
+
+              <section class="tab-pane fade" id="tab-api" role="tabpanel">
+                <div class="row row-cards">
+                  <div class="col-lg-5">
+                    <div class="card">
+                      <div class="card-header"><h3 class="card-title">接口列表</h3></div>
+                      <div class="card-body">
+                        <div id="routeList" class="list-group route-list"></div>
+                      </div>
+                    </div>
+                  </div>
+                  <div class="col-lg-7">
+                    <div class="card">
+                      <div class="card-header"><h3 class="card-title">请求构造</h3></div>
+                      <div class="card-body">
+                        <div class="row g-2 mb-2">
+                          <div class="col-4"><label class="form-label">Method</label><input id="httpMethod" class="form-control mono" readonly /></div>
+                          <div class="col-8"><label class="form-label">Path</label><input id="httpPath" class="form-control mono" /></div>
+                        </div>
+                        <div class="mb-2"><label class="form-label">模板</label><select id="templateSelect" class="form-select"></select></div>
+                        <div class="mb-2"><label class="form-label">JSON Body</label><textarea id="httpPayload" class="form-control mono" rows="8"></textarea></div>
+                        <div class="d-flex gap-2 mb-2"><button id="sendRequestBtn" class="btn btn-primary">发送请求</button><button id="clearResponseBtn" class="btn btn-outline-secondary">清空响应</button></div>
+                        <div id="routeHint" class="text-muted small mb-2">-</div>
+                        <div id="httpResponse" class="response-box mono">等待请求...</div>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </section>
             </div>
           </div>
         </div>
-      </section>
+      </div>
     </div>
 
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.6/dist/chart.umd.min.js"></script>
     <script>
-      const routeListEl = document.getElementById('routeList');
-      const templateEl = document.getElementById('template');
-      const methodEl = document.getElementById('method');
-      const pathEl = document.getElementById('path');
-      const payloadEl = document.getElementById('payload');
-      const responseEl = document.getElementById('response');
-      const sendBtn = document.getElementById('sendBtn');
-      const panelTitleEl = document.getElementById('panelTitle');
-      const endpointNoteEl = document.getElementById('endpointNote');
-      const hintEl = document.getElementById('hint');
+      const MAX_HISTORY_POINTS = 42;
+      const state = {
+        refreshMs: 10000,
+        timer: null,
+        routes: [],
+        selectedRouteId: '',
+        users: [],
+        selectedUser: null,
+        products: [],
+      };
 
-      let routes = [];
+      const charts = {
+        runtime: null,
+        memory: null,
+        slow: null,
+        error: null,
+        usersPie: null,
+        productsPie: null,
+      };
+
+      const historyState = [];
+
+      const el = {
+        globalStatus: document.getElementById('globalStatus'),
+        refreshAllBtn: document.getElementById('refreshAllBtn'),
+        refreshSeconds: document.getElementById('refreshSeconds'),
+        applyRefreshBtn: document.getElementById('applyRefreshBtn'),
+        adminToken: document.getElementById('adminToken'),
+        authToken: document.getElementById('authToken'),
+      };
 
       const pretty = (value) => {
         if (typeof value === 'string') return value;
@@ -263,104 +378,583 @@
         }
       };
 
-      const renderRouteList = () => {
-        routeListEl.innerHTML = '';
-        routes.forEach((route, index) => {
-          const li = document.createElement('li');
-          li.dataset.route = route.id;
-          li.innerHTML = `<span class="pill">${route.method}</span><code>${route.path}</code>`;
-          li.addEventListener('click', () => selectRoute(route.id));
-          if (index === 0) {
-            li.classList.add('active');
-          }
-          routeListEl.appendChild(li);
+      const safeJson = async (res) => {
+        const text = await res.text();
+        try {
+          return JSON.parse(text);
+        } catch {
+          return { raw: text };
+        }
+      };
+
+      const fmtNumber = (value, digits = 0) => {
+        const num = Number(value);
+        if (!Number.isFinite(num)) return '-';
+        return num.toLocaleString('zh-CN', {
+          minimumFractionDigits: digits,
+          maximumFractionDigits: digits,
         });
       };
 
-      const selectRoute = (id) => {
-        const route = routes.find((item) => item.id === id) || routes[0];
-        document.querySelectorAll('#routeList li').forEach((item) => {
-          item.classList.toggle('active', item.dataset.route === route.id);
+      const fmtDuration = (ms) => {
+        const total = Math.max(0, Math.floor(Number(ms || 0) / 1000));
+        const d = Math.floor(total / 86400);
+        const h = Math.floor((total % 86400) / 3600);
+        const m = Math.floor((total % 3600) / 60);
+        const s = total % 60;
+        if (d > 0) return `${d}天 ${h}小时 ${m}分`;
+        if (h > 0) return `${h}小时 ${m}分 ${s}秒`;
+        return `${m}分 ${s}秒`;
+      };
+
+      const fmtTime = (iso) => {
+        if (!iso) return '-';
+        const d = new Date(iso);
+        if (Number.isNaN(d.getTime())) return '-';
+        return d.toLocaleString('zh-CN', { hour12: false });
+      };
+
+      const adminHeaders = () => {
+        const token = (el.adminToken.value || '').trim();
+        return token ? { 'X-Admin-Token': token } : {};
+      };
+
+      const bearerHeader = () => {
+        const token = (el.authToken.value || '').trim();
+        return token ? { Authorization: `Bearer ${token}` } : {};
+      };
+
+      const fetchJson = async (url, { method = 'GET', body, headers = {} } = {}) => {
+        const res = await fetch(url, {
+          method,
+          headers,
+          body: body === undefined ? undefined : JSON.stringify(body),
         });
-        panelTitleEl.textContent = `接口测试：${route.label}`;
-        endpointNoteEl.textContent = route.note;
-        methodEl.value = route.method;
-        pathEl.value = route.path === '/resource/*' ? '/resource/' : route.path;
-        hintEl.textContent = '';
-        renderTemplates(route);
+        const json = await safeJson(res);
+        if (!res.ok || !json?.success) {
+          throw new Error(String(json?.message || json?.raw || `HTTP ${res.status}`));
+        }
+        return json.data;
       };
 
-      const renderTemplates = (route) => {
-        templateEl.innerHTML = '';
-        route.templates.forEach((template, index) => {
-          const option = document.createElement('option');
-          option.value = String(index);
-          option.textContent = template.name;
-          templateEl.appendChild(option);
+      const statusPill = (status) => {
+        const value = String(status || 'active');
+        const cls = value === 'blocked' ? 'pill-blocked' : value === 'deleted' ? 'pill-deleted' : 'pill-active';
+        return `<span class="pill ${cls}">${value}</span>`;
+      };
+
+      const initCharts = () => {
+        const lineCfg = (label, color) => ({
+          label,
+          data: [],
+          borderColor: color,
+          backgroundColor: color + '22',
+          tension: 0.25,
+          borderWidth: 2,
+          fill: true,
         });
-        applyTemplate(route, 0);
-        templateEl.onchange = () => {
-          applyTemplate(route, Number(templateEl.value));
-        };
+        charts.runtime = new Chart(document.getElementById('runtimeChart').getContext('2d'), {
+          type: 'line',
+          data: { labels: [], datasets: [lineCfg('WS连接', '#206bc4'), lineCfg('在线用户', '#2fb344')] },
+          options: { maintainAspectRatio: false, scales: { y: { beginAtZero: true } } },
+        });
+
+        charts.memory = new Chart(document.getElementById('memoryChart').getContext('2d'), {
+          type: 'line',
+          data: { labels: [], datasets: [lineCfg('Heap', '#f59f00'), lineCfg('RSS', '#12b886')] },
+          options: { maintainAspectRatio: false, scales: { y: { beginAtZero: true } } },
+        });
+
+        const barCfg = (label, color) => ({ label, data: [], borderWidth: 1, backgroundColor: color });
+        charts.slow = new Chart(document.getElementById('slowChart').getContext('2d'), {
+          type: 'bar',
+          data: { labels: [], datasets: [barCfg('Avg ms', 'rgba(206, 76, 96, 0.7)')] },
+          options: { maintainAspectRatio: false, indexAxis: 'y' },
+        });
+        charts.error = new Chart(document.getElementById('errorChart').getContext('2d'), {
+          type: 'bar',
+          data: { labels: [], datasets: [barCfg('5xx', 'rgba(239, 68, 68, 0.7)')] },
+          options: { maintainAspectRatio: false, indexAxis: 'y' },
+        });
+
+        const pieOpt = { maintainAspectRatio: false, plugins: { legend: { position: 'bottom' } } };
+        charts.usersPie = new Chart(document.getElementById('usersPieChart').getContext('2d'), {
+          type: 'doughnut',
+          data: { labels: ['active', 'blocked', 'deleted'], datasets: [{ data: [0, 0, 0], backgroundColor: ['#2fb344', '#f03e3e', '#868e96'] }] },
+          options: pieOpt,
+        });
+        charts.productsPie = new Chart(document.getElementById('productsPieChart').getContext('2d'), {
+          type: 'doughnut',
+          data: { labels: ['active', 'inactive', 'draft', 'archived'], datasets: [{ data: [0, 0, 0, 0], backgroundColor: ['#12b886', '#4c6ef5', '#f59f00', '#868e96'] }] },
+          options: pieOpt,
+        });
       };
 
-      const applyTemplate = (route, index) => {
-        const template = route.templates[index];
-        if (!template) return;
-        methodEl.value = route.method;
-        pathEl.value = template.path || (route.path === '/resource/*' ? '/resource/' : route.path);
-        payloadEl.value = template.body ? pretty(template.body) : '';
-        hintEl.textContent = template.hint || '';
-      };
+      const renderCounters = (metrics) => {
+        const body = document.getElementById('counterTbody');
+        body.innerHTML = '';
+        const top = (Array.isArray(metrics?.counters) ? metrics.counters : [])
+          .slice()
+          .sort((a, b) => Number(b.value || 0) - Number(a.value || 0))
+          .slice(0, 12);
 
-      sendBtn.addEventListener('click', async () => {
-        const method = methodEl.value;
-        const path = pathEl.value.trim();
-        if (!path.startsWith('/')) {
-          responseEl.textContent = '路径需要以 / 开头。';
+        if (!top.length) {
+          body.innerHTML = '<tr><td colspan="2" class="text-muted">暂无指标</td></tr>';
           return;
         }
 
-        let body = null;
-        if (payloadEl.value.trim()) {
-          try {
-            body = JSON.parse(payloadEl.value);
-          } catch (err) {
-            responseEl.textContent = `JSON 解析失败: ${err.message}`;
-            return;
-          }
-        }
+        top.forEach((entry) => {
+          const row = document.createElement('tr');
+          const label = entry.labels && Object.keys(entry.labels).length
+            ? `${entry.name} ${JSON.stringify(entry.labels)}`
+            : entry.name;
+          row.innerHTML = `<td class="mono">${label}</td><td class="text-end mono">${fmtNumber(entry.value)}</td>`;
+          body.appendChild(row);
+        });
+      };
 
-        responseEl.textContent = '请求中...';
-        try {
-          const res = await fetch(path, {
-            method,
-            headers: body ? { 'Content-Type': 'application/json' } : undefined,
-            body: body ? JSON.stringify(body) : undefined,
+      const renderOverview = ({ metricsData, userSummary, productSummary, bottlenecks }) => {
+        const processData = metricsData?.process || {};
+        const ws = metricsData?.ws || {};
+
+        document.getElementById('mUptime').textContent = fmtDuration(metricsData?.uptimeMs || 0);
+        document.getElementById('mWsSockets').textContent = fmtNumber(ws.activeSockets || 0);
+        document.getElementById('mWsUsers').textContent = fmtNumber(ws.activeUsers || 0);
+        document.getElementById('mHeapRatio').textContent = `${fmtNumber((processData.heapTotalBytes > 0 ? (processData.heapUsedBytes / processData.heapTotalBytes) * 100 : 0), 1)}%`;
+        document.getElementById('mUsersTotal').textContent = fmtNumber(userSummary?.total || 0);
+        document.getElementById('mProductsTotal').textContent = fmtNumber(productSummary?.total || 0);
+
+        const nowLabel = new Date().toLocaleTimeString('zh-CN', { hour12: false });
+        historyState.push({
+          t: nowLabel,
+          sockets: Number(ws.activeSockets || 0),
+          users: Number(ws.activeUsers || 0),
+          heapMb: Number(processData.heapUsedBytes || 0) / 1024 / 1024,
+          rssMb: Number(processData.rssBytes || 0) / 1024 / 1024,
+        });
+        while (historyState.length > MAX_HISTORY_POINTS) historyState.shift();
+
+        charts.runtime.data.labels = historyState.map((it) => it.t);
+        charts.runtime.data.datasets[0].data = historyState.map((it) => it.sockets);
+        charts.runtime.data.datasets[1].data = historyState.map((it) => it.users);
+        charts.runtime.update();
+
+        charts.memory.data.labels = historyState.map((it) => it.t);
+        charts.memory.data.datasets[0].data = historyState.map((it) => Number(it.heapMb.toFixed(2)));
+        charts.memory.data.datasets[1].data = historyState.map((it) => Number(it.rssMb.toFixed(2)));
+        charts.memory.update();
+
+        const slow = Array.isArray(bottlenecks?.slowEndpoints) ? bottlenecks.slowEndpoints : [];
+        charts.slow.data.labels = slow.map((it) => it.key);
+        charts.slow.data.datasets[0].data = slow.map((it) => Number((it.avgMs || 0).toFixed(2)));
+        charts.slow.update();
+
+        const err = Array.isArray(bottlenecks?.errorEndpoints) ? bottlenecks.errorEndpoints : [];
+        charts.error.data.labels = err.map((it) => it.key);
+        charts.error.data.datasets[0].data = err.map((it) => Number(it.errors || 0));
+        charts.error.update();
+
+        charts.usersPie.data.datasets[0].data = [
+          Number(userSummary?.active || 0),
+          Number(userSummary?.blocked || 0),
+          Number(userSummary?.deleted || 0),
+        ];
+        charts.usersPie.update();
+
+        charts.productsPie.data.datasets[0].data = [
+          Number(productSummary?.active || 0),
+          Number(productSummary?.inactive || 0),
+          Number(productSummary?.draft || 0),
+          Number(productSummary?.archived || 0),
+        ];
+        charts.productsPie.update();
+
+        renderCounters(metricsData?.metrics);
+
+        const rec = document.getElementById('recommendationList');
+        rec.innerHTML = '';
+        const list = Array.isArray(bottlenecks?.recommendations) ? bottlenecks.recommendations : [];
+        if (!list.length) {
+          rec.innerHTML = '<li class="text-muted">暂无建议</li>';
+        } else {
+          list.forEach((item) => {
+            const li = document.createElement('li');
+            li.textContent = item;
+            rec.appendChild(li);
           });
-          const text = await res.text();
-          responseEl.textContent = `[${res.status}] ${text}`;
-        } catch (err) {
-          responseEl.textContent = `请求失败: ${err.message}`;
-        }
-      });
-
-      const fetchRoutes = async () => {
-        try {
-          const res = await fetch('/api/routes');
-          const json = await res.json();
-          if (!json || !json.success || !Array.isArray(json.data)) {
-            throw new Error('Invalid route data.');
-          }
-          routes = json.data;
-          renderRouteList();
-          selectRoute(routes[0]?.id);
-        } catch (err) {
-          responseEl.textContent = `接口列表拉取失败: ${err.message}`;
         }
       };
 
-      fetchRoutes();
+      const loadOverview = async ({ forceRefresh = false } = {}) => {
+        const query = forceRefresh ? '?refresh=true' : '';
+        const [metricsData, userSummary, productSummary, bottlenecks] = await Promise.all([
+          fetchJson(`/api/admin/metrics${query}`),
+          fetchJson('/api/admin/users/summary', { headers: adminHeaders() }),
+          fetchJson('/api/admin/products/summary', { headers: adminHeaders() }),
+          fetchJson('/api/admin/bottlenecks', { headers: adminHeaders() }),
+        ]);
+
+        renderOverview({ metricsData, userSummary, productSummary, bottlenecks });
+        el.globalStatus.textContent = `最近更新 ${new Date().toLocaleTimeString('zh-CN', { hour12: false })}`;
+      };
+
+      const renderUsers = (items = []) => {
+        const tbody = document.getElementById('usersTbody');
+        tbody.innerHTML = '';
+        if (!items.length) {
+          tbody.innerHTML = '<tr><td colspan="9" class="text-muted">暂无数据</td></tr>';
+          return;
+        }
+
+        items.forEach((user) => {
+          const row = document.createElement('tr');
+          row.innerHTML = `
+            <td class="mono">${user.uid}</td>
+            <td>${user.username}</td>
+            <td>${user.nickname || ''}</td>
+            <td>${statusPill(user.status)}</td>
+            <td>${user.online ? 'online' : 'offline'}</td>
+            <td class="mono">${fmtNumber(user.tokenCount || 0)}</td>
+            <td class="mono">${fmtNumber(user.friendsCount || 0)}</td>
+            <td class="small">${fmtTime(user.lastLoginAt)}</td>
+            <td>
+              <div class="btn-list">
+                <button class="btn btn-sm btn-outline-primary" data-act="edit">编辑</button>
+                <button class="btn btn-sm btn-outline-secondary" data-act="detail">详情</button>
+                <button class="btn btn-sm btn-outline-danger" data-act="revoke">下线</button>
+              </div>
+            </td>
+          `;
+
+          row.querySelector('[data-act="edit"]').onclick = () => fillUserEditor(user);
+          row.querySelector('[data-act="detail"]').onclick = () => loadUserDetail(user.uid);
+          row.querySelector('[data-act="revoke"]').onclick = () => revokeUserSessions(user.uid);
+          tbody.appendChild(row);
+        });
+      };
+
+      const loadUsers = async () => {
+        const q = encodeURIComponent((document.getElementById('usersQuery').value || '').trim());
+        const status = encodeURIComponent(document.getElementById('usersStatus').value || 'all');
+        const pageSize = encodeURIComponent(document.getElementById('usersPageSize').value || '20');
+        const data = await fetchJson(`/api/admin/users?page=1&pageSize=${pageSize}&status=${status}&q=${q}`, {
+          headers: adminHeaders(),
+        });
+        state.users = Array.isArray(data?.items) ? data.items : [];
+        renderUsers(state.users);
+        document.getElementById('usersStatusText').textContent = `共 ${fmtNumber(data?.total || 0)} 条`;
+      };
+
+      const fillUserEditor = (user) => {
+        state.selectedUser = user;
+        document.getElementById('editUid').value = String(user.uid || '');
+        document.getElementById('editNickname').value = user.nickname || '';
+        document.getElementById('editSignature').value = user.signature || '';
+        document.getElementById('editDomain').value = user.domain || '';
+        document.getElementById('editStatus').value = user.status || 'active';
+      };
+
+      const loadUserDetail = async (uid) => {
+        const data = await fetchJson(`/api/admin/users/detail?uid=${encodeURIComponent(uid)}`, {
+          headers: adminHeaders(),
+        });
+        document.getElementById('userDetailBox').textContent = pretty(data);
+        fillUserEditor(data);
+      };
+      const saveUser = async () => {
+        const uid = Number(document.getElementById('editUid').value);
+        if (!Number.isInteger(uid) || uid <= 0) {
+          throw new Error('请先选择用户');
+        }
+        await fetchJson('/api/admin/users/update', {
+          method: 'POST',
+          headers: { ...adminHeaders(), 'Content-Type': 'application/json' },
+          body: {
+            uid,
+            nickname: document.getElementById('editNickname').value,
+            signature: document.getElementById('editSignature').value,
+            domain: document.getElementById('editDomain').value,
+            status: document.getElementById('editStatus').value,
+          },
+        });
+        await Promise.all([loadUsers(), loadOverview()]);
+      };
+
+      const revokeUserSessions = async (uid) => {
+        await fetchJson('/api/admin/users/revoke-all', {
+          method: 'POST',
+          headers: { ...adminHeaders(), 'Content-Type': 'application/json' },
+          body: { uid: Number(uid) },
+        });
+        await Promise.all([loadUsers(), loadOverview()]);
+      };
+
+      const renderProducts = (items = []) => {
+        const tbody = document.getElementById('productsTbody');
+        tbody.innerHTML = '';
+        if (!items.length) {
+          tbody.innerHTML = '<tr><td colspan="9" class="text-muted">暂无数据</td></tr>';
+          return;
+        }
+
+        items.forEach((p) => {
+          const row = document.createElement('tr');
+          row.innerHTML = `
+            <td class="mono">${p.id}</td>
+            <td>${p.name || ''}</td>
+            <td class="mono">${p.sku || ''}</td>
+            <td>${statusPill(p.status)}</td>
+            <td class="text-end mono">${fmtNumber(p.price || 0, 2)}</td>
+            <td class="text-end mono">${fmtNumber(p.stock || 0)}</td>
+            <td class="text-end mono">${fmtNumber(p.sales || 0)}</td>
+            <td class="small">${fmtTime(p.updatedAt)}</td>
+            <td>
+              <div class="btn-list">
+                <button class="btn btn-sm btn-outline-primary" data-act="edit">编辑</button>
+                <button class="btn btn-sm btn-outline-danger" data-act="del">删除</button>
+              </div>
+            </td>
+          `;
+          row.querySelector('[data-act="edit"]').onclick = () => fillProductEditor(p);
+          row.querySelector('[data-act="del"]').onclick = () => deleteProduct(p.id);
+          tbody.appendChild(row);
+        });
+      };
+
+      const loadProducts = async () => {
+        const q = encodeURIComponent((document.getElementById('productsQuery').value || '').trim());
+        const status = encodeURIComponent(document.getElementById('productsStatus').value || 'all');
+        const pageSize = encodeURIComponent(document.getElementById('productsPageSize').value || '20');
+        const data = await fetchJson(`/api/admin/products?page=1&pageSize=${pageSize}&status=${status}&q=${q}`, {
+          headers: adminHeaders(),
+        });
+        state.products = Array.isArray(data?.items) ? data.items : [];
+        renderProducts(state.products);
+        document.getElementById('productsStatusText').textContent = `共 ${fmtNumber(data?.total || 0)} 条`;
+      };
+
+      const fillProductEditor = (p) => {
+        document.getElementById('pId').value = p.id || '';
+        document.getElementById('pName').value = p.name || '';
+        document.getElementById('pSku').value = p.sku || '';
+        document.getElementById('pCategory').value = p.category || '';
+        document.getElementById('pStatus').value = p.status || 'draft';
+        document.getElementById('pPrice').value = p.price || 0;
+        document.getElementById('pCost').value = p.cost || 0;
+        document.getElementById('pStock').value = p.stock || 0;
+        document.getElementById('pSales').value = p.sales || 0;
+        document.getElementById('pTags').value = Array.isArray(p.tags) ? p.tags.join(',') : '';
+        document.getElementById('pDesc').value = p.description || '';
+      };
+
+      const buildProductPayload = () => ({
+        id: document.getElementById('pId').value.trim(),
+        name: document.getElementById('pName').value.trim(),
+        sku: document.getElementById('pSku').value.trim(),
+        category: document.getElementById('pCategory').value.trim(),
+        status: document.getElementById('pStatus').value,
+        price: Number(document.getElementById('pPrice').value || 0),
+        cost: Number(document.getElementById('pCost').value || 0),
+        stock: Number(document.getElementById('pStock').value || 0),
+        sales: Number(document.getElementById('pSales').value || 0),
+        tags: document.getElementById('pTags').value,
+        description: document.getElementById('pDesc').value,
+      });
+
+      const saveProduct = async (create = false) => {
+        const payload = buildProductPayload();
+        const url = create ? '/api/admin/products/create' : '/api/admin/products/update';
+        if (!create) {
+          const idNum = Number(payload.id);
+          if (!Number.isInteger(idNum) || idNum <= 0) throw new Error('更新产品必须填写有效ID');
+          payload.id = idNum;
+        } else {
+          delete payload.id;
+        }
+
+        await fetchJson(url, {
+          method: 'POST',
+          headers: { ...adminHeaders(), 'Content-Type': 'application/json' },
+          body: payload,
+        });
+        await Promise.all([loadProducts(), loadOverview()]);
+      };
+
+      const deleteProduct = async (id) => {
+        await fetchJson('/api/admin/products/delete', {
+          method: 'DELETE',
+          headers: { ...adminHeaders(), 'Content-Type': 'application/json' },
+          body: { id: Number(id) },
+        });
+        await Promise.all([loadProducts(), loadOverview()]);
+      };
+
+      const clearProductEditor = () => {
+        ['pId', 'pName', 'pSku', 'pCategory', 'pPrice', 'pCost', 'pStock', 'pSales', 'pTags', 'pDesc'].forEach((id) => {
+          document.getElementById(id).value = id === 'pPrice' || id === 'pCost' || id === 'pStock' || id === 'pSales' ? '0' : '';
+        });
+        document.getElementById('pStatus').value = 'active';
+      };
+
+      const routeEls = {
+        list: document.getElementById('routeList'),
+        method: document.getElementById('httpMethod'),
+        path: document.getElementById('httpPath'),
+        payload: document.getElementById('httpPayload'),
+        template: document.getElementById('templateSelect'),
+        hint: document.getElementById('routeHint'),
+        response: document.getElementById('httpResponse'),
+      };
+
+      const renderRouteList = () => {
+        routeEls.list.innerHTML = '';
+        state.routes.forEach((route) => {
+          const btn = document.createElement('button');
+          btn.type = 'button';
+          btn.className = `list-group-item list-group-item-action route-item ${route.id === state.selectedRouteId ? 'active' : ''}`;
+          btn.innerHTML = `<span class="badge bg-azure-lt text-azure me-2 mono">${route.method}</span><span class="mono">${route.path}</span>`;
+          btn.onclick = () => selectRoute(route.id);
+          routeEls.list.appendChild(btn);
+        });
+      };
+
+      const applyTemplate = (route, index) => {
+        const tpl = Array.isArray(route.templates) ? route.templates[index] : null;
+        if (!tpl) return;
+        routeEls.method.value = route.method;
+        routeEls.path.value = tpl.path || (route.path === '/resource/*' ? '/resource/' : route.path);
+        routeEls.payload.value = tpl.body ? pretty(tpl.body) : '';
+        routeEls.hint.textContent = tpl.hint || route.note || '';
+      };
+
+      const renderTemplateSelect = (route) => {
+        const templates = Array.isArray(route.templates) ? route.templates : [];
+        routeEls.template.innerHTML = '';
+        templates.forEach((tpl, idx) => {
+          const option = document.createElement('option');
+          option.value = String(idx);
+          option.textContent = tpl.name || `模板 ${idx + 1}`;
+          routeEls.template.appendChild(option);
+        });
+        if (!templates.length) {
+          const option = document.createElement('option');
+          option.textContent = '无模板';
+          routeEls.template.appendChild(option);
+        } else {
+          applyTemplate(route, 0);
+        }
+        routeEls.template.onchange = () => applyTemplate(route, Number(routeEls.template.value));
+      };
+
+      const selectRoute = (routeId) => {
+        state.selectedRouteId = routeId;
+        const route = state.routes.find((item) => item.id === routeId);
+        if (!route) return;
+        renderRouteList();
+        renderTemplateSelect(route);
+        routeEls.hint.textContent = route.note || '';
+      };
+
+      const loadRoutes = async () => {
+        const data = await fetchJson('/api/routes');
+        state.routes = Array.isArray(data) ? data : [];
+        if (!state.routes.length) return;
+        state.selectedRouteId = state.routes[0].id;
+        renderRouteList();
+        selectRoute(state.selectedRouteId);
+      };
+
+      const sendApiRequest = async () => {
+        const method = (routeEls.method.value || 'GET').toUpperCase();
+        const path = (routeEls.path.value || '').trim();
+        if (!path.startsWith('/')) throw new Error('路径必须以 / 开头');
+
+        let body;
+        const raw = routeEls.payload.value.trim();
+        if (raw) {
+          body = JSON.parse(raw);
+        }
+
+        const headers = { ...bearerHeader() };
+        if (path.startsWith('/api/admin')) {
+          Object.assign(headers, adminHeaders());
+        }
+        if (body !== undefined) {
+          headers['Content-Type'] = 'application/json';
+        }
+
+        const res = await fetch(path, {
+          method,
+          headers: Object.keys(headers).length ? headers : undefined,
+          body: body === undefined ? undefined : JSON.stringify(body),
+        });
+        const text = await res.text();
+        routeEls.response.textContent = `[${res.status}]\n${text}`;
+      };
+
+      const withBusy = async (task) => {
+        try {
+          el.globalStatus.textContent = '加载中...';
+          await task();
+        } catch (error) {
+          el.globalStatus.textContent = `失败: ${error.message}`;
+        }
+      };
+
+      const scheduleRefresh = () => {
+        if (state.timer) clearInterval(state.timer);
+        state.timer = setInterval(() => {
+          withBusy(async () => {
+            await loadOverview({ forceRefresh: false });
+            const activeTab = document.querySelector('.tab-pane.active')?.id;
+            if (activeTab === 'tab-users') await loadUsers();
+            if (activeTab === 'tab-products') await loadProducts();
+          });
+        }, state.refreshMs);
+      };
+
+      const bindEvents = () => {
+        el.refreshAllBtn.onclick = () => withBusy(async () => {
+          await Promise.all([loadOverview({ forceRefresh: true }), loadUsers(), loadProducts()]);
+        });
+
+        el.applyRefreshBtn.onclick = () => {
+          const sec = Number(el.refreshSeconds.value || 10);
+          state.refreshMs = Math.min(120000, Math.max(3000, Math.floor(sec * 1000)));
+          scheduleRefresh();
+          el.globalStatus.textContent = `自动刷新: ${state.refreshMs / 1000}s`;
+        };
+
+        document.getElementById('usersSearchBtn').onclick = () => withBusy(loadUsers);
+        document.getElementById('usersReloadBtn').onclick = () => withBusy(loadUsers);
+        document.getElementById('saveUserBtn').onclick = () => withBusy(saveUser);
+        document.getElementById('revokeUserBtn').onclick = () => {
+          const uid = Number(document.getElementById('editUid').value || 0);
+          withBusy(() => revokeUserSessions(uid));
+        };
+
+        document.getElementById('productsSearchBtn').onclick = () => withBusy(loadProducts);
+        document.getElementById('productsReloadBtn').onclick = () => withBusy(loadProducts);
+        document.getElementById('saveProductBtn').onclick = () => withBusy(() => saveProduct(false));
+        document.getElementById('createProductBtn').onclick = () => withBusy(() => saveProduct(true));
+        document.getElementById('clearProductBtn').onclick = clearProductEditor;
+
+        document.getElementById('sendRequestBtn').onclick = () => withBusy(sendApiRequest);
+        document.getElementById('clearResponseBtn').onclick = () => {
+          routeEls.response.textContent = '等待请求...';
+        };
+      };
+
+      const boot = async () => {
+        initCharts();
+        bindEvents();
+        await withBusy(async () => {
+          await Promise.all([loadRoutes(), loadOverview({ forceRefresh: false }), loadUsers(), loadProducts()]);
+        });
+        scheduleRefresh();
+      };
+
+      boot();
     </script>
   </body>
 </html>

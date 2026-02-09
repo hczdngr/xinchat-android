@@ -1,4 +1,4 @@
-﻿import express from 'express';
+import express from 'express';
 import fs from 'fs/promises';
 import path from 'path';
 import crypto from 'crypto';
@@ -169,10 +169,23 @@ const authenticate = async (req, res, next) => {
       return;
     }
 
-    const users = await readUsers();
-    const found = await findUserByToken(users, token);
+    let users = await readUsers();
+    let found = await findUserByToken(users, token);
     if (found.touched) {
-      await writeUsers(users);
+      const mutation = await mutateUsers(
+        async (latestUsers) => {
+          const latestFound = await findUserByToken(latestUsers, token);
+          return {
+            changed: latestFound.touched,
+            result: { users: latestUsers, found: latestFound },
+          };
+        },
+        { defaultChanged: false }
+      );
+      if (mutation.result) {
+        users = mutation.result.users;
+        found = mutation.result.found;
+      }
     }
     if (!found.user) {
       if (found.revoked) {
@@ -193,14 +206,6 @@ const authenticate = async (req, res, next) => {
   }
 };
 
-const clearUserSession = async (users, userIndex) => {
-  users[userIndex] = {
-    ...users[userIndex],
-    online: false,
-  };
-  await writeUsers(users);
-};
-
 const USERS_CACHE_TTL_MS = parsePositiveInt(process.env.USERS_CACHE_TTL_MS, 5000, 200);
 let cachedUsers = null;
 let cachedUsersAt = 0;
@@ -210,6 +215,11 @@ let ensureStorageInFlight = null;
 let storageReady = false;
 let tokenIndexCache = new Map();
 let usernameIndexCache = new Map();
+let usersCacheVersion = 0;
+let usersCacheHits = 0;
+let usersCacheMisses = 0;
+let usersCacheForcedRefreshes = 0;
+let usersCacheLastRefreshError = '';
 
 const cloneUsers = (users) => {
   const source = Array.isArray(users) ? users : [];
@@ -248,7 +258,20 @@ const rebuildUsersIndexes = (users) => {
 const setUsersCache = (users, timestamp = Date.now()) => {
   cachedUsers = Array.isArray(users) ? users : [];
   cachedUsersAt = timestamp;
+  usersCacheVersion += 1;
   rebuildUsersIndexes(cachedUsers);
+};
+
+const queueUsersWriteTask = async (task) => {
+  const run = writeUsersQueue.then(task);
+  writeUsersQueue = run.catch(() => {});
+  return run;
+};
+
+const persistUsersSnapshot = async (snapshot) => {
+  await fs.writeFile(USERS_PATH_TMP, JSON.stringify(snapshot, null, 2), 'utf-8');
+  await fs.rename(USERS_PATH_TMP, USERS_PATH);
+  setUsersCache(snapshot, Date.now());
 };
 
 const ensureStorage = async () => {
@@ -304,24 +327,36 @@ const loadUsersFromDisk = async () => {
     setUsersCache([], now);
     return cachedUsers;
   }
-  await ensureUserUids(users);
-  await ensureUserDefaults(users);
+  const normalizedChanged = normalizeUsersForStorage(users);
+  if (normalizedChanged) {
+    await persistUsersSnapshot(users);
+    return cachedUsers;
+  }
   setUsersCache(users, now);
   return cachedUsers;
 };
 
-const readUsersCached = async () => {
+const readUsersCached = async ({ forceRefresh = false } = {}) => {
   await ensureStorage();
   const now = Date.now();
-  if (cachedUsers && now - cachedUsersAt < USERS_CACHE_TTL_MS) {
+  if (!forceRefresh && cachedUsers && now - cachedUsersAt < USERS_CACHE_TTL_MS) {
+    usersCacheHits += 1;
     return cachedUsers;
+  }
+  usersCacheMisses += 1;
+  if (forceRefresh) {
+    usersCacheForcedRefreshes += 1;
   }
   if (usersLoadInFlight) {
     await usersLoadInFlight;
     return cachedUsers || [];
   }
-  usersLoadInFlight = loadUsersFromDisk()
+  usersLoadInFlight = queueUsersWriteTask(() => loadUsersFromDisk())
+    .then(() => {
+      usersCacheLastRefreshError = '';
+    })
     .catch((error) => {
+      usersCacheLastRefreshError = error instanceof Error ? error.message : String(error);
       console.error('Read users cache refresh error:', error);
       if (!cachedUsers) {
         setUsersCache([], Date.now());
@@ -339,19 +374,59 @@ const readUsers = async () => {
   return cloneUsers(users);
 };
 
-const writeUsers = async (users) => {
+const mutateUsers = async (mutator, { defaultChanged = true } = {}) => {
+  if (typeof mutator !== 'function') {
+    throw new TypeError('mutateUsers requires a function mutator.');
+  }
   await ensureStorage();
-  const snapshot = cloneUsers(users);
-  const run = writeUsersQueue.then(async () => {
-    await fs.writeFile(USERS_PATH_TMP, JSON.stringify(snapshot, null, 2), 'utf-8');
-    await fs.rename(USERS_PATH_TMP, USERS_PATH);
-    setUsersCache(snapshot, Date.now());
+  await readUsersCached();
+  let changed = defaultChanged;
+  let result;
+  await queueUsersWriteTask(async () => {
+    const working = cloneUsers(cachedUsers || []);
+    const output = await mutator(working);
+    if (
+      output &&
+      typeof output === 'object' &&
+      Object.prototype.hasOwnProperty.call(output, 'changed')
+    ) {
+      changed = Boolean(output.changed);
+      result = output.result;
+    } else {
+      result = output;
+    }
+    if (changed) {
+      await persistUsersSnapshot(working);
+    }
   });
-  writeUsersQueue = run.catch(() => {});
-  await run;
+  return { changed, result };
 };
 
-const ensureUserUids = async (users) => {
+const invalidateUsersCache = () => {
+  cachedUsers = null;
+  cachedUsersAt = 0;
+  tokenIndexCache = new Map();
+  usernameIndexCache = new Map();
+};
+
+const getUsersCacheInfo = () => ({
+  ttlMs: USERS_CACHE_TTL_MS,
+  version: usersCacheVersion,
+  size: Array.isArray(cachedUsers) ? cachedUsers.length : 0,
+  cachedAt: cachedUsersAt ? new Date(cachedUsersAt).toISOString() : null,
+  ageMs: cachedUsersAt ? Math.max(0, Date.now() - cachedUsersAt) : null,
+  hits: usersCacheHits,
+  misses: usersCacheMisses,
+  forcedRefreshes: usersCacheForcedRefreshes,
+  lastRefreshError: usersCacheLastRefreshError || null,
+});
+
+const forceRefreshUsersCache = async () => {
+  await readUsersCached({ forceRefresh: true });
+  return getUsersCacheInfo();
+};
+
+const ensureUserUids = (users) => {
   let maxUid = UID_START - 1;
   users.forEach((user) => {
     if (Number.isInteger(user.uid)) {
@@ -367,13 +442,10 @@ const ensureUserUids = async (users) => {
       updated = true;
     }
   });
-
-  if (updated) {
-    await writeUsers(users);
-  }
+  return updated;
 };
 
-const ensureUserDefaults = async (users) => {
+const ensureUserDefaults = (users) => {
   let updated = false;
   users.forEach((user) => {
     if (!Array.isArray(user.friends)) {
@@ -460,10 +532,13 @@ const ensureUserDefaults = async (users) => {
       updated = true;
     }
   });
+  return updated;
+};
 
-  if (updated) {
-    await writeUsers(users);
-  }
+const normalizeUsersForStorage = (users) => {
+  const changedUid = ensureUserUids(users);
+  const changedDefaults = ensureUserDefaults(users);
+  return Boolean(changedUid || changedDefaults);
 };
 
 const getNextUid = (users) => {
@@ -707,31 +782,37 @@ router.post('/register', async (req, res) => {
       return;
     }
 
-    const users = await readUsers();
     const normalized = normalizeUsername(trimmedUsername);
-    if (findUserIndexByUsername(users, normalized) >= 0) {
+    const hashed = await hashPassword(password);
+    const mutation = await mutateUsers(
+      (users) => {
+        if (findUserIndexByUsername(users, normalized) >= 0) {
+          return { changed: false, result: { conflict: true } };
+        }
+        const uid = getNextUid(users);
+        users.push({
+          uid,
+          username: normalized,
+          ...hashed,
+          createdAt: new Date().toISOString(),
+          friends: [],
+          signature: DEFAULT_SIGNATURE,
+          avatar: '',
+          nickname: trimmedUsername,
+          gender: '',
+          birthday: '',
+          country: '',
+          province: '',
+          region: '',
+        });
+        return { changed: true, result: { conflict: false } };
+      },
+      { defaultChanged: false }
+    );
+    if (mutation.result?.conflict) {
       res.status(409).json({ success: false, message: '用户名已存在。' });
       return;
     }
-
-    const hashed = await hashPassword(password);
-    const uid = getNextUid(users);
-    users.push({
-      uid,
-      username: normalized,
-      ...hashed,
-      createdAt: new Date().toISOString(),
-      friends: [],
-      signature: DEFAULT_SIGNATURE,
-      avatar: '',
-      nickname: trimmedUsername,
-      gender: '',
-      birthday: '',
-      country: '',
-      province: '',
-      region: '',
-    });
-    await writeUsers(users);
     res.json({ success: true, message: '注册成功，请登录。' });
   } catch (error) {
     console.error('Register error:', error);
@@ -763,76 +844,92 @@ router.post('/login', async (req, res) => {
       return;
     }
 
-    const users = await readUsers();
-    const userIndex = findUserIndexByUsername(users, normalized);
-    const user = users[userIndex];
-    const isLegacy = user && user.password;
-    const isMatch = user
-      ? isLegacy
-        ? user.password === password
-        : await verifyPassword(password, user)
-      : false;
+    const mutation = await mutateUsers(
+      async (users) => {
+        const userIndex = findUserIndexByUsername(users, normalized);
+        const user = users[userIndex];
+        const isLegacy = Boolean(user && user.password);
+        const isMatch = user
+          ? isLegacy
+            ? user.password === password
+            : await verifyPassword(password, user)
+          : false;
 
-    if (!isMatch) {
+        if (!isMatch) {
+          return { changed: false, result: { success: false } };
+        }
+
+        if (isLegacy) {
+          const hashed = await hashPassword(password);
+          users[userIndex] = {
+            uid: user.uid,
+            username: normalized,
+            ...hashed,
+            createdAt: user.createdAt || new Date().toISOString(),
+            friends: Array.isArray(user.friends) ? user.friends : [],
+            signature: typeof user.signature === 'string' ? user.signature : '',
+            nickname: typeof user.nickname === 'string' ? user.nickname : normalized,
+            gender: typeof user.gender === 'string' ? user.gender : '',
+            birthday: typeof user.birthday === 'string' ? user.birthday : '',
+            country: typeof user.country === 'string' ? user.country : '',
+            province: typeof user.province === 'string' ? user.province : '',
+            region: typeof user.region === 'string' ? user.region : '',
+            migratedAt: new Date().toISOString(),
+          };
+        }
+
+        const { token, expiresAt } = issueToken();
+        const existingTokens = Array.isArray(users[userIndex].tokens)
+          ? users[userIndex].tokens.filter((entry) => entry?.token !== token)
+          : [];
+        existingTokens.push({ token, expiresAt });
+        users[userIndex] = {
+          ...users[userIndex],
+          token,
+          tokenExpiresAt: expiresAt,
+          tokens: existingTokens,
+          lastLoginAt: new Date().toISOString(),
+          online: false,
+        };
+        return {
+          changed: true,
+          result: {
+            success: true,
+            token,
+            expiresAt,
+            user: { ...users[userIndex] },
+          },
+        };
+      },
+      { defaultChanged: false }
+    );
+
+    const loginResult = mutation.result;
+    if (!loginResult?.success) {
       recordLoginAttempt(lockKey);
       res.status(401).json({ success: false, message: '用户名或密码错误。' });
       return;
     }
 
     clearLoginAttempts(lockKey);
-
-    if (isLegacy) {
-      const hashed = await hashPassword(password);
-      users[userIndex] = {
-        uid: user.uid,
-        username: normalized,
-        ...hashed,
-        createdAt: user.createdAt || new Date().toISOString(),
-        friends: Array.isArray(user.friends) ? user.friends : [],
-        signature: typeof user.signature === 'string' ? user.signature : '',
-        nickname: typeof user.nickname === 'string' ? user.nickname : normalized,
-        gender: typeof user.gender === 'string' ? user.gender : '',
-        birthday: typeof user.birthday === 'string' ? user.birthday : '',
-        country: typeof user.country === 'string' ? user.country : '',
-        province: typeof user.province === 'string' ? user.province : '',
-        region: typeof user.region === 'string' ? user.region : '',
-        migratedAt: new Date().toISOString(),
-      };
-      await writeUsers(users);
-    }
-
-    const { token, expiresAt } = issueToken();
-    const existingTokens = Array.isArray(users[userIndex].tokens)
-      ? users[userIndex].tokens.filter((entry) => entry?.token !== token)
-      : [];
-    existingTokens.push({ token, expiresAt });
-    users[userIndex] = {
-      ...users[userIndex],
-      token,
-      tokenExpiresAt: expiresAt,
-      tokens: existingTokens,
-      lastLoginAt: new Date().toISOString(),
-      online: false,
-    };
-    await writeUsers(users);
-    appendAuthCookie(res, req, token, expiresAt);
+    appendAuthCookie(res, req, loginResult.token, loginResult.expiresAt);
 
     res.json({
       success: true,
       message: '登录成功。',
-      token,
-      tokenExpiresAt: expiresAt,
-      uid: users[userIndex].uid,
-      username: users[userIndex].username,
-      avatar: users[userIndex].avatar || '',
-      nickname: users[userIndex].nickname || users[userIndex].username,
-      signature: users[userIndex].signature || '',
-      gender: users[userIndex].gender || '',
-      birthday: users[userIndex].birthday || '',
-      country: users[userIndex].country || '',
-      province: users[userIndex].province || '',
-      region: users[userIndex].region || '',
-      hasSuicideIntent: hasSuicideIntent(users[userIndex]),
+      token: loginResult.token,
+      tokenExpiresAt: loginResult.expiresAt,
+      uid: loginResult.user.uid,
+      username: loginResult.user.username,
+      avatar: loginResult.user.avatar || '',
+      nickname: loginResult.user.nickname || loginResult.user.username,
+      signature: loginResult.user.signature || '',
+      gender: loginResult.user.gender || '',
+      birthday: loginResult.user.birthday || '',
+      country: loginResult.user.country || '',
+      province: loginResult.user.province || '',
+      region: loginResult.user.region || '',
+      hasSuicideIntent: hasSuicideIntent(loginResult.user),
     });
   } catch (error) {
     console.error('Login error:', error);
@@ -842,13 +939,31 @@ router.post('/login', async (req, res) => {
 
 const revokeAuthenticatedSession = async (req, res, { clearCookie = true } = {}) => {
   const token = extractToken(req);
-  const { users, userIndex } = req.auth;
-  const revoked = await revokeCurrentToken(users, userIndex, token);
-  await clearUserSession(users, userIndex);
+  const uid = Number(req.auth?.user?.uid);
+  let revokedTokenId = '';
+  await mutateUsers(
+    async (users) => {
+      const userIndex = users.findIndex((item) => item.uid === uid);
+      if (userIndex < 0) {
+        return { changed: false };
+      }
+      const revoked = await revokeCurrentToken(users, userIndex, token);
+      revokedTokenId = revoked.tokenId || '';
+      const wasOnline = users[userIndex].online === true;
+      if (wasOnline) {
+        users[userIndex] = {
+          ...users[userIndex],
+          online: false,
+        };
+      }
+      return { changed: Boolean(revoked.touched || wasOnline) };
+    },
+    { defaultChanged: false }
+  );
   if (clearCookie) {
     clearAuthCookie(res, req);
   }
-  res.json({ success: true, revokedTokenId: revoked.tokenId || '' });
+  res.json({ success: true, revokedTokenId });
 };
 
 router.post('/logout', authenticate, async (req, res) => {
@@ -880,7 +995,7 @@ router.get('/profile', authenticate, async (req, res) => {
 });
 
 router.post('/profile', authenticate, async (req, res) => {
-  const { users, userIndex } = req.auth;
+  const uid = Number(req.auth?.user?.uid);
   const payload = req.body || {};
   const nickname = typeof payload.nickname === 'string' ? payload.nickname.trim() : '';
   const signature = typeof payload.signature === 'string' ? payload.signature.trim() : '';
@@ -914,41 +1029,65 @@ router.post('/profile', authenticate, async (req, res) => {
     return;
   }
 
-  const nextUser = {
-    ...users[userIndex],
-    nickname: nickname || users[userIndex].nickname || users[userIndex].username,
-    signature: signature || DEFAULT_SIGNATURE,
-    gender,
-    birthday,
-    country,
-    province,
-    region,
-  };
-  if (avatar !== null) {
-    nextUser.avatar = avatar;
+  const mutation = await mutateUsers(
+    (users) => {
+      const userIndex = users.findIndex((item) => item.uid === uid);
+      if (userIndex < 0) {
+        return { changed: false, result: null };
+      }
+      const nextUser = {
+        ...users[userIndex],
+        nickname: nickname || users[userIndex].nickname || users[userIndex].username,
+        signature: signature || DEFAULT_SIGNATURE,
+        gender,
+        birthday,
+        country,
+        province,
+        region,
+      };
+      if (avatar !== null) {
+        nextUser.avatar = avatar;
+      }
+      users[userIndex] = nextUser;
+      return { changed: true, result: { ...nextUser } };
+    },
+    { defaultChanged: false }
+  );
+
+  if (!mutation.result) {
+    res.status(404).json({ success: false, message: '用户不存在。' });
+    return;
   }
-  users[userIndex] = nextUser;
-  await writeUsers(users);
 
   res.json({
     success: true,
     user: {
-      uid: users[userIndex].uid,
-      username: users[userIndex].username,
-      nickname: users[userIndex].nickname || users[userIndex].username,
-      signature: users[userIndex].signature || DEFAULT_SIGNATURE,
-      gender: users[userIndex].gender || '',
-      birthday: users[userIndex].birthday || '',
-      country: users[userIndex].country || '',
-      province: users[userIndex].province || '',
-      region: users[userIndex].region || '',
-      avatar: users[userIndex].avatar || '',
-      hasSuicideIntent: hasSuicideIntent(users[userIndex]),
+      uid: mutation.result.uid,
+      username: mutation.result.username,
+      nickname: mutation.result.nickname || mutation.result.username,
+      signature: mutation.result.signature || DEFAULT_SIGNATURE,
+      gender: mutation.result.gender || '',
+      birthday: mutation.result.birthday || '',
+      country: mutation.result.country || '',
+      province: mutation.result.province || '',
+      region: mutation.result.region || '',
+      avatar: mutation.result.avatar || '',
+      hasSuicideIntent: hasSuicideIntent(mutation.result),
     },
   });
 });
 
-export { ensureStorage, readUsers, readUsersCached, writeUsers, findUserByToken, hasValidToken };
+export {
+  ensureStorage,
+  readUsers,
+  readUsersCached,
+  mutateUsers,
+  findUserByToken,
+  hasValidToken,
+  invalidateUsersCache,
+  getUsersCacheInfo,
+  forceRefreshUsersCache,
+};
 export default router;
 
 

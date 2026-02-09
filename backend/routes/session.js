@@ -1,4 +1,4 @@
-import { findUserByToken, readUsers, writeUsers } from './auth.js';
+import { findUserByToken, mutateUsers, readUsers } from './auth.js';
 
 const AUTH_COOKIE_NAME = String(process.env.AUTH_COOKIE_NAME || 'xinchat_token').trim() || 'xinchat_token';
 
@@ -47,10 +47,23 @@ export const createAuthenticateMiddleware = ({ scope = 'Auth' } = {}) =>
         return;
       }
 
-      const users = await readUsers();
-      const found = await findUserByToken(users, token);
+      let users = await readUsers();
+      let found = await findUserByToken(users, token);
       if (found.touched) {
-        await writeUsers(users);
+        const mutation = await mutateUsers(
+          async (latestUsers) => {
+            const latestFound = await findUserByToken(latestUsers, token);
+            return {
+              changed: latestFound.touched,
+              result: { users: latestUsers, found: latestFound },
+            };
+          },
+          { defaultChanged: false }
+        );
+        if (mutation.result) {
+          users = mutation.result.users;
+          found = mutation.result.found;
+        }
       }
       if (!found.user) {
         res.status(401).json({

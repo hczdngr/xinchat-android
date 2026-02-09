@@ -6,9 +6,11 @@ import { WebSocket, WebSocketServer } from 'ws';
 import authRouter, {
   ensureStorage,
   findUserByToken,
+  forceRefreshUsersCache,
+  getUsersCacheInfo,
+  mutateUsers,
   readUsersCached,
   readUsers,
-  writeUsers,
 } from './routes/auth.js';
 import chatRouter, { ensureChatStorage, setChatNotifier } from './routes/chat.js';
 import friendsRouter, { setFriendsNotifier } from './routes/friends.js';
@@ -20,6 +22,7 @@ import groupsRouter, {
 import voiceRouter from './routes/voice.js';
 import voiceTranscribeRouter from './routes/voiceTranscribe.js';
 import insightApiRouter, { prewarmWarmTipCache } from './routes/insightApi.js';
+import adminRouter from './routes/admin.js';
 import { startInsightWorker } from './routes/insight.js';
 import { getTokenId, onTokenRevoked } from './tokenRevocation.js';
 import {
@@ -28,8 +31,17 @@ import {
   setStatusChangeHandler,
   setTimeoutHandler,
   startHeartbeatMonitor,
+  stopHeartbeatMonitor,
   touchHeartbeat,
 } from './online.js';
+import {
+  createHttpMetricsMiddleware,
+  createRequestContextMiddleware,
+  installConsoleBridge,
+  logger,
+  metrics,
+  serializeError,
+} from './observability.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -105,14 +117,58 @@ const WS_MAX_MESSAGE_BYTES = parsePositiveInt(
   256 * 1024,
   1024
 );
+const MAX_UID = parsePositiveInt(process.env.MAX_UID, 2147483647, 1);
+const WS_MAX_CONNECTIONS_PER_UID = parsePositiveInt(
+  process.env.WS_MAX_CONNECTIONS_PER_UID,
+  3,
+  1
+);
+const WS_CONNECTION_CLEANUP_INTERVAL_MS = parsePositiveInt(
+  process.env.WS_CONNECTION_CLEANUP_INTERVAL_MS,
+  30_000,
+  1_000
+);
+const WS_CONNECTION_STALE_MS = parsePositiveInt(
+  process.env.WS_CONNECTION_STALE_MS,
+  90_000,
+  10_000
+);
+const WS_MAX_SIGNAL_BYTES = parsePositiveInt(
+  process.env.WS_MAX_SIGNAL_BYTES,
+  128 * 1024,
+  512
+);
+const ADMIN_METRICS_ENABLED =
+  NODE_ENV !== 'production' || process.env.ENABLE_ADMIN_METRICS === 'true';
 const CORS_ALLOWED_ORIGINS = String(process.env.CORS_ORIGINS || '')
   .split(',')
   .map((item) => item.trim())
   .filter(Boolean);
 const CORS_ALLOW_ALL = NODE_ENV !== 'production' && CORS_ALLOWED_ORIGINS.length === 0;
+const isValidUid = (value) => Number.isInteger(value) && value > 0 && value <= MAX_UID;
+const estimatePayloadBytes = (value) => {
+  try {
+    return Buffer.byteLength(JSON.stringify(value ?? null), 'utf8');
+  } catch {
+    return 0;
+  }
+};
+
+installConsoleBridge();
 
 export const app = express();
 app.disable('x-powered-by');
+app.use(createRequestContextMiddleware());
+app.use(
+  createHttpMetricsMiddleware({
+    skipPaths: [
+      '/api/admin/metrics',
+      '/api/admin/bottlenecks',
+      '/api/admin/users/summary',
+      '/api/admin/products/summary',
+    ],
+  })
+);
 
 app.use(express.json({ limit: REQUEST_BODY_LIMIT }));
 app.use(express.urlencoded({ extended: true, limit: REQUEST_BODY_LIMIT }));
@@ -543,6 +599,166 @@ const routeMeta = [
   },
   {
     method: 'GET',
+    path: '/api/admin/metrics',
+    label: 'Admin metrics',
+    note: 'Return runtime counters, gauges, histograms, and cache state.',
+    templates: [{ name: 'Get metrics', body: null, hint: 'No body' }],
+  },
+  {
+    method: 'GET',
+    path: '/api/admin/bottlenecks',
+    label: 'Bottlenecks',
+    note: 'Return slow endpoints, error hotspots and tuning suggestions.',
+    templates: [{ name: 'Get bottlenecks', body: null, hint: 'X-Admin-Token or adminToken' }],
+  },
+  {
+    method: 'GET',
+    path: '/api/admin/users/summary',
+    label: 'Users summary',
+    note: 'Return aggregated user status and token counters.',
+    templates: [{ name: 'Users summary', body: null, hint: 'X-Admin-Token or adminToken' }],
+  },
+  {
+    method: 'GET',
+    path: '/api/admin/users',
+    label: 'Users list',
+    note: 'List users with pagination and keyword/status filters.',
+    templates: [
+      {
+        name: 'Page users',
+        body: null,
+        path: '/api/admin/users?page=1&pageSize=20&status=all&q=',
+        hint: 'X-Admin-Token or adminToken',
+      },
+    ],
+  },
+  {
+    method: 'GET',
+    path: '/api/admin/users/detail',
+    label: 'User detail',
+    note: 'Get one user detail by uid.',
+    templates: [
+      {
+        name: 'Read user',
+        body: null,
+        path: '/api/admin/users/detail?uid=100000000',
+        hint: 'X-Admin-Token or adminToken',
+      },
+    ],
+  },
+  {
+    method: 'POST',
+    path: '/api/admin/users/update',
+    label: 'Update user',
+    note: 'Update user profile/status fields with validation.',
+    templates: [
+      {
+        name: 'Patch user',
+        body: { uid: 100000000, nickname: 'new-name', status: 'active' },
+        hint: 'X-Admin-Token or adminToken',
+      },
+    ],
+  },
+  {
+    method: 'POST',
+    path: '/api/admin/users/revoke-all',
+    label: 'Revoke sessions',
+    note: 'Revoke all active user sessions and force offline.',
+    templates: [
+      {
+        name: 'Revoke by uid',
+        body: { uid: 100000000 },
+        hint: 'X-Admin-Token or adminToken',
+      },
+    ],
+  },
+  {
+    method: 'POST',
+    path: '/api/admin/users/soft-delete',
+    label: 'Soft delete user',
+    note: 'Soft delete or restore a user account.',
+    templates: [
+      {
+        name: 'Soft delete',
+        body: { uid: 100000000, restore: false },
+        hint: 'X-Admin-Token or adminToken',
+      },
+      {
+        name: 'Restore',
+        body: { uid: 100000000, restore: true },
+        hint: 'X-Admin-Token or adminToken',
+      },
+    ],
+  },
+  {
+    method: 'GET',
+    path: '/api/admin/products/summary',
+    label: 'Products summary',
+    note: 'Return product status and inventory aggregates.',
+    templates: [
+      {
+        name: 'Products summary',
+        body: null,
+        path: '/api/admin/products/summary?lowStockThreshold=10',
+        hint: 'X-Admin-Token or adminToken',
+      },
+    ],
+  },
+  {
+    method: 'GET',
+    path: '/api/admin/products',
+    label: 'Products list',
+    note: 'List products with pagination and keyword/status filters.',
+    templates: [
+      {
+        name: 'Page products',
+        body: null,
+        path: '/api/admin/products?page=1&pageSize=20&status=all&q=',
+        hint: 'X-Admin-Token or adminToken',
+      },
+    ],
+  },
+  {
+    method: 'POST',
+    path: '/api/admin/products/create',
+    label: 'Create product',
+    note: 'Create one product with validation and normalization.',
+    templates: [
+      {
+        name: 'New product',
+        body: { name: 'XinChat Pro', sku: 'XCP-001', price: 99, stock: 200, status: 'active' },
+        hint: 'X-Admin-Token or adminToken',
+      },
+    ],
+  },
+  {
+    method: 'POST',
+    path: '/api/admin/products/update',
+    label: 'Update product',
+    note: 'Update product fields by id.',
+    templates: [
+      {
+        name: 'Update product',
+        body: { id: 1, price: 119, stock: 150 },
+        hint: 'X-Admin-Token or adminToken',
+      },
+    ],
+  },
+  {
+    method: 'DELETE',
+    path: '/api/admin/products/delete',
+    label: 'Delete product',
+    note: 'Delete one product by id.',
+    templates: [
+      {
+        name: 'Delete product',
+        body: { id: 1 },
+        hint: 'X-Admin-Token or adminToken',
+      },
+    ],
+  },
+  {
+    method: 'GET',
     path: '/api/routes',
     label: 'Routes',
     note: 'List backend routes and templates.',
@@ -679,6 +895,58 @@ app.get('/api/routes', (req, res) => {
   res.json({ success: true, data: buildRouteResponse(app) });
 });
 
+const adminRuntime = {
+  startedAt: new Date().toISOString(),
+  ws: {
+    activeSockets: 0,
+    activeUsers: 0,
+    cleanupRuns: 0,
+    prunedConnections: 0,
+  },
+};
+
+app.get('/api/admin/metrics', async (req, res) => {
+  if (!ADMIN_METRICS_ENABLED) {
+    res.status(404).json({ success: false, message: '接口不存在。' });
+    return;
+  }
+  res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
+  res.setHeader('Pragma', 'no-cache');
+  res.setHeader('Expires', '0');
+  const refresh = String(req.query?.refresh || '').toLowerCase();
+  if (refresh === '1' || refresh === 'true') {
+    try {
+      await forceRefreshUsersCache();
+    } catch (error) {
+      logger.warn('Users cache refresh failed', {
+        requestId: req.requestId || '',
+        error: serializeError(error),
+      });
+    }
+  }
+  const uptimeMs = Math.floor(process.uptime() * 1000);
+  const memory = process.memoryUsage();
+  res.json({
+    success: true,
+    data: {
+      now: new Date().toISOString(),
+      startedAt: adminRuntime.startedAt,
+      uptimeMs,
+      process: {
+        pid: process.pid,
+        node: process.version,
+        platform: process.platform,
+        rssBytes: memory.rss,
+        heapTotalBytes: memory.heapTotal,
+        heapUsedBytes: memory.heapUsed,
+        externalBytes: memory.external,
+      },
+      ws: { ...adminRuntime.ws },
+      usersCache: getUsersCacheInfo(),
+      metrics: metrics.snapshot(),
+    },
+  });
+});
 app.use('/api', (req, res, next) => {
   // Dynamic API responses should not be cached; cached 304 responses have no body.
   delete req.headers['if-none-match'];
@@ -715,6 +983,7 @@ app.use('/api/groups', groupsRouter);
 app.use('/api/voice', voiceRouter);
 app.use('/api/chat/voice', voiceTranscribeRouter);
 app.use('/api/insight', insightApiRouter);
+app.use('/api/admin', adminRouter);
 
 app.use((err, req, res, next) => {
   if (!err) {
@@ -725,11 +994,15 @@ app.use((err, req, res, next) => {
     res.status(413).json({ success: false, message: '请求体过大。' });
     return;
   }
-  console.error('Unhandled server error:', err);
+  logger.error('Unhandled server error', {
+    requestId: req.requestId || '',
+    error: serializeError(err),
+  });
   res.status(500).json({ success: false, message: '服务器错误。' });
 });
 
 export function startServer(port = PORT) {
+  metrics.incCounter('server_start_total', 1);
   const server = http.createServer(app);
   server.keepAliveTimeout = HTTP_KEEP_ALIVE_TIMEOUT_MS;
   server.headersTimeout = HTTP_HEADERS_TIMEOUT_MS;
@@ -746,7 +1019,7 @@ export function startServer(port = PORT) {
     clientTracking: false,
     maxPayload: WS_MAX_PAYLOAD_BYTES,
   });
-  const insightWorker = startInsightWorker({ logger: console });
+  const insightWorker = startInsightWorker({ logger });
   server.on('close', () => {
     insightWorker.stop();
   });
@@ -756,48 +1029,145 @@ export function startServer(port = PORT) {
     type: 'presence',
     data: { uid, online },
   });
-
-  const addConnection = (uid, socket) => {
-    if (socket._tracked) return;
-    socket._tracked = true;
-    activeSockets += 1;
-    const set = connections.get(uid) || new Set();
-    set.add(socket);
-    connections.set(uid, set);
+  const updateWsGauges = () => {
+    metrics.setGauge('ws_active_sockets', activeSockets);
+    metrics.setGauge('ws_connected_users', connections.size);
+    adminRuntime.ws.activeSockets = activeSockets;
+    adminRuntime.ws.activeUsers = connections.size;
+  };
+  const touchSocket = (socket) => {
+    if (!socket) return;
+    socket._lastSeenAt = Date.now();
   };
 
   const removeConnection = (uid, socket) => {
     if (socket?._tracked) {
       socket._tracked = false;
       activeSockets = Math.max(0, activeSockets - 1);
+      metrics.incCounter('ws_connections_closed_total', 1);
     }
     const set = connections.get(uid);
-    if (!set) return;
-    set.delete(socket);
-    if (set.size === 0) {
-      connections.delete(uid);
-      markDisconnected(uid);
+    if (set) {
+      set.delete(socket);
+      if (set.size === 0) {
+        connections.delete(uid);
+        markDisconnected(uid);
+      }
+    }
+    updateWsGauges();
+  };
+
+  const cleanupUidConnections = (uid, { closeCode = 1001, reason = 'stale' } = {}) => {
+    const set = connections.get(uid);
+    if (!set || set.size === 0) return 0;
+    const now = Date.now();
+    let removed = 0;
+    Array.from(set).forEach((socket) => {
+      const notOpen = socket.readyState !== WebSocket.OPEN;
+      const lastSeenAt = Number(socket?._lastSeenAt || socket?._connectedAt || 0);
+      const isStale = Number.isFinite(lastSeenAt) && now - lastSeenAt > WS_CONNECTION_STALE_MS;
+      if (!notOpen && !isStale) {
+        return;
+      }
+      if (isStale && socket.readyState === WebSocket.OPEN) {
+        try {
+          socket.close(closeCode, 'Stale connection');
+        } catch {}
+      }
+      removeConnection(uid, socket);
+      removed += 1;
+    });
+    if (removed > 0) {
+      metrics.incCounter('ws_connections_pruned_total', removed, { reason });
+      adminRuntime.ws.prunedConnections += removed;
+    }
+    return removed;
+  };
+
+  const cleanupAllConnections = (reason = 'periodic') => {
+    let removed = 0;
+    connections.forEach((_, uid) => {
+      removed += cleanupUidConnections(uid, { reason });
+    });
+    adminRuntime.ws.cleanupRuns += 1;
+    metrics.incCounter('ws_cleanup_runs_total', 1, { reason });
+    if (removed > 0) {
+      logger.warn('Pruned websocket connections', { reason, removed });
     }
   };
+
+  const wsCleanupTimer = setInterval(() => {
+    cleanupAllConnections('interval');
+  }, WS_CONNECTION_CLEANUP_INTERVAL_MS);
+  wsCleanupTimer.unref?.();
+  server.on('close', () => {
+    clearInterval(wsCleanupTimer);
+    cleanupAllConnections('server_close');
+  });
+
+  const enforcePerUidConnectionLimit = (uid) => {
+    const set = connections.get(uid);
+    if (!set || set.size <= WS_MAX_CONNECTIONS_PER_UID) return;
+    const sockets = Array.from(set).sort(
+      (left, right) =>
+        Number(left?._connectedAt || 0) - Number(right?._connectedAt || 0)
+    );
+    const overflow = sockets.length - WS_MAX_CONNECTIONS_PER_UID;
+    for (let i = 0; i < overflow; i += 1) {
+      const oldSocket = sockets[i];
+      try {
+        oldSocket.close(1008, 'Too many connections');
+      } catch {}
+      removeConnection(uid, oldSocket);
+    }
+    if (overflow > 0) {
+      metrics.incCounter('ws_connections_pruned_total', overflow, {
+        reason: 'per_uid_limit',
+      });
+      adminRuntime.ws.prunedConnections += overflow;
+    }
+  };
+
+  const addConnection = (uid, socket) => {
+    if (!isValidUid(uid) || socket?._tracked) return;
+    cleanupUidConnections(uid, { reason: 'before_add' });
+    socket._tracked = true;
+    socket._connectedAt = Date.now();
+    touchSocket(socket);
+    activeSockets += 1;
+    metrics.incCounter('ws_connections_opened_total', 1);
+    const set = connections.get(uid) || new Set();
+    set.add(socket);
+    connections.set(uid, set);
+    enforcePerUidConnectionLimit(uid);
+    updateWsGauges();
+  };
+  updateWsGauges();
 
   const sendToUid = (uid, payload) => {
     const set = connections.get(uid);
     if (!set) return;
     const message = JSON.stringify(payload);
-    set.forEach((socket) => {
+    Array.from(set).forEach((socket) => {
       if (socket.readyState !== WebSocket.OPEN) {
+        removeConnection(uid, socket);
         return;
       }
       if (socket.bufferedAmount > WS_MAX_BACKPRESSURE_BYTES) {
         try {
           socket.close(1013, 'Client too slow');
         } catch {}
+        metrics.incCounter('ws_backpressure_disconnect_total', 1);
         removeConnection(uid, socket);
         return;
       }
       try {
         socket.send(message);
+        metrics.incCounter('ws_messages_sent_total', 1, {
+          type: String(payload?.type || 'unknown'),
+        });
       } catch {
+        metrics.incCounter('ws_send_errors_total', 1);
         removeConnection(uid, socket);
       }
     });
@@ -806,12 +1176,13 @@ export function startServer(port = PORT) {
   const closeRevokedTokenConnections = (tokenId) => {
     if (!tokenId) return;
     connections.forEach((set, uid) => {
-      set.forEach((socket) => {
+      Array.from(set).forEach((socket) => {
         if (socket?._tokenId !== tokenId) return;
         try {
           socket.close(4001, 'Token revoked');
         } catch {}
         removeConnection(uid, socket);
+        metrics.incCounter('ws_connections_revoked_total', 1);
       });
     });
   };
@@ -825,10 +1196,19 @@ export function startServer(port = PORT) {
 
   const verifyToken = async (token) => {
     if (!token) return null;
-    const users = await readUsersCached();
-    const found = await findUserByToken(users, token);
+    let users = await readUsersCached();
+    let found = await findUserByToken(users, token);
     if (found.touched) {
-      await writeUsers(users);
+      const mutation = await mutateUsers(
+        async (latestUsers) => {
+          const latestFound = await findUserByToken(latestUsers, token);
+          return { changed: latestFound.touched, result: latestFound };
+        },
+        { defaultChanged: false }
+      );
+      if (mutation.result) {
+        found = mutation.result;
+      }
     }
     if (!found.user) {
       return null;
@@ -840,37 +1220,52 @@ export function startServer(port = PORT) {
   };
 
   const updateUserOnlineState = async (uid, online) => {
-    const users = await readUsersCached();
-    const userIndex = users.findIndex((item) => item.uid === uid);
-    if (userIndex === -1) return;
-    const shouldWrite = users[userIndex].online !== online;
-    if (shouldWrite) {
-      users[userIndex] = {
-        ...users[userIndex],
-        online,
-      };
-      await writeUsers(users);
+    if (!isValidUid(uid)) return;
+    const mutation = await mutateUsers(
+      (users) => {
+        const userIndex = users.findIndex((item) => item.uid === uid);
+        if (userIndex === -1) {
+          return { changed: false, result: [] };
+        }
+        const shouldWrite = users[userIndex].online !== online;
+        if (shouldWrite) {
+          users[userIndex] = {
+            ...users[userIndex],
+            online,
+          };
+        }
+        const notifyUids = users
+          .filter((item) => Array.isArray(item.friends) && item.friends.includes(uid))
+          .map((item) => item.uid);
+        return { changed: shouldWrite, result: notifyUids };
+      },
+      { defaultChanged: false }
+    );
+    if (mutation.changed) {
+      metrics.incCounter('presence_state_changes_total', 1, {
+        online: online ? 'true' : 'false',
+      });
     }
-    const notifyUids = users
-      .filter((item) => Array.isArray(item.friends) && item.friends.includes(uid))
-      .map((item) => item.uid);
+    const notifyUids = Array.isArray(mutation.result) ? mutation.result : [];
     notifyUids.forEach((friendUid) =>
       sendToUid(friendUid, presencePayload(uid, online))
     );
   };
 
   const resetOnlineState = async () => {
-    const users = await readUsers();
-    let touched = false;
-    users.forEach((user) => {
-      if (user.online) {
-        user.online = false;
-        touched = true;
-      }
-    });
-    if (touched) {
-      await writeUsers(users);
-    }
+    await mutateUsers(
+      (users) => {
+        let touched = false;
+        users.forEach((user) => {
+          if (user.online) {
+            user.online = false;
+            touched = true;
+          }
+        });
+        return { changed: touched };
+      },
+      { defaultChanged: false }
+    );
   };
 
   setStatusChangeHandler((uid, online) => {
@@ -879,15 +1274,18 @@ export function startServer(port = PORT) {
   setTimeoutHandler((uid) => {
     const set = connections.get(uid);
     if (set) {
-      set.forEach((socket) => {
+      Array.from(set).forEach((socket) => {
         try {
           socket.close(4000, 'Heartbeat timeout');
         } catch {}
+        removeConnection(uid, socket);
       });
-      connections.delete(uid);
     }
   });
   startHeartbeatMonitor();
+  server.on('close', () => {
+    stopHeartbeatMonitor();
+  });
 
   const sendPresenceSnapshot = async (socket, user) => {
     try {
@@ -898,14 +1296,14 @@ export function startServer(port = PORT) {
         .map((item) => ({ uid: item.uid, online: isUserOnline(item) }));
       socket.send(JSON.stringify({ type: 'presence_snapshot', data: snapshot }));
     } catch (error) {
-      console.error('Presence snapshot error:', error);
+      logger.error('Presence snapshot error', { error: serializeError(error) });
     }
   };
 
   wss.on('connection', async (socket, req) => {
     const cleanupSocket = () => {
       const uid = Number(socket?._uid);
-      if (Number.isInteger(uid) && uid > 0) {
+      if (isValidUid(uid)) {
         removeConnection(uid, socket);
       }
     };
@@ -913,6 +1311,7 @@ export function startServer(port = PORT) {
     socket.on('error', cleanupSocket);
     try {
       if (activeSockets >= WS_MAX_CONNECTIONS) {
+        metrics.incCounter('ws_connection_reject_total', 1, { reason: 'global_limit' });
         socket.close(1013, 'Server busy');
         return;
       }
@@ -937,7 +1336,13 @@ export function startServer(port = PORT) {
         }
       }
       if (!user) {
+        metrics.incCounter('ws_connection_reject_total', 1, { reason: 'unauthorized' });
         socket.close(1008, 'Unauthorized');
+        return;
+      }
+      if (!isValidUid(user.uid)) {
+        metrics.incCounter('ws_connection_reject_total', 1, { reason: 'invalid_uid' });
+        socket.close(1008, 'Invalid uid');
         return;
       }
       socket._user = user;
@@ -951,7 +1356,24 @@ export function startServer(port = PORT) {
       socket.send(JSON.stringify({ type: 'ready', uid: user.uid }));
       await sendPresenceSnapshot(socket, user);
       socket.on('message', (raw) => {
+        const sendVoiceStatus = (targetUid, status, detail = '') => {
+          if (socket.readyState !== WebSocket.OPEN) return;
+          try {
+            socket.send(
+              JSON.stringify({
+                type: 'voice_signal_status',
+                data: {
+                  targetUid: isValidUid(targetUid) ? targetUid : null,
+                  status,
+                  detail,
+                },
+              })
+            );
+          } catch {}
+          metrics.incCounter('ws_voice_signal_total', 1, { status });
+        };
         try {
+          touchSocket(socket);
           const rawSize = Buffer.isBuffer(raw)
             ? raw.length
             : Buffer.byteLength(String(raw || ''), 'utf8');
@@ -971,49 +1393,61 @@ export function startServer(port = PORT) {
           }
           if (message?.type === 'voice_signal') {
             const targetUid = Number(message?.data?.targetUid);
-            if (!Number.isInteger(targetUid)) return;
-            if (!Array.isArray(user.friends) || !user.friends.includes(targetUid)) {
-              socket.send(
-                JSON.stringify({
-                  type: 'voice_signal_status',
-                  data: { targetUid, status: 'not_friend' },
-                })
-              );
+            if (!isValidUid(targetUid) || targetUid === user.uid) {
+              sendVoiceStatus(targetUid, 'invalid_target');
               return;
             }
-            const signal = message?.data?.signal || null;
-            if (!signal) return;
+            if (!Array.isArray(user.friends) || !user.friends.includes(targetUid)) {
+              sendVoiceStatus(targetUid, 'not_friend');
+              return;
+            }
+            const signal = message?.data?.signal;
+            const signalType = typeof signal;
+            const signalBytes = estimatePayloadBytes(signal);
+            if (
+              signal == null ||
+              (signalType !== 'string' && signalType !== 'object') ||
+              signalBytes <= 0 ||
+              signalBytes > WS_MAX_SIGNAL_BYTES
+            ) {
+              sendVoiceStatus(targetUid, 'invalid_signal');
+              return;
+            }
+            cleanupUidConnections(targetUid, { reason: 'before_voice_signal' });
             const targetConnections = connections.get(targetUid);
             if (!targetConnections || targetConnections.size === 0) {
-              socket.send(
-                JSON.stringify({
-                  type: 'voice_signal_status',
-                  data: { targetUid, status: 'offline' },
-                })
-              );
+              sendVoiceStatus(targetUid, 'offline');
               return;
             }
             sendToUid(targetUid, {
               type: 'voice_signal',
               data: { fromUid: user.uid, signal },
             });
-            socket.send(
-              JSON.stringify({
-                type: 'voice_signal_status',
-                data: { targetUid, status: 'sent' },
-              })
-            );
+            sendVoiceStatus(targetUid, 'sent');
             return;
           }
-        } catch {}
+        } catch (error) {
+          metrics.incCounter('ws_message_error_total', 1);
+          logger.warn('WebSocket message handling error', {
+            uid: user.uid,
+            error: serializeError(error),
+          });
+        }
       });
-    } catch {
+    } catch (error) {
+      metrics.incCounter('ws_connection_error_total', 1);
+      logger.error('WebSocket connection handler error', {
+        error: serializeError(error),
+      });
       socket.close(1011, 'Server error');
     }
   });
 
   setChatNotifier((entry) => {
     const payload = { type: 'chat', data: entry };
+    metrics.incCounter('chat_notifier_events_total', 1, {
+      targetType: String(entry?.targetType || 'unknown'),
+    });
     if (entry.targetType === 'private') {
       sendToUid(entry.senderUid, payload);
       sendToUid(entry.targetUid, payload);
@@ -1028,7 +1462,9 @@ export function startServer(port = PORT) {
           }
           set.forEach((uid) => sendToUid(uid, payload));
         })
-        .catch(() => undefined);
+        .catch((error) => {
+          logger.warn('Group chat notifier failed', { error: serializeError(error) });
+        });
     }
   });
   setFriendsNotifier((uids, payload) => {
@@ -1047,15 +1483,18 @@ export function startServer(port = PORT) {
       (async () => {
         try {
           const users = await readUsers();
-          await prewarmWarmTipCache({ users, logger: console });
+          await prewarmWarmTipCache({ users, logger });
         } catch (error) {
-          console.warn(
-            '[warm-tip] prewarm failed',
-            error instanceof Error ? error.message : error
-          );
+          logger.warn('[warm-tip] prewarm failed', {
+            error: error instanceof Error ? error.message : String(error || ''),
+          });
         }
       })();
-      console.log(`Backend listening on http://0.0.0.0:${port}`);
+      logger.info('Backend listening', {
+        host: '0.0.0.0',
+        port,
+        adminMetricsEnabled: ADMIN_METRICS_ENABLED,
+      });
     }
   );
 }
