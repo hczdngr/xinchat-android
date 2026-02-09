@@ -1,5 +1,5 @@
 import express from 'express';
-import { writeUsers } from './auth.js';
+import { mutateUsers } from './auth.js';
 import { createAuthenticateMiddleware } from './session.js';
 
 const router = express.Router();
@@ -69,7 +69,7 @@ router.get('/directory', authenticate, async (req, res) => {
 router.get('/contact', authenticate, async (req, res) => {
   try {
     const uid = Number(req.query.uid || req.body?.uid);
-    if (!Number.isInteger(uid)) {
+    if (!Number.isInteger(uid) || uid <= 0) {
       res.status(400).json({ success: false, message: '用户编号无效。' });
       return;
     }
@@ -97,17 +97,37 @@ router.post('/domain', authenticate, async (req, res) => {
       res.status(400).json({ success: false, message: '语音域名格式无效。' });
       return;
     }
-    const { users, userIndex, user } = req.auth;
-    if (userIndex == null || !users[userIndex]) {
+
+    const { user } = req.auth;
+    const mutation = await mutateUsers(
+      (users) => {
+        const userIndex = users.findIndex((item) => item.uid === user.uid);
+        if (userIndex < 0) {
+          return { changed: false, result: null };
+        }
+        const previousDomain =
+          typeof users[userIndex].domain === 'string' ? users[userIndex].domain : '';
+        if (previousDomain === domain) {
+          return {
+            changed: false,
+            result: { uid: users[userIndex].uid, domain: previousDomain },
+          };
+        }
+        users[userIndex] = {
+          ...users[userIndex],
+          domain,
+        };
+        return { changed: true, result: { uid: users[userIndex].uid, domain } };
+      },
+      { defaultChanged: false }
+    );
+
+    if (!mutation.result) {
       res.status(404).json({ success: false, message: '用户不存在。' });
       return;
     }
-    users[userIndex] = {
-      ...users[userIndex],
-      domain,
-    };
-    await writeUsers(users);
-    res.json({ success: true, data: { uid: user.uid, domain } });
+
+    res.json({ success: true, data: mutation.result });
   } catch (error) {
     console.error('Voice domain error:', error);
     res.status(500).json({ success: false, message: '更新语音域名失败。' });

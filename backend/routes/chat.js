@@ -44,6 +44,10 @@ const MAX_STICKER_BATCH_UPLOAD = 9;
 const ALLOWED_STICKER_EXTS = new Set(['png', 'jpg', 'jpeg', 'gif', 'webp']);
 const MAX_DEVICE_ID_LENGTH = 128;
 const MAX_DEVICE_CREATED_AT_FUTURE_DRIFT_MS = 5 * 60 * 1000;
+const MAX_UID = Number.parseInt(String(process.env.MAX_UID || '2147483647'), 10);
+const SAFE_MAX_UID = Number.isInteger(MAX_UID) && MAX_UID > 0 ? MAX_UID : 2147483647;
+const isValidUid = (value) =>
+  Number.isInteger(value) && value > 0 && value <= SAFE_MAX_UID;
 
 let sqlModule = null;
 let db = null;
@@ -946,7 +950,7 @@ router.post('/send', authenticate, async (req, res) => {
 
     const senderUid = Number(body.senderUid);
     const targetUid = Number(body.targetUid);
-    if (!Number.isInteger(senderUid) || !Number.isInteger(targetUid)) {
+    if (!isValidUid(senderUid) || !isValidUid(targetUid)) {
       res.status(400).json({ success: false, message: '请求失败。' });
       return;
     }
@@ -1506,7 +1510,7 @@ router.get('/get', authenticate, async (req, res) => {
       res.status(400).json({ success: false, message: '请求失败。' });
       return;
     }
-    if (!Number.isInteger(targetUid)) {
+    if (!isValidUid(targetUid)) {
       res.status(400).json({ success: false, message: '请求失败。' });
       return;
     }
@@ -1874,7 +1878,7 @@ router.post('/delete-cutoff', authenticate, async (req, res) => {
       res.status(400).json({ success: false, message: '请求失败。' });
       return;
     }
-    if (!Number.isInteger(targetUid) || targetUid <= 0) {
+    if (!isValidUid(targetUid)) {
       res.status(400).json({ success: false, message: '请求失败。' });
       return;
     }
@@ -1999,10 +2003,10 @@ router.delete('/del', authenticate, async (req, res) => {
     const isSender = Number.isInteger(senderUid) && senderUid === user.uid;
     const isPrivateRecipient =
       targetType === 'private' &&
-      Number.isInteger(targetUid) &&
+      isValidUid(targetUid) &&
       targetUid === user.uid;
     let isGroupMember = false;
-    if (targetType === 'group' && Number.isInteger(targetUid) && targetUid > 0) {
+    if (targetType === 'group' && isValidUid(targetUid)) {
       const groups = await readGroups();
       const group = groups.find((item) => Number(item?.id) === targetUid);
       const memberUids = Array.isArray(group?.memberUids)

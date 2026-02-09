@@ -2,7 +2,7 @@ import fs from 'fs/promises';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import initSqlJs from 'sql.js';
-import { readUsers, writeUsers } from './auth.js';
+import { mutateUsers, readUsers } from './auth.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -592,25 +592,30 @@ export const startInsightWorker = ({
       requestedModel: defaultModel,
     });
 
-    const freshUsers = await readUsers();
-    const freshIndex = freshUsers.findIndex((item) => item?.uid === uid);
-    if (freshIndex < 0) return;
-
-    const nextProfile = buildAiProfile({
-      previous: freshUsers[freshIndex].aiProfile,
-      model: result.model,
-      sampleMeta,
-      totalSentCount,
-      analysis: result.analysis,
-      cooldownHours,
-      minNewMessages,
-      hourlySentThreshold,
-    });
-    freshUsers[freshIndex] = {
-      ...freshUsers[freshIndex],
-      aiProfile: nextProfile,
-    };
-    await writeUsers(freshUsers);
+    await mutateUsers(
+      (users) => {
+        const freshIndex = users.findIndex((item) => item?.uid === uid);
+        if (freshIndex < 0) {
+          return { changed: false };
+        }
+        const nextProfile = buildAiProfile({
+          previous: users[freshIndex].aiProfile,
+          model: result.model,
+          sampleMeta,
+          totalSentCount,
+          analysis: result.analysis,
+          cooldownHours,
+          minNewMessages,
+          hourlySentThreshold,
+        });
+        users[freshIndex] = {
+          ...users[freshIndex],
+          aiProfile: nextProfile,
+        };
+        return { changed: true };
+      },
+      { defaultChanged: false }
+    );
   };
 
   const processQueue = async () => {
