@@ -219,7 +219,7 @@ const getNextGroupId = (groups) => {
 const getDisplayName = (user) => {
   const nickname = typeof user?.nickname === 'string' ? user.nickname.trim() : '';
   const username = typeof user?.username === 'string' ? user.username.trim() : '';
-  return nickname || username || `ÓÃ»§${Number(user?.uid) || ''}`;
+  return nickname || username || `\u7528\u6237${Number(user?.uid) || ''}`;
 };
 
 const toMemberPreview = (user, uid, group) => ({
@@ -242,7 +242,7 @@ const buildDefaultGroupName = (inviteOrderUids, users, selfUid) => {
     .filter(Boolean)
     .map((user) => getDisplayName(user))
     .filter(Boolean);
-  const joined = names.join('¡¢') || 'ÈºÁÄ';
+  const joined = names.join('\u3001') || '\u7fa4\u804a';
   return `${joined}(${Math.max(2, nameOrder.length)})`.slice(0, GROUP_NAME_MAX_LEN);
 };
 
@@ -305,7 +305,7 @@ router.get('/list', authenticate, async (req, res) => {
     res.json({ success: true, groups: list });
   } catch (error) {
     console.error('Group list error:', error);
-    res.status(500).json({ success: false, message: '»ñÈ¡ÈºÁÄÁĞ±íÊ§°Ü¡£' });
+    res.status(500).json({ success: false, message: 'è·å–ç¾¤èŠåˆ—è¡¨å¤±è´¥ã€‚' });
   }
 });
 
@@ -315,23 +315,23 @@ router.get('/detail', authenticate, async (req, res) => {
     const { user, users } = req.auth;
     const groupId = Number(req.query?.groupId || req.body?.groupId);
     if (!Number.isInteger(groupId) || groupId <= 0) {
-      res.status(400).json({ success: false, message: 'ÈºIDÎŞĞ§¡£' });
+      res.status(400).json({ success: false, message: 'ç¾¤IDæ— æ•ˆã€‚' });
       return;
     }
     const groups = await readGroups();
     const group = groups.find((item) => item.id === groupId);
     if (!group) {
-      res.status(404).json({ success: false, message: 'ÈºÁÄ²»´æÔÚ¡£' });
+      res.status(404).json({ success: false, message: 'ç¾¤èŠä¸å­˜åœ¨ã€‚' });
       return;
     }
     if (!normalizeMemberUids(group.memberUids).includes(user.uid)) {
-      res.status(403).json({ success: false, message: 'Äã²»ÔÚ¸ÃÈºÁÄÖĞ¡£' });
+      res.status(403).json({ success: false, message: 'ä½ ä¸åœ¨è¯¥ç¾¤èŠä¸­ã€‚' });
       return;
     }
     res.json({ success: true, group: serializeGroup(group, users, user.uid) });
   } catch (error) {
     console.error('Group detail error:', error);
-    res.status(500).json({ success: false, message: '»ñÈ¡ÈºÁÄÏêÇéÊ§°Ü¡£' });
+    res.status(500).json({ success: false, message: 'è·å–ç¾¤èŠè¯¦æƒ…å¤±è´¥ã€‚' });
   }
 });
 
