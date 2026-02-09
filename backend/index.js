@@ -108,6 +108,7 @@ app.use((req, res, next) => {
     res.setHeader('Access-Control-Allow-Origin', '*');
   }
   res.setHeader('Access-Control-Allow-Methods', 'GET,POST,DELETE,OPTIONS');
+  res.setHeader('Access-Control-Max-Age', '600');
   const requestHeaders = req.headers['access-control-request-headers'];
   if (requestHeaders) {
     res.setHeader('Access-Control-Allow-Headers', requestHeaders);
@@ -851,6 +852,14 @@ export function startServer(port = PORT) {
   };
 
   wss.on('connection', async (socket, req) => {
+    const cleanupSocket = () => {
+      const uid = Number(socket?._uid);
+      if (Number.isInteger(uid) && uid > 0) {
+        removeConnection(uid, socket);
+      }
+    };
+    socket.on('close', cleanupSocket);
+    socket.on('error', cleanupSocket);
     try {
       if (activeSockets >= WS_MAX_CONNECTIONS) {
         socket.close(1013, 'Server busy');
@@ -929,8 +938,6 @@ export function startServer(port = PORT) {
           }
         } catch {}
       });
-      socket.on('close', () => removeConnection(user.uid, socket));
-      socket.on('error', () => removeConnection(user.uid, socket));
     } catch {
       socket.close(1011, 'Server error');
     }

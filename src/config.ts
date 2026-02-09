@@ -1,8 +1,14 @@
 ﻿const DEFAULT_API_PORT = 3001;
-const LOCAL_MACHINE_HOST = 'localhost';
+const LOCAL_MACHINE_HOST = '192.168.0.100';
 const LOCAL_MACHINE_API_BASE = `http://${LOCAL_MACHINE_HOST}:${DEFAULT_API_PORT}`;
 
 const trimTrailingSlash = (value: string) => value.replace(/\/+$/, '');
+const readBrowserOrigin = () => {
+  const origin = String((globalThis as any)?.location?.origin || '').trim();
+  if (!origin) return '';
+  if (!/^https?:\/\//i.test(origin)) return '';
+  return trimTrailingSlash(origin);
+};
 
 const readEnvBase = () => {
   const proc = (globalThis as any)?.process;
@@ -23,6 +29,8 @@ const readEnvBase = () => {
 const resolveApiBase = () => {
   const fromEnv = readEnvBase();
   if (fromEnv) return fromEnv;
+  const browserOrigin = readBrowserOrigin();
+  if (browserOrigin) return browserOrigin;
   return LOCAL_MACHINE_API_BASE;
 };
 
@@ -46,7 +54,7 @@ export const normalizeImageUrl = (value?: string) => {
   if (!value) return '';
   const trimmed = stripUnsafeChars(String(value)).trim();
   if (!trimmed) return '';
-  if (trimmed.startsWith('data:image/')) return trimmed;
+  if (/^(data:|blob:|file:|content:\/\/)/i.test(trimmed)) return trimmed;
   if (trimmed.startsWith('/uploads/')) {
     const cleaned = trimmed
       .replace(/\/uploads\/images\/(uploads\/images\/)+/g, '/uploads/images/')

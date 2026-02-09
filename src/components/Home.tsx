@@ -90,6 +90,8 @@ type Group = {
   updatedAt?: string;
 };
 
+type ChatTargetType = 'private' | 'group';
+
 type Message = {
   id: number | string;
   type: string;
@@ -115,7 +117,8 @@ type ChatBackgroundMap = Record<number, ChatBackgroundKey>;
 type DeleteCutoffMap = Record<number, number>;
 type MessageListItem = {
   uid: number;
-  targetType: 'private' | 'group';
+  targetUid: number;
+  targetType: ChatTargetType;
   title: string;
   preview: string;
   latest?: { text: string; time: string; ts: number };
@@ -128,7 +131,8 @@ type SearchChatHit = {
   key: string;
   messageId: string;
   uid: number;
-  targetType: 'private' | 'group';
+  targetUid: number;
+  targetType: ChatTargetType;
   title: string;
   content: string;
   createdAt: string;
@@ -163,13 +167,35 @@ type CustomSticker = {
   updatedAt?: string;
 };
 
-const PAGE_LIMIT = 30;
+const CHAT_HISTORY_PAGE_SIZE = 50;
+const CHAT_RENDER_CHUNK_SIZE = 50;
+const CHAT_TOP_LOAD_THRESHOLD = 40;
+const GROUP_CHAT_UID_OFFSET = 4000000000000000;
+
+const encodeChatUid = (targetUid: number, targetType: ChatTargetType): number => {
+  const normalizedUid = Number(targetUid);
+  if (!Number.isInteger(normalizedUid) || normalizedUid <= 0) return 0;
+  if (targetType === 'private') return normalizedUid;
+  const encoded = GROUP_CHAT_UID_OFFSET + normalizedUid;
+  return Number.isSafeInteger(encoded) ? encoded : 0;
+};
+
+const decodeChatUid = (chatUid: number): { targetUid: number; targetType: ChatTargetType } => {
+  const normalizedUid = Number(chatUid);
+  if (!Number.isInteger(normalizedUid) || normalizedUid <= 0) {
+    return { targetUid: 0, targetType: 'private' };
+  }
+  if (normalizedUid >= GROUP_CHAT_UID_OFFSET) {
+    return { targetUid: normalizedUid - GROUP_CHAT_UID_OFFSET, targetType: 'group' };
+  }
+  return { targetUid: normalizedUid, targetType: 'private' };
+};
 const HEARTBEAT_MS = 20000;
 const RECONNECT_BASE_MS = 1500;
 const RECONNECT_MAX_MS = 10000;
 const HOME_REFRESH_DELAY_MS = 2000;
 const CHAT_TIME_GAP_MS = 3 * 60 * 1000;
-const CHAT_INPUT_MAX_LENGTH = 3000;
+const CHAT_INPUT_MAX_LENGTH = 1024;
 const SCENE_TRANSITION_MS = 180;
 const SCENE_EDGE_SNAP_MS = 160;
 const SCENE_EDGE_EXIT_MS = 180;
@@ -185,6 +211,8 @@ const VOICE_PLAYBACK_BUFFER_MS = 420;
 const MAX_RECENT_EMOJIS = 14;
 const MAX_STICKER_BATCH_PICK = 9;
 const MAX_CHAT_IMAGE_PICK = 9;
+const OUTGOING_MESSAGE_ENTER_MS = 500;
+const OUTGOING_MESSAGE_ENTER_WINDOW_MS = 3000;
 const dedupeEmojiList = (list: string[]) =>
   Array.from(new Set(list.map((item) => String(item || '').trim()).filter(Boolean)));
 const DEFAULT_RECENT_EMOJIS = ['🥹', '😭', '😱', '🥺', '😂', '😍', '👍', '🤔', '😎', '🙏', '🥰', '🤗', '😆', '🤭'];
@@ -853,6 +881,19 @@ const sanitizeDeleteCutoffMap = (input: any): DeleteCutoffMap => {
   return next;
 };
 
+const sanitizeReadAtMap = (input: any): ReadAtMap => {
+  if (!input || typeof input !== 'object') return {};
+  const next: ReadAtMap = {};
+  Object.entries(input).forEach(([rawUid, rawValue]) => {
+    const uid = Number(rawUid);
+    if (!Number.isInteger(uid) || uid <= 0) return;
+    const ts = Number(rawValue);
+    if (!Number.isFinite(ts) || ts <= 0) return;
+    next[uid] = ts;
+  });
+  return next;
+};
+
 const CHAT_BACKGROUND_KEY_SET = new Set<ChatBackgroundKey>(
   CHAT_BACKGROUND_PRESETS.map((item) => item.key)
 );
@@ -908,6 +949,282 @@ const getGroupDisplayName = (group?: Partial<Group> | null) => {
   return Number.isInteger(gid) && gid > 0 ? `群聊${gid}` : '群聊';
 };
 
+const getMessageClientMessageId = (message: any): string => {
+  const fromRawData = String(message?.raw?.data?.clientMessageId || '').trim();
+  if (fromRawData) return fromRawData;
+  const fromData = String(message?.data?.clientMessageId || '').trim();
+  if (fromData) return fromData;
+  return '';
+};
+
+const getMessageRenderKey = (message: Message): string => {
+  const clientMessageId = getMessageClientMessageId(message);
+  if (clientMessageId) return `client:${Number(message?.senderUid) || 0}:${clientMessageId}`;
+  return `msg:${String(message?.id ?? '')}`;
+};
+
+const withOutgoingEnterAnimation = (
+  entry: any,
+  options?: { clientMessageId?: string; appearAtMs?: number }
+) => {
+  if (!entry || typeof entry !== 'object') return entry;
+  const rawData = entry?.data && typeof entry.data === 'object' ? entry.data : {};
+  const fallbackClientMessageId = String(rawData?.clientMessageId || '').trim();
+  const preferredClientMessageId = String(options?.clientMessageId || '').trim();
+  const clientMessageId = preferredClientMessageId || fallbackClientMessageId;
+  const parsedAppearAtMs = Number(options?.appearAtMs);
+  const appearAtMs =
+    Number.isFinite(parsedAppearAtMs) && parsedAppearAtMs > 0 ? parsedAppearAtMs : Date.now();
+  return {
+    ...entry,
+    data: {
+      ...rawData,
+      ...(clientMessageId ? { clientMessageId } : {}),
+      clientPending: false,
+      clientFailed: false,
+      clientAnimateIn: true,
+      clientAppearAtMs: appearAtMs,
+    },
+  };
+};
+
+type OutgoingMessageEnterRowProps = {
+  shouldAnimate: boolean;
+  style?: any;
+  onLayout?: (event: any) => void;
+  children: React.ReactNode;
+};
+
+const OutgoingMessageEnterRow = React.memo(function OutgoingMessageEnterRow({
+  shouldAnimate,
+  style,
+  onLayout,
+  children,
+}: OutgoingMessageEnterRowProps) {
+  const progress = useRef(new Animated.Value(shouldAnimate ? 0 : 1)).current;
+  const animatedOnceRef = useRef(false);
+  const shouldAnimateOnMountRef = useRef(shouldAnimate);
+
+  useEffect(() => {
+    if (!shouldAnimateOnMountRef.current) {
+      progress.setValue(1);
+      return;
+    }
+    if (animatedOnceRef.current) return;
+    animatedOnceRef.current = true;
+    progress.setValue(0);
+    const animation = Animated.timing(progress, {
+      toValue: 1,
+      duration: OUTGOING_MESSAGE_ENTER_MS,
+      easing: Easing.bezier(0.2, 0.9, 0.2, 1),
+      useNativeDriver: true,
+    });
+    animation.start(({ finished }) => {
+      if (finished) {
+        progress.setValue(1);
+      }
+    });
+    return () => {
+      animation.stop();
+      progress.setValue(1);
+    };
+  }, [progress]);
+
+  const animatedStyle = useMemo(
+    () => ({
+      opacity: progress,
+      transform: [
+        {
+          translateX: progress.interpolate({
+            inputRange: [0, 1],
+            outputRange: [28, 0],
+          }),
+        },
+        {
+          translateY: progress.interpolate({
+            inputRange: [0, 1],
+            outputRange: [22, 0],
+          }),
+        },
+        {
+          scale: progress.interpolate({
+            inputRange: [0, 0.78, 1],
+            outputRange: [0.72, 1.05, 1],
+          }),
+        },
+      ],
+    }),
+    [progress]
+  );
+
+  return (
+    <Animated.View style={[style, animatedStyle]} onLayout={onLayout}>
+      {children}
+    </Animated.View>
+  );
+});
+
+type ChatMessageRowProps = {
+  uid: number;
+  message: Message;
+  previousMessage: Message | null;
+  selfUid: number;
+  isFocused: boolean;
+  isPlayingVoice: boolean;
+  isGroupChat: boolean;
+  selfChatAvatar: string;
+  activeChatFriendAvatar: string;
+  profileDisplayName: string;
+  getAvatarText: (value?: string) => string;
+  formatTime: (value?: string, fallbackTs?: number) => string;
+  findUserByUid: (uid: number) => Friend | null;
+  recordMessageOffset: (uid: number, messageId: string, y: number) => void;
+  openImagePreview: (url?: string) => void;
+  onPressVoiceMessage: (message: Message) => void;
+  onPressFailedMessage: (message: Message) => void;
+};
+
+const ChatMessageRow = React.memo(
+  function ChatMessageRow({
+    uid,
+    message,
+    previousMessage,
+    selfUid,
+    isFocused,
+    isPlayingVoice,
+    isGroupChat,
+    selfChatAvatar,
+    activeChatFriendAvatar,
+    profileDisplayName,
+    getAvatarText,
+    formatTime,
+    findUserByUid,
+    recordMessageOffset,
+    openImagePreview,
+    onPressVoiceMessage,
+    onPressFailedMessage,
+  }: ChatMessageRowProps) {
+    const isSelf = Number(message.senderUid) === Number(selfUid);
+    const itemId = String(message.id);
+    const isFailed = Boolean(message?.raw?.data?.clientFailed);
+    const clientAppearAtMs = Number(message?.raw?.data?.clientAppearAtMs);
+    const nowMs = Date.now();
+    const shouldAnimateOutgoingEnter =
+      isSelf &&
+      Boolean(message?.raw?.data?.clientAnimateIn) &&
+      Number.isFinite(clientAppearAtMs) &&
+      nowMs >= clientAppearAtMs &&
+      nowMs - clientAppearAtMs <= OUTGOING_MESSAGE_ENTER_WINDOW_MS;
+    const prevMs = Number(previousMessage?.createdAtMs);
+    const currentMs = Number(message.createdAtMs);
+    const showTime =
+      !previousMessage ||
+      !Number.isFinite(prevMs) ||
+      !Number.isFinite(currentMs) ||
+      currentMs - prevMs > CHAT_TIME_GAP_MS;
+    const senderProfile = !isSelf ? findUserByUid(message.senderUid) : null;
+    const senderName = senderProfile?.nickname || senderProfile?.username || `用户${message.senderUid}`;
+    const senderAvatarUrl = isSelf
+      ? selfChatAvatar
+      : normalizeImageUrl(senderProfile?.avatar || activeChatFriendAvatar);
+    const avatarLabel = isSelf
+      ? getAvatarText(profileDisplayName || '我')
+      : getAvatarText(senderName || '群友');
+
+    return (
+      <>
+        {showTime ? (
+          <Text style={styles.chatTimeDivider}>{formatTime(message.createdAt, message.createdAtMs)}</Text>
+        ) : null}
+        <OutgoingMessageEnterRow
+          shouldAnimate={shouldAnimateOutgoingEnter}
+          style={[styles.messageRow, isSelf && styles.selfRow]}
+          onLayout={(event) =>
+            recordMessageOffset(uid, itemId, Number(event?.nativeEvent?.layout?.y) || 0)
+          }
+        >
+          <View style={[styles.msgAvatarWrap, isSelf && styles.selfMsgAvatarWrap]}>
+            {senderAvatarUrl ? (
+              <Image source={{ uri: senderAvatarUrl }} style={styles.msgAvatarImage} />
+            ) : (
+              <View style={styles.msgAvatarFallbackCircle}>
+                <Text style={styles.msgAvatarFallbackText}>{avatarLabel}</Text>
+              </View>
+            )}
+          </View>
+          <View style={[styles.bubbleWrap, isSelf && styles.selfBubbleWrap]}>
+            {isGroupChat && !isSelf ? <Text style={styles.groupSenderName}>{senderName}</Text> : null}
+            <View
+              style={[
+                styles.bubble,
+                isSelf && styles.selfBubble,
+                isFocused && !isSelf && styles.bubbleFocused,
+                isFocused && isSelf && styles.selfBubbleFocused,
+                message.type === 'image' && styles.imageBubble,
+              ]}
+            >
+              {message.type === 'image' && message.imageUrl ? (
+                <Pressable
+                  style={styles.chatImagePressable}
+                  onPress={() => openImagePreview(message.imageUrl)}
+                >
+                  <Image source={{ uri: message.imageUrl }} style={styles.chatImageMessage} />
+                </Pressable>
+              ) : message.type === 'voice' ? (
+                <Pressable
+                  style={[
+                    styles.voiceMessageBubble,
+                    isPlayingVoice && styles.voiceMessageBubblePlaying,
+                  ]}
+                  onPress={() => onPressVoiceMessage(message)}
+                >
+                  <View style={styles.voiceWaveTrack}>
+                    <VoiceWaveIcon active={isPlayingVoice} isSelf={isSelf} />
+                  </View>
+                  <Text style={[styles.voiceMessageDuration, isSelf && styles.selfText]}>
+                    {message.voiceDurationSec
+                      ? `${Math.max(1, Math.round(message.voiceDurationSec))}"`
+                      : '[语音]'}
+                  </Text>
+                </Pressable>
+              ) : (
+                <Text style={[styles.messageText, isSelf && styles.selfText]}>{message.content}</Text>
+              )}
+            </View>
+          </View>
+          {isSelf && isFailed ? (
+            <Pressable
+              style={styles.failedRetryBadge}
+              onPress={() => onPressFailedMessage(message)}
+              hitSlop={8}
+            >
+              <Text style={styles.failedRetryBadgeText}>!</Text>
+            </Pressable>
+          ) : null}
+        </OutgoingMessageEnterRow>
+      </>
+    );
+  },
+  (prev, next) =>
+    prev.uid === next.uid &&
+    prev.message === next.message &&
+    prev.previousMessage === next.previousMessage &&
+    prev.selfUid === next.selfUid &&
+    prev.isFocused === next.isFocused &&
+    prev.isPlayingVoice === next.isPlayingVoice &&
+    prev.isGroupChat === next.isGroupChat &&
+    prev.selfChatAvatar === next.selfChatAvatar &&
+    prev.activeChatFriendAvatar === next.activeChatFriendAvatar &&
+    prev.profileDisplayName === next.profileDisplayName &&
+    prev.getAvatarText === next.getAvatarText &&
+    prev.formatTime === next.formatTime &&
+    prev.findUserByUid === next.findUserByUid &&
+    prev.recordMessageOffset === next.recordMessageOffset &&
+    prev.openImagePreview === next.openImagePreview &&
+    prev.onPressVoiceMessage === next.onPressVoiceMessage &&
+    prev.onPressFailedMessage === next.onPressFailedMessage
+);
+
 export default function Home({ profile }: { profile: Profile }) {
   const insets = useSafeAreaInsets();
   const { height: windowHeight, width: windowWidth } = useWindowDimensions();
@@ -930,6 +1247,7 @@ export default function Home({ profile }: { profile: Profile }) {
   const [unreadMap, setUnreadMap] = useState<Record<number, number>>({});
   const [historyLoading, setHistoryLoading] = useState<Record<number, boolean>>({});
   const [historyHasMore, setHistoryHasMore] = useState<Record<number, boolean>>({});
+  const [chatRenderLimitMap, setChatRenderLimitMap] = useState<Record<number, number>>({});
   const [readAtMap, setReadAtMap] = useState<ReadAtMap>({});
   const [pinnedMap, setPinnedMap] = useState<PinnedMap>({});
   const [hiddenMap, setHiddenMap] = useState<HiddenMap>({});
@@ -961,6 +1279,7 @@ export default function Home({ profile }: { profile: Profile }) {
   const [chatImageSending, setChatImageSending] = useState(false);
   const [imagePreviewVisible, setImagePreviewVisible] = useState(false);
   const [imagePreviewUrl, setImagePreviewUrl] = useState('');
+  const [retryPromptMessage, setRetryPromptMessage] = useState<Message | null>(null);
   const [voicePanelVisible, setVoicePanelVisible] = useState(false);
   const [voiceRecording, setVoiceRecording] = useState(false);
   const [voiceProcessing, setVoiceProcessing] = useState(false);
@@ -1096,7 +1415,16 @@ export default function Home({ profile }: { profile: Profile }) {
   const groupsRef = useRef<Group[]>([]);
   const historyLoadingRef = useRef<Record<number, boolean>>({});
   const historyHasMoreRef = useRef<Record<number, boolean>>({});
+  const chatRenderLimitMapRef = useRef<Record<number, number>>({});
   const messageOffsetMapRef = useRef<Map<number, Map<string, number>>>(new Map());
+  const topLoadLockRef = useRef(false);
+  const pendingTopRestoreRef = useRef<{
+    uid: number;
+    prevHeight: number;
+    prevOffsetY: number;
+    expiresAt: number;
+  } | null>(null);
+  const chatWindowExpandTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const messageFocusTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const activeChatUidRef = useRef<number | null>(null);
   const chatReturnToPreviousRef = useRef(false);
@@ -1121,6 +1449,28 @@ export default function Home({ profile }: { profile: Profile }) {
   const playingVoiceMessageIdRef = useRef('');
   const voicePlaybackSessionRef = useRef(0);
   const voicePlaybackTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const scrollToBottomTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const focusChatInputTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const locateChatTaskIdRef = useRef(0);
+  const clientMessageSeqRef = useRef(0);
+
+  useEffect(
+    () => () => {
+      if (scrollToBottomTimerRef.current) {
+        clearTimeout(scrollToBottomTimerRef.current);
+        scrollToBottomTimerRef.current = null;
+      }
+      if (focusChatInputTimerRef.current) {
+        clearTimeout(focusChatInputTimerRef.current);
+        focusChatInputTimerRef.current = null;
+      }
+      if (chatWindowExpandTimerRef.current) {
+        clearTimeout(chatWindowExpandTimerRef.current);
+        chatWindowExpandTimerRef.current = null;
+      }
+    },
+    []
+  );
 
   useEffect(() => {
     if (!activeChatUid) {
@@ -1153,6 +1503,40 @@ export default function Home({ profile }: { profile: Profile }) {
 
   useEffect(() => {
     activeChatUidRef.current = activeChatUid;
+  }, [activeChatUid]);
+
+  useEffect(() => {
+    locateChatTaskIdRef.current += 1;
+  }, [activeChatUid]);
+
+  useEffect(() => {
+    topLoadLockRef.current = false;
+    pendingTopRestoreRef.current = null;
+    if (chatWindowExpandTimerRef.current) {
+      clearTimeout(chatWindowExpandTimerRef.current);
+      chatWindowExpandTimerRef.current = null;
+    }
+    if (!activeChatUid) {
+      messageOffsetMapRef.current.clear();
+      setChatRenderLimitMap((prev) => (Object.keys(prev).length > 0 ? {} : prev));
+      return;
+    }
+    const uid = Number(activeChatUid);
+    if (!Number.isInteger(uid) || uid <= 0) return;
+    setChatRenderLimitMap((prev) => {
+      const prevLimit = Number(prev[uid]);
+      const nextLimit =
+        Number.isInteger(prevLimit) && prevLimit > 0 ? prevLimit : CHAT_RENDER_CHUNK_SIZE;
+      if (Object.keys(prev).length === 1 && Number(prev[uid]) === nextLimit) {
+        return prev;
+      }
+      return { [uid]: nextLimit };
+    });
+    Array.from(messageOffsetMapRef.current.keys()).forEach((chatUid) => {
+      if (chatUid !== uid) {
+        messageOffsetMapRef.current.delete(chatUid);
+      }
+    });
   }, [activeChatUid]);
 
   useEffect(() => {
@@ -1251,6 +1635,10 @@ export default function Home({ profile }: { profile: Profile }) {
   useEffect(() => {
     historyHasMoreRef.current = historyHasMore;
   }, [historyHasMore]);
+
+  useEffect(() => {
+    chatRenderLimitMapRef.current = chatRenderLimitMap;
+  }, [chatRenderLimitMap]);
 
   useEffect(
     () => () => {
@@ -1360,8 +1748,8 @@ export default function Home({ profile }: { profile: Profile }) {
   useEffect(() => {
     const loadReadAt = async () => {
       const stored = await storage.getJson<ReadAtMap>(STORAGE_KEYS.readAt);
-      if (stored) {
-        setReadAtMap(stored);
+      if (stored && typeof stored === 'object') {
+        setReadAtMap(sanitizeReadAtMap(stored));
       }
     };
     loadReadAt().catch(() => undefined);
@@ -1513,19 +1901,63 @@ export default function Home({ profile }: { profile: Profile }) {
     setChatMenuVisible(false);
   }, [closeQuickMenu, tourVisible]);
 
+  const activeChatTarget = useMemo(() => {
+    if (!activeChatUid) {
+      return { targetUid: 0, targetType: 'private' as ChatTargetType };
+    }
+    return decodeChatUid(activeChatUid);
+  }, [activeChatUid]);
   const activeChatFriend = useMemo(() => {
-    if (!activeChatUid) return null;
-    return friends.find((item) => Number(item?.uid) === activeChatUid) || null;
-  }, [activeChatUid, friends]);
+    if (!activeChatUid || activeChatTarget.targetType !== 'private') return null;
+    return friends.find((item) => Number(item?.uid) === activeChatTarget.targetUid) || null;
+  }, [activeChatTarget.targetType, activeChatTarget.targetUid, activeChatUid, friends]);
   const activeChatGroup = useMemo(() => {
-    if (!activeChatUid) return null;
-    return groups.find((item) => Number(item?.id) === activeChatUid) || null;
-  }, [activeChatUid, groups]);
+    if (!activeChatUid || activeChatTarget.targetType !== 'group') return null;
+    return groups.find((item) => Number(item?.id) === activeChatTarget.targetUid) || null;
+  }, [activeChatTarget.targetType, activeChatTarget.targetUid, activeChatUid, groups]);
   const activeChatMessages = useMemo(() => {
     if (!activeChatUid) return [];
     return messagesByUid[activeChatUid] || [];
   }, [activeChatUid, messagesByUid]);
-  const isPrivateChat = useMemo(() => Boolean(activeChatUid && !activeChatGroup), [activeChatGroup, activeChatUid]);
+  const activeChatRenderLimit = useMemo(() => {
+    if (!activeChatUid) return CHAT_RENDER_CHUNK_SIZE;
+    const rawLimit = Number(chatRenderLimitMap[activeChatUid]);
+    if (Number.isInteger(rawLimit) && rawLimit > 0) {
+      return rawLimit;
+    }
+    return CHAT_RENDER_CHUNK_SIZE;
+  }, [activeChatUid, chatRenderLimitMap]);
+  const activeChatVisibleStartIndex = useMemo(() => {
+    const visibleCount = Math.min(activeChatMessages.length, activeChatRenderLimit);
+    return Math.max(0, activeChatMessages.length - visibleCount);
+  }, [activeChatMessages.length, activeChatRenderLimit]);
+  const activeChatVisibleMessages = useMemo(
+    () => activeChatMessages.slice(activeChatVisibleStartIndex),
+    [activeChatMessages, activeChatVisibleStartIndex]
+  );
+  useEffect(() => {
+    if (!activeChatUid) return;
+    const bucket = messageOffsetMapRef.current.get(activeChatUid);
+    if (!bucket || bucket.size === 0) return;
+    const visibleIdSet = new Set(activeChatVisibleMessages.map((item) => String(item.id)));
+    let touched = false;
+    Array.from(bucket.keys()).forEach((key) => {
+      if (!visibleIdSet.has(key)) {
+        bucket.delete(key);
+        touched = true;
+      }
+    });
+    if (!touched) return;
+    if (bucket.size === 0) {
+      messageOffsetMapRef.current.delete(activeChatUid);
+      return;
+    }
+    messageOffsetMapRef.current.set(activeChatUid, bucket);
+  }, [activeChatUid, activeChatVisibleMessages]);
+  const isPrivateChat = useMemo(
+    () => Boolean(activeChatUid && activeChatTarget.targetType === 'private'),
+    [activeChatTarget.targetType, activeChatUid]
+  );
   useEffect(() => {
     if (isPrivateChat) return;
     setEmojiPanelVisible(false);
@@ -1557,6 +1989,10 @@ export default function Home({ profile }: { profile: Profile }) {
     setRecentEmojis(pending);
   }, [emojiPanelVisible]);
   const selfUid = useMemo(() => profileData.uid, [profileData.uid]);
+  const profileDisplayName = useMemo(
+    () => String(profileData.nickname || profileData.username || '我'),
+    [profileData.nickname, profileData.username]
+  );
   const customStickerStorageKey = useMemo(
     () => `${STORAGE_KEYS.customStickersPrefix}${Number(selfUid) || 0}`,
     [selfUid]
@@ -1639,6 +2075,14 @@ export default function Home({ profile }: { profile: Profile }) {
     return token ? { Authorization: `Bearer ${token}` } : {};
   }, []);
 
+  const createClientMessageId = useCallback(() => {
+    clientMessageSeqRef.current += 1;
+    if (!Number.isFinite(clientMessageSeqRef.current) || clientMessageSeqRef.current > 1_000_000_000) {
+      clientMessageSeqRef.current = 1;
+    }
+    return `c_${Date.now()}_${clientMessageSeqRef.current.toString(36)}`;
+  }, []);
+
   const persistCustomStickers = useCallback(
     async (stickers: CustomSticker[]) => {
       if (!selfUid) return;
@@ -1695,8 +2139,54 @@ export default function Home({ profile }: { profile: Profile }) {
 
     const nextFriends = sanitizeFriends(Array.isArray(cachedFriends) ? cachedFriends : []);
     const nextGroups = sanitizeGroups(Array.isArray(cachedGroups) ? cachedGroups : []);
-    const nextMessages = sanitizeCachedMessages(cachedMessages);
+    let nextMessages = sanitizeCachedMessages(cachedMessages);
     const nextDeleteCutoff = sanitizeDeleteCutoffMap(cachedDeleteCutoff);
+    const friendIdSet = new Set(nextFriends.map((friend) => Number(friend.uid)));
+    const groupIdSet = new Set(nextGroups.map((group) => Number(group.id)));
+
+    if (Object.keys(nextMessages).length > 0 && groupIdSet.size > 0) {
+      const remappedMessages: BucketMap = {};
+      Object.entries(nextMessages).forEach(([rawUid, rawList]) => {
+        const uid = Number(rawUid);
+        const list = Array.isArray(rawList) ? rawList : [];
+        if (!Number.isInteger(uid) || uid <= 0 || list.length === 0) return;
+        if (uid >= GROUP_CHAT_UID_OFFSET) {
+          remappedMessages[uid] = list;
+          return;
+        }
+        const isFriendChat = friendIdSet.has(uid);
+        const isGroupChat = groupIdSet.has(uid);
+        if (!isGroupChat) {
+          remappedMessages[uid] = list;
+          return;
+        }
+        const groupChatUid = encodeChatUid(uid, 'group');
+        if (!groupChatUid) {
+          remappedMessages[uid] = list;
+          return;
+        }
+        const groupList = list.filter((item) => String(item?.targetType || '') === 'group');
+        const privateList = list.filter((item) => String(item?.targetType || '') !== 'group');
+        if (groupList.length > 0) {
+          const current = remappedMessages[groupChatUid] || [];
+          remappedMessages[groupChatUid] = [...current, ...groupList];
+        }
+        if (isFriendChat) {
+          if (privateList.length > 0) {
+            const current = remappedMessages[uid] || [];
+            remappedMessages[uid] = [...current, ...privateList];
+          } else if (groupList.length === 0) {
+            remappedMessages[uid] = list;
+          }
+          return;
+        }
+        if (groupList.length === 0) {
+          const current = remappedMessages[groupChatUid] || [];
+          remappedMessages[groupChatUid] = [...current, ...list];
+        }
+      });
+      nextMessages = remappedMessages;
+    }
 
     const nextLatest: LatestMap = {};
     if (cachedLatest && typeof cachedLatest === 'object') {
@@ -1718,6 +2208,36 @@ export default function Home({ profile }: { profile: Profile }) {
         if (!Number.isInteger(uid) || uid <= 0) return;
         const count = Number(rawValue);
         nextUnread[uid] = Number.isFinite(count) ? Math.max(0, count) : 0;
+      });
+    }
+
+    if (groupIdSet.size > 0) {
+      groupIdSet.forEach((groupId) => {
+        const groupChatUid = encodeChatUid(groupId, 'group');
+        if (!groupChatUid) return;
+        const hasPrivateCollision = friendIdSet.has(groupId);
+        const rawLatest = nextLatest[groupId];
+        if (rawLatest && !hasPrivateCollision) {
+          const encodedLatest = nextLatest[groupChatUid];
+          if (!encodedLatest || Number(rawLatest.ts) > Number(encodedLatest.ts)) {
+            nextLatest[groupChatUid] = rawLatest;
+          }
+          delete nextLatest[groupId];
+        }
+        if (Object.prototype.hasOwnProperty.call(nextUnread, groupId) && !hasPrivateCollision) {
+          const rawUnread = Number(nextUnread[groupId]) || 0;
+          const encodedUnread = Number(nextUnread[groupChatUid]) || 0;
+          nextUnread[groupChatUid] = Math.max(encodedUnread, rawUnread);
+          delete nextUnread[groupId];
+        }
+        const rawCutoff = Number(nextDeleteCutoff[groupId]) || 0;
+        const encodedCutoff = Number(nextDeleteCutoff[groupChatUid]) || 0;
+        if (rawCutoff > 0 && !hasPrivateCollision) {
+          if (rawCutoff > encodedCutoff) {
+            nextDeleteCutoff[groupChatUid] = rawCutoff;
+          }
+          delete nextDeleteCutoff[groupId];
+        }
       });
     }
 
@@ -1909,6 +2429,25 @@ export default function Home({ profile }: { profile: Profile }) {
     [getReadAt, selfUid]
   );
 
+  const messageAffectsUnread = useCallback(
+    (uid: number, message?: Message | null) => {
+      if (!message) return false;
+      return (
+        Number(message.senderUid) !== Number(selfUid) &&
+        Number(message.createdAtMs) > getReadAt(uid)
+      );
+    },
+    [getReadAt, selfUid]
+  );
+
+  const listAffectsUnread = useCallback(
+    (uid: number, list: Message[]) => {
+      if (!Array.isArray(list) || list.length === 0) return false;
+      return list.some((entry) => messageAffectsUnread(uid, entry));
+    },
+    [messageAffectsUnread]
+  );
+
   useEffect(() => {
     Object.keys(messagesByUidRef.current).forEach((rawUid) => {
       const uid = Number(rawUid);
@@ -1980,9 +2519,298 @@ export default function Home({ profile }: { profile: Profile }) {
       if (last) {
         updateLatest(uid, last);
       }
-      recalcUnread(uid, nextBucket);
+      if (listAffectsUnread(uid, incoming)) {
+        recalcUnread(uid, nextBucket);
+      }
     },
-    [ensureMessageBucket, getDeleteCutoff, normalizeMessage, recalcUnread, unhideChat, updateLatest]
+    [
+      ensureMessageBucket,
+      getDeleteCutoff,
+      listAffectsUnread,
+      normalizeMessage,
+      recalcUnread,
+      unhideChat,
+      updateLatest,
+    ]
+  );
+
+  const resolvePendingMessageByServerEntry = useCallback(
+    (uid: number, localId: string, serverEntry: any) => {
+      if (!uid || !localId || !serverEntry) return false;
+      const normalizedLocalId = String(localId);
+      const normalizedServer = normalizeMessage(serverEntry);
+      const incomingClientMessageId = getMessageClientMessageId(serverEntry);
+      let nextBucket: Message[] | null = null;
+      let replaced = false;
+      let unreadImpact = false;
+      let resolvedServerMessage = normalizedServer;
+      let dedupeClientMessageId = '';
+      let localVoiceUriToRevoke = '';
+      setMessagesByUid((prev) => {
+        const bucket = Array.isArray(prev[uid]) ? prev[uid] : [];
+        let localIndex = bucket.findIndex((item) => String(item.id) === normalizedLocalId);
+        if (localIndex === -1 && incomingClientMessageId) {
+          localIndex = bucket.findIndex((item) => {
+            if (String(item.id) === `local:${incomingClientMessageId}`) return true;
+            const existingClientMessageId = getMessageClientMessageId(item);
+            return (
+              existingClientMessageId === incomingClientMessageId &&
+              Number(item.senderUid) === Number(normalizedServer.senderUid)
+            );
+          });
+        }
+        if (localIndex === -1) return prev;
+        const next = [...bucket];
+        const localMessage = next[localIndex] || null;
+        const localRawBase =
+          localMessage?.raw && typeof localMessage.raw === 'object' ? localMessage.raw : {};
+        const localRawData =
+          localRawBase?.data && typeof localRawBase.data === 'object' ? localRawBase.data : {};
+        const localVoiceUri = String(localRawData?.localVoiceUri || '').trim();
+        const serverRawBase =
+          normalizedServer?.raw && typeof normalizedServer.raw === 'object' ? normalizedServer.raw : {};
+        const serverRawData =
+          serverRawBase?.data && typeof serverRawBase.data === 'object' ? serverRawBase.data : {};
+        const localClientMessageId = getMessageClientMessageId(localMessage);
+        const serverClientMessageId = getMessageClientMessageId(normalizedServer);
+        const mergedClientMessageId =
+          serverClientMessageId || localClientMessageId || incomingClientMessageId;
+        dedupeClientMessageId = mergedClientMessageId;
+        const nowMs = Date.now();
+        const localAppearAtMs = Number(localRawData.clientAppearAtMs);
+        const serverAppearAtMs = Number(serverRawData.clientAppearAtMs);
+        const localAnimateActive =
+          Boolean(localRawData.clientAnimateIn) &&
+          Number.isFinite(localAppearAtMs) &&
+          nowMs - localAppearAtMs <= OUTGOING_MESSAGE_ENTER_WINDOW_MS;
+        const serverAnimateActive =
+          Boolean(serverRawData.clientAnimateIn) &&
+          Number.isFinite(serverAppearAtMs) &&
+          nowMs - serverAppearAtMs <= OUTGOING_MESSAGE_ENTER_WINDOW_MS;
+        const shouldKeepAnimate = localAnimateActive || serverAnimateActive;
+        const keepAppearAtMs = localAnimateActive ? localAppearAtMs : serverAppearAtMs;
+        resolvedServerMessage = {
+          ...normalizedServer,
+          raw: {
+            ...serverRawBase,
+            data: {
+              ...serverRawData,
+              ...(mergedClientMessageId ? { clientMessageId: mergedClientMessageId } : {}),
+              clientPending: false,
+              clientFailed: false,
+              ...(shouldKeepAnimate && Number.isFinite(keepAppearAtMs)
+                ? { clientAnimateIn: true, clientAppearAtMs: keepAppearAtMs }
+                : {}),
+            },
+          },
+        };
+        if (localVoiceUri && normalizedServer.type === 'voice') {
+          localVoiceUriToRevoke = localVoiceUri;
+        }
+        const duplicatedServer = next.some(
+          (item, index) =>
+            index !== localIndex && String(item.id) === String(resolvedServerMessage.id)
+        );
+        const unreadBefore = messageAffectsUnread(uid, localMessage);
+        const unreadAfter = duplicatedServer ? false : messageAffectsUnread(uid, resolvedServerMessage);
+        unreadImpact = unreadBefore !== unreadAfter || unreadAfter;
+        if (duplicatedServer) {
+          next.splice(localIndex, 1);
+        } else {
+          next[localIndex] = resolvedServerMessage;
+        }
+        if (mergedClientMessageId) {
+          const filtered: Message[] = [];
+          const preferredId = String(resolvedServerMessage.id);
+          let keptPreferred = false;
+          let keptFallback = false;
+          next.forEach((item) => {
+            const itemClientMessageId = getMessageClientMessageId(item);
+            if (itemClientMessageId !== mergedClientMessageId) {
+              filtered.push(item);
+              return;
+            }
+            const itemId = String(item.id);
+            if (!keptPreferred && itemId === preferredId) {
+              filtered.push(item);
+              keptPreferred = true;
+              return;
+            }
+            if (!keptPreferred && !keptFallback) {
+              filtered.push(item);
+              keptFallback = true;
+            }
+          });
+          nextBucket = filtered;
+          replaced = true;
+          return { ...prev, [uid]: filtered };
+        }
+        nextBucket = next;
+        replaced = true;
+        return { ...prev, [uid]: next };
+      });
+      if (!replaced) return false;
+      if (localVoiceUriToRevoke) {
+        revokeVoiceRecordingUri(localVoiceUriToRevoke);
+      }
+      const resolvedBucket = nextBucket as Message[] | null;
+      const nextIdSet = new Set<number | string>();
+      if (resolvedBucket) {
+        resolvedBucket.forEach((item) => {
+          if (typeof item?.id === 'number' || typeof item?.id === 'string') {
+            nextIdSet.add(item.id);
+          }
+        });
+      }
+      messageIdSetsRef.current.set(uid, nextIdSet);
+      if (dedupeClientMessageId && messageOffsetMapRef.current.has(uid)) {
+        const offsetBucket = messageOffsetMapRef.current.get(uid);
+        if (offsetBucket) {
+          let changed = false;
+          Array.from(offsetBucket.keys()).forEach((rawMessageId) => {
+            const matched = (resolvedBucket || []).find((item) => String(item.id) === rawMessageId);
+            if (!matched) {
+              offsetBucket.delete(rawMessageId);
+              changed = true;
+            }
+          });
+          if (changed) {
+            if (offsetBucket.size > 0) {
+              messageOffsetMapRef.current.set(uid, offsetBucket);
+            } else {
+              messageOffsetMapRef.current.delete(uid);
+            }
+          }
+        }
+      }
+      if (resolvedBucket && resolvedBucket.length > 0) {
+        updateLatest(uid, resolvedBucket[resolvedBucket.length - 1]);
+        if (unreadImpact) {
+          recalcUnread(uid, resolvedBucket);
+        }
+      } else if (resolvedBucket) {
+        setLatestMap((prev) => {
+          if (!Object.prototype.hasOwnProperty.call(prev, uid)) return prev;
+          const next = { ...prev };
+          delete next[uid];
+          return next;
+        });
+        if (unreadImpact) {
+          recalcUnread(uid, []);
+        }
+      }
+      return true;
+    },
+    [messageAffectsUnread, normalizeMessage, recalcUnread, updateLatest]
+  );
+
+  const resolvePendingMessageByClientMessageId = useCallback(
+    (uid: number, serverEntry: any) => {
+      const clientMessageId = String(serverEntry?.data?.clientMessageId || '').trim();
+      if (!uid || !clientMessageId) return false;
+      return resolvePendingMessageByServerEntry(
+        uid,
+        `local:${clientMessageId}`,
+        serverEntry
+      );
+    },
+    [resolvePendingMessageByServerEntry]
+  );
+
+  const markMessageAsFailed = useCallback(
+    (uid: number, messageId: string) => {
+      if (!uid || !messageId) return false;
+      const normalizedId = String(messageId);
+      let changed = false;
+      let nextBucket: Message[] | null = null;
+      setMessagesByUid((prev) => {
+        const bucket = Array.isArray(prev[uid]) ? prev[uid] : [];
+        const index = bucket.findIndex((item) => String(item.id) === normalizedId);
+        if (index === -1) return prev;
+        const current = bucket[index];
+        const rawBase =
+          current?.raw && typeof current.raw === 'object' ? current.raw : {};
+        const rawDataBase =
+          rawBase?.data && typeof rawBase.data === 'object' ? rawBase.data : {};
+        if (rawDataBase.clientFailed && !rawDataBase.clientPending) {
+          return prev;
+        }
+        const nextItem: Message = {
+          ...current,
+          raw: {
+            ...rawBase,
+            data: {
+              ...rawDataBase,
+              content: current.content || rawDataBase.content || '',
+              clientPending: false,
+              clientFailed: true,
+            },
+          },
+        };
+        const next = [...bucket];
+        next[index] = nextItem;
+        nextBucket = next;
+        changed = true;
+        return { ...prev, [uid]: next };
+      });
+      if (!changed) return false;
+      const resolvedBucket = nextBucket as Message[] | null;
+      if (!resolvedBucket) return false;
+      if (resolvedBucket.length > 0) {
+        updateLatest(uid, resolvedBucket[resolvedBucket.length - 1]);
+      } else {
+        setLatestMap((prev) => {
+          if (!Object.prototype.hasOwnProperty.call(prev, uid)) return prev;
+          const next = { ...prev };
+          delete next[uid];
+          return next;
+        });
+      }
+      return true;
+    },
+    [updateLatest]
+  );
+
+  const submitTextMessageWithLocalId = useCallback(
+    async ({
+      chatUid,
+      localMessageId,
+      clientMessageId,
+      payload,
+    }: {
+      chatUid: number;
+      localMessageId: string;
+      clientMessageId: string;
+      payload: Record<string, any>;
+    }) => {
+      if (!selfUid || !chatUid || !localMessageId || !clientMessageId || !payload) return false;
+      try {
+        const response = await fetch(`${API_BASE}/api/chat/send`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', ...authHeaders() },
+          body: JSON.stringify(payload),
+        });
+        const data = await response.json().catch(() => ({}));
+        if (response.ok && data?.success && data?.data) {
+          let merged = resolvePendingMessageByServerEntry(chatUid, localMessageId, data.data);
+          if (!merged) {
+            for (let attempt = 0; attempt < 3 && !merged; attempt += 1) {
+              await new Promise<void>((done) => setTimeout(done, 0));
+              merged = resolvePendingMessageByServerEntry(chatUid, localMessageId, data.data);
+            }
+          }
+          if (!merged) {
+            insertMessages(chatUid, [
+              withOutgoingEnterAnimation(data.data, { clientMessageId, appearAtMs: Date.now() }),
+            ]);
+          }
+          return true;
+        }
+      } catch {}
+      markMessageAsFailed(chatUid, localMessageId);
+      return false;
+    },
+    [authHeaders, insertMessages, markMessageAsFailed, resolvePendingMessageByServerEntry, selfUid]
   );
 
   const loadPendingRequestCount = useCallback(async () => {
@@ -2015,7 +2843,9 @@ export default function Home({ profile }: { profile: Profile }) {
       const nextGroups = sanitizeGroups(data.groups);
       setGroups(nextGroups);
       nextGroups.forEach((group) => {
-        ensureMessageBucket(group.id);
+        const chatUid = encodeChatUid(group.id, 'group');
+        if (!chatUid) return;
+        ensureMessageBucket(chatUid);
       });
     } catch {}
   }, [authHeaders, ensureMessageBucket]);
@@ -2023,10 +2853,22 @@ export default function Home({ profile }: { profile: Profile }) {
   const loadOverview = useCallback(async () => {
     if (!tokenRef.current) return;
     try {
+      const serverReadAt: Record<number, number> = {};
+      Object.entries(readAtMapRef.current).forEach(([rawChatUid, rawTs]) => {
+        const chatUid = Number(rawChatUid);
+        const ts = Number(rawTs);
+        if (!Number.isInteger(chatUid) || chatUid <= 0 || !Number.isFinite(ts) || ts <= 0) {
+          return;
+        }
+        const { targetUid } = decodeChatUid(chatUid);
+        if (!Number.isInteger(targetUid) || targetUid <= 0) return;
+        const current = Number(serverReadAt[targetUid]) || 0;
+        serverReadAt[targetUid] = Math.max(current, ts);
+      });
       const response = await fetch(`${API_BASE}/api/chat/overview`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', ...authHeaders() },
-        body: JSON.stringify({ readAt: readAtMapRef.current }),
+        body: JSON.stringify({ readAt: serverReadAt }),
       });
       const data = await response.json().catch(() => ({}));
       if (!response.ok || !data?.success || !Array.isArray(data?.data)) {
@@ -2035,8 +2877,11 @@ export default function Home({ profile }: { profile: Profile }) {
       const latestPatch: LatestMap = {};
       const unreadPatch: Record<number, number> = {};
       data.data.forEach((entry: any) => {
-        const uid = Number(entry?.uid);
-        if (!Number.isInteger(uid)) return;
+        const targetUid = Number(entry?.uid);
+        const targetType: ChatTargetType = entry?.targetType === 'group' ? 'group' : 'private';
+        if (!Number.isInteger(targetUid) || targetUid <= 0) return;
+        const uid = encodeChatUid(targetUid, targetType);
+        if (!uid) return;
         ensureMessageBucket(uid);
         const deleteCutoff = getDeleteCutoff(uid);
         const nextUnread = Number.isFinite(Number(entry?.unread))
@@ -2088,7 +2933,9 @@ export default function Home({ profile }: { profile: Profile }) {
         const nextFriends = sanitizeFriends(data.friends);
         setFriends(nextFriends);
         nextFriends.forEach((friend) => {
-          ensureMessageBucket(friend.uid);
+          const chatUid = encodeChatUid(friend.uid, 'private');
+          if (!chatUid) return;
+          ensureMessageBucket(chatUid);
         });
         await Promise.all([loadOverview(), loadPendingRequestCount(), loadGroups()]);
       }
@@ -2101,15 +2948,16 @@ export default function Home({ profile }: { profile: Profile }) {
   const loadHistory = useCallback(
     async (uid: number, { beforeId }: { beforeId?: number | string } = {}) => {
       if (!tokenRef.current) return;
+      const { targetUid, targetType } = decodeChatUid(uid);
+      if (!Number.isInteger(targetUid) || targetUid <= 0) return;
       ensureMessageBucket(uid);
       if (historyLoading[uid]) return;
       setHistoryLoading((prev) => ({ ...prev, [uid]: true }));
       try {
-        const targetType = groupsRef.current.some((item) => item.id === uid) ? 'group' : 'private';
         const params = new URLSearchParams({
           targetType,
-          targetUid: String(uid),
-          limit: String(PAGE_LIMIT),
+          targetUid: String(targetUid),
+          limit: String(CHAT_HISTORY_PAGE_SIZE),
         });
         if (beforeId) {
           params.set('beforeId', String(beforeId));
@@ -2131,7 +2979,7 @@ export default function Home({ profile }: { profile: Profile }) {
               return Number.isFinite(parsed) && parsed > deleteCutoff;
             });
           insertMessages(uid, data.data, { prepend: Boolean(beforeId) });
-          if (data.data.length < PAGE_LIMIT || !hasNewerThanDeleteCutoff) {
+          if (data.data.length < CHAT_HISTORY_PAGE_SIZE || !hasNewerThanDeleteCutoff) {
             setHistoryHasMore((prev) => ({ ...prev, [uid]: false }));
           }
         }
@@ -2151,17 +2999,26 @@ export default function Home({ profile }: { profile: Profile }) {
       setReadAt(uid, lastTime);
       setUnreadMap((prev) => ({ ...prev, [uid]: 0 }));
       cancelChatSystemNotification(uid);
+      const { targetUid } = decodeChatUid(uid);
+      if (targetUid > 0 && targetUid !== uid) {
+        cancelChatSystemNotification(targetUid);
+      }
     },
     [setReadAt]
   );
 
   const scrollToBottom = useCallback(() => {
-    if (!messageListRef.current) return;
-    messageListRef.current.scrollToEnd({ animated: false });
+    if (scrollToBottomTimerRef.current) return;
+    scrollToBottomTimerRef.current = setTimeout(() => {
+      scrollToBottomTimerRef.current = null;
+      messageListRef.current?.scrollToEnd({ animated: false });
+    }, 0);
   }, []);
 
   const focusChatInput = useCallback(() => {
-    setTimeout(() => {
+    if (focusChatInputTimerRef.current) return;
+    focusChatInputTimerRef.current = setTimeout(() => {
+      focusChatInputTimerRef.current = null;
       chatInputRef.current?.focus();
     }, 0);
   }, []);
@@ -2215,12 +3072,39 @@ export default function Home({ profile }: { profile: Profile }) {
     async (uid: number, messageId: string) => {
       if (!uid || !messageId) return;
       const normalizedId = String(messageId);
+      locateChatTaskIdRef.current += 1;
+      const taskId = locateChatTaskIdRef.current;
+      const startedAt = Date.now();
+      const shouldAbort = () => {
+        if (locateChatTaskIdRef.current !== taskId) return true;
+        const currentActiveUid = Number(activeChatUidRef.current);
+        if (Number.isInteger(currentActiveUid) && currentActiveUid > 0) {
+          return currentActiveUid !== uid;
+        }
+        return Date.now() - startedAt > 260;
+      };
       let guard = 0;
       while (guard < 60) {
+        if (shouldAbort()) return;
         guard += 1;
         const bucket = messagesByUidRef.current[uid] || [];
         const found = bucket.some((item) => String(item.id) === normalizedId);
         if (found) {
+          const foundIndex = bucket.findIndex((item) => String(item.id) === normalizedId);
+          if (foundIndex >= 0) {
+            const requiredVisibleCount = Math.max(1, bucket.length - foundIndex);
+            setChatRenderLimitMap((prev) => {
+              const prevLimit = Number(prev[uid]);
+              const currentLimit =
+                Number.isInteger(prevLimit) && prevLimit > 0 ? prevLimit : CHAT_RENDER_CHUNK_SIZE;
+              if (currentLimit >= requiredVisibleCount) {
+                return prev;
+              }
+              return { ...prev, [uid]: requiredVisibleCount };
+            });
+          }
+          await sleep(30);
+          if (shouldAbort()) return;
           for (let i = 0; i < 8; i += 1) {
             const done = scrollToMessageById(uid, normalizedId, true);
             if (done) {
@@ -2228,6 +3112,7 @@ export default function Home({ profile }: { profile: Profile }) {
               return;
             }
             await sleep(50);
+            if (shouldAbort()) return;
           }
           flashMessageFocus(normalizedId);
           return;
@@ -2235,6 +3120,7 @@ export default function Home({ profile }: { profile: Profile }) {
 
         if (historyLoadingRef.current[uid]) {
           await sleep(120);
+          if (shouldAbort()) return;
           continue;
         }
 
@@ -2242,6 +3128,7 @@ export default function Home({ profile }: { profile: Profile }) {
         if (!first) {
           await loadHistory(uid);
           await sleep(60);
+          if (shouldAbort()) return;
           continue;
         }
 
@@ -2251,6 +3138,7 @@ export default function Home({ profile }: { profile: Profile }) {
 
         await loadHistory(uid, { beforeId: first.id });
         await sleep(60);
+        if (shouldAbort()) return;
       }
     },
     [flashMessageFocus, loadHistory, scrollToMessageById, sleep]
@@ -2259,20 +3147,22 @@ export default function Home({ profile }: { profile: Profile }) {
   const openChat = useCallback(
     async (friend: Friend, options?: { returnToPrevious?: boolean }) => {
       if (!friend) return;
+      const chatUid = encodeChatUid(friend.uid, 'private');
+      if (!chatUid) return;
       chatReturnToPreviousRef.current = Boolean(options?.returnToPrevious);
       closeQuickMenu();
-      setActiveChatUid(friend.uid);
-      ensureMessageBucket(friend.uid);
-      const bucket = messagesByUidRef.current[friend.uid] || [];
+      setActiveChatUid(chatUid);
+      ensureMessageBucket(chatUid);
+      const bucket = messagesByUidRef.current[chatUid] || [];
       const hasBrokenVoice = bucket.some(
         (item) => item?.type === 'voice' && !String(item?.voiceUrl || '').trim()
       );
       if (bucket.length === 0 || hasBrokenVoice) {
-        await loadHistory(friend.uid);
+        await loadHistory(chatUid);
       }
-      setTimeout(scrollToBottom, 0);
+      scrollToBottom();
       focusChatInput();
-      markChatRead(friend.uid);
+      markChatRead(chatUid);
     },
     [closeQuickMenu, ensureMessageBucket, focusChatInput, loadHistory, markChatRead, scrollToBottom]
   );
@@ -2290,31 +3180,33 @@ export default function Home({ profile }: { profile: Profile }) {
       if (!Number.isFinite(targetUid) || targetUid <= 0) return;
       const shouldReturnToPrevious = Boolean(options?.returnToPrevious);
       if (options?.targetType === 'group') {
+        const chatUid = encodeChatUid(targetUid, 'group');
+        if (!chatUid) return;
         chatReturnToPreviousRef.current = shouldReturnToPrevious;
         const payloadGroup =
           options?.group && Number.isInteger(Number(options.group.id || targetUid))
             ? normalizeGroup({ ...options.group, id: targetUid })
             : null;
-        if (payloadGroup) {
-          setGroups((prev) =>
-            prev.some((item) => item.id === payloadGroup.id)
-              ? prev.map((item) => (item.id === payloadGroup.id ? { ...item, ...payloadGroup } : item))
-              : [payloadGroup, ...prev]
-          );
-          ensureMessageBucket(payloadGroup.id);
-        }
-        setActiveChatUid(targetUid);
-        ensureMessageBucket(targetUid);
-        const bucket = messagesByUidRef.current[targetUid] || [];
+          if (payloadGroup) {
+            setGroups((prev) =>
+              prev.some((item) => item.id === payloadGroup.id)
+                ? prev.map((item) => (item.id === payloadGroup.id ? { ...item, ...payloadGroup } : item))
+                : [payloadGroup, ...prev]
+            );
+            ensureMessageBucket(chatUid);
+          }
+        setActiveChatUid(chatUid);
+        ensureMessageBucket(chatUid);
+        const bucket = messagesByUidRef.current[chatUid] || [];
         const hasBrokenVoice = bucket.some(
           (item) => item?.type === 'voice' && !String(item?.voiceUrl || '').trim()
         );
         if (bucket.length === 0 || hasBrokenVoice) {
-          loadHistory(targetUid).catch(() => undefined);
+          loadHistory(chatUid).catch(() => undefined);
         }
-        setTimeout(scrollToBottom, 0);
+        scrollToBottom();
         focusChatInput();
-        markChatRead(targetUid);
+        markChatRead(chatUid);
         return;
       }
       const existing = friends.find((item) => item.uid === targetUid);
@@ -2341,7 +3233,7 @@ export default function Home({ profile }: { profile: Profile }) {
         openChat(payloadFriend, { returnToPrevious: shouldReturnToPrevious });
       } else {
         chatReturnToPreviousRef.current = shouldReturnToPrevious;
-        setActiveChatUid(targetUid);
+        setActiveChatUid(encodeChatUid(targetUid, 'private'));
       }
     },
     [ensureMessageBucket, focusChatInput, friends, loadHistory, markChatRead, openChat, scrollToBottom]
@@ -2576,18 +3468,26 @@ export default function Home({ profile }: { profile: Profile }) {
 
   useEffect(() => {
     const params = route.params || {};
-    const targetUid = Number(params.openChatUid);
-    if (!Number.isFinite(targetUid) || targetUid <= 0) return;
+    const rawOpenChatUid = Number(params.openChatUid);
+    if (!Number.isFinite(rawOpenChatUid) || rawOpenChatUid <= 0) return;
+    const targetType: ChatTargetType =
+      params.openChatTargetType === 'group' ? 'group' : 'private';
+    const decodedOpenChat = decodeChatUid(rawOpenChatUid);
+    const targetUid =
+      decodedOpenChat.targetType === targetType && decodedOpenChat.targetUid > 0
+        ? decodedOpenChat.targetUid
+        : rawOpenChatUid;
     const focusMessageId = String(params.openChatFocusMessageId || '').trim();
     const returnToPrevious = params.openChatReturnToPrevious === true;
     openChatFromPayload(targetUid, params.openChatFriend, {
-      targetType: params.openChatTargetType,
+      targetType,
       group: params.openChatGroup,
       returnToPrevious,
     });
     if (focusMessageId) {
+      const locateChatUid = encodeChatUid(targetUid, targetType);
       setTimeout(() => {
-        locateChatMessage(targetUid, focusMessageId).catch(() => undefined);
+        locateChatMessage(locateChatUid, focusMessageId).catch(() => undefined);
       }, 120);
     }
     navigation.setParams({
@@ -2614,16 +3514,24 @@ export default function Home({ profile }: { profile: Profile }) {
         }>(STORAGE_KEYS.pendingOpenChat);
         if (cancelled || !pending?.uid) return;
         await storage.remove(STORAGE_KEYS.pendingOpenChat);
-        const targetUid = Number(pending.uid);
+        const rawPendingUid = Number(pending.uid);
+        if (!Number.isFinite(rawPendingUid) || rawPendingUid <= 0) return;
+        const targetType: ChatTargetType = pending.targetType === 'group' ? 'group' : 'private';
+        const decodedPending = decodeChatUid(rawPendingUid);
+        const targetUid =
+          decodedPending.targetType === targetType && decodedPending.targetUid > 0
+            ? decodedPending.targetUid
+            : rawPendingUid;
         openChatFromPayload(targetUid, pending.friend, {
-          targetType: pending.targetType,
+          targetType,
           group: pending.group,
           returnToPrevious: pending.returnToPrevious === true,
         });
         const focusMessageId = String(pending.focusMessageId || '').trim();
         if (focusMessageId) {
+          const locateChatUid = encodeChatUid(targetUid, targetType);
           setTimeout(() => {
-            locateChatMessage(targetUid, focusMessageId).catch(() => undefined);
+            locateChatMessage(locateChatUid, focusMessageId).catch(() => undefined);
           }, 120);
         }
       };
@@ -2646,13 +3554,24 @@ export default function Home({ profile }: { profile: Profile }) {
     useCallback(() => {
       let cancelled = false;
       const syncFromSettings = async () => {
-        const [storedPinned, storedMuted, storedBackground, storedGroupRemarks, storedDeleteCutoff, pendingAction] =
+        const [
+          storedPinned,
+          storedHidden,
+          storedMuted,
+          storedBackground,
+          storedGroupRemarks,
+          storedDeleteCutoff,
+          storedReadAt,
+          pendingAction,
+        ] =
           await Promise.all([
             storage.getJson<PinnedMap>(STORAGE_KEYS.pinned),
+            storage.getJson<HiddenMap>(STORAGE_KEYS.hiddenChats),
             storage.getJson<MutedMap>(STORAGE_KEYS.chatMuted),
             storage.getJson<ChatBackgroundMap>(STORAGE_KEYS.chatBackground),
             storage.getJson<Record<number, string>>(STORAGE_KEYS.groupRemarks),
             storage.getJson<DeleteCutoffMap>(STORAGE_KEYS.chatDeleteCutoff),
+            storage.getJson<ReadAtMap>(STORAGE_KEYS.readAt),
             storage.getJson<{
               type?: string;
               uid?: number;
@@ -2662,13 +3581,122 @@ export default function Home({ profile }: { profile: Profile }) {
           ]);
         if (cancelled) return;
 
-        setPinnedMap(sanitizeBooleanMap(storedPinned));
-        setMutedMap(sanitizeBooleanMap(storedMuted));
-        setChatBackgroundMap(sanitizeChatBackgroundMap(storedBackground));
+        const canAttemptNamespaceMigration = groups.length > 0 || friends.length > 0;
+        const groupPairs = (groupsRef.current || [])
+          .map((group) => Number(group?.id))
+          .filter((groupId) => Number.isInteger(groupId) && groupId > 0)
+          .map((groupId) => ({ raw: groupId, encoded: encodeChatUid(groupId, 'group') }))
+          .filter((item) => Number.isInteger(item.encoded) && item.encoded > 0);
+        const friendIdSet = new Set(
+          (friendsRef.current || [])
+            .map((friend) => Number(friend?.uid))
+            .filter((uid) => Number.isInteger(uid) && uid > 0)
+        );
+
+        const scopedPinned = sanitizeBooleanMap(storedPinned);
+        const scopedHidden = sanitizeBooleanMap(storedHidden);
+        const scopedMuted = sanitizeBooleanMap(storedMuted);
+        const scopedBackground = sanitizeChatBackgroundMap(storedBackground);
+        const scopedDeleteCutoff = sanitizeDeleteCutoffMap(storedDeleteCutoff);
+        const scopedReadAt = sanitizeReadAtMap(storedReadAt);
+        let pinnedMigrated = false;
+        let hiddenMigrated = false;
+        let mutedMigrated = false;
+        let backgroundMigrated = false;
+        let deleteCutoffMigrated = false;
+        let readAtMigrated = false;
+
+        if (canAttemptNamespaceMigration) {
+          groupPairs.forEach(({ raw, encoded }) => {
+            const hasPrivateCollision = friendIdSet.has(raw);
+            if (
+              Object.prototype.hasOwnProperty.call(scopedPinned, raw) &&
+              !hasPrivateCollision
+            ) {
+              if (!Object.prototype.hasOwnProperty.call(scopedPinned, encoded)) {
+                scopedPinned[encoded] = Boolean(scopedPinned[raw]);
+              }
+              delete scopedPinned[raw];
+              pinnedMigrated = true;
+            }
+            if (
+              Object.prototype.hasOwnProperty.call(scopedHidden, raw) &&
+              !hasPrivateCollision
+            ) {
+              if (!Object.prototype.hasOwnProperty.call(scopedHidden, encoded)) {
+                scopedHidden[encoded] = Boolean(scopedHidden[raw]);
+              }
+              delete scopedHidden[raw];
+              hiddenMigrated = true;
+            }
+            if (
+              Object.prototype.hasOwnProperty.call(scopedMuted, raw) &&
+              !hasPrivateCollision
+            ) {
+              if (!Object.prototype.hasOwnProperty.call(scopedMuted, encoded)) {
+                scopedMuted[encoded] = Boolean(scopedMuted[raw]);
+              }
+              delete scopedMuted[raw];
+              mutedMigrated = true;
+            }
+            if (
+              Object.prototype.hasOwnProperty.call(scopedBackground, raw) &&
+              !hasPrivateCollision
+            ) {
+              if (!Object.prototype.hasOwnProperty.call(scopedBackground, encoded)) {
+                scopedBackground[encoded] = scopedBackground[raw];
+              }
+              delete scopedBackground[raw];
+              backgroundMigrated = true;
+            }
+            const rawCutoff = Number(scopedDeleteCutoff[raw]) || 0;
+            const encodedCutoff = Number(scopedDeleteCutoff[encoded]) || 0;
+            if (rawCutoff > 0 && !hasPrivateCollision) {
+              if (rawCutoff > encodedCutoff) {
+                scopedDeleteCutoff[encoded] = rawCutoff;
+              }
+              delete scopedDeleteCutoff[raw];
+              deleteCutoffMigrated = true;
+            }
+            const rawReadAt = Number(scopedReadAt[raw]) || 0;
+            const encodedReadAt = Number(scopedReadAt[encoded]) || 0;
+            if (rawReadAt > 0 && !hasPrivateCollision) {
+              if (rawReadAt > encodedReadAt) {
+                scopedReadAt[encoded] = rawReadAt;
+              }
+              delete scopedReadAt[raw];
+              readAtMigrated = true;
+            }
+          });
+        }
+
+        setPinnedMap(scopedPinned);
+        setHiddenMap(scopedHidden);
+        setMutedMap(scopedMuted);
+        setChatBackgroundMap(scopedBackground);
         setGroupRemarksMap(sanitizeGroupRemarksMap(storedGroupRemarks));
-        const nextDeleteCutoff = sanitizeDeleteCutoffMap(storedDeleteCutoff);
+        setReadAtMap(scopedReadAt);
+        const nextDeleteCutoff = scopedDeleteCutoff;
         deleteCutoffMapRef.current = nextDeleteCutoff;
         setDeleteCutoffMap(nextDeleteCutoff);
+        if (pinnedMigrated) {
+          storage.setJson(STORAGE_KEYS.pinned, scopedPinned).catch(() => undefined);
+        }
+        if (hiddenMigrated) {
+          persistHiddenMap(scopedHidden).catch(() => undefined);
+        }
+        if (mutedMigrated) {
+          storage.setJson(STORAGE_KEYS.chatMuted, scopedMuted).catch(() => undefined);
+        }
+        if (backgroundMigrated) {
+          storage.setJson(STORAGE_KEYS.chatBackground, scopedBackground).catch(() => undefined);
+        }
+        if (deleteCutoffMigrated) {
+          persistDeleteCutoffMap(nextDeleteCutoff).catch(() => undefined);
+        }
+        if (readAtMigrated) {
+          storage.setJson(STORAGE_KEYS.readAt, scopedReadAt).catch(() => undefined);
+        }
 
         const actionUid = Number(pendingAction?.uid);
         const actionAt = Number(pendingAction?.at);
@@ -2676,6 +3704,7 @@ export default function Home({ profile }: { profile: Profile }) {
           Number.isFinite(actionAt) && actionAt > 0 ? actionAt : Date.now();
         if (pendingAction?.type === 'group_update' && Number.isInteger(actionUid) && actionUid > 0) {
           await storage.remove(STORAGE_KEYS.pendingChatSettingsAction);
+          const actionChatUid = encodeChatUid(actionUid, 'group');
           const payload = pendingAction.group || {};
           setGroups((prev) => {
             const existing = prev.find((item) => item.id === actionUid);
@@ -2694,6 +3723,9 @@ export default function Home({ profile }: { profile: Profile }) {
             }
             return [merged, ...prev];
           });
+          if (actionChatUid) {
+            ensureMessageBucket(actionChatUid);
+          }
           return;
         }
 
@@ -2728,21 +3760,23 @@ export default function Home({ profile }: { profile: Profile }) {
 
         if (pendingAction?.type === 'group_delete_chat' && Number.isInteger(actionUid) && actionUid > 0) {
           await storage.remove(STORAGE_KEYS.pendingChatSettingsAction);
-          setDeleteCutoff(actionUid, effectiveActionAt);
-          setReadAt(actionUid, effectiveActionAt);
-          messageIdSetsRef.current.delete(actionUid);
+          const actionChatUid = encodeChatUid(actionUid, 'group');
+          if (!actionChatUid) return;
+          setDeleteCutoff(actionChatUid, effectiveActionAt);
+          setReadAt(actionChatUid, effectiveActionAt);
+          messageIdSetsRef.current.delete(actionChatUid);
           setMessagesByUid((prev) => {
             const next = { ...prev };
-            delete next[actionUid];
+            delete next[actionChatUid];
             return next;
           });
           setLatestMap((prev) => {
             const next = { ...prev };
-            delete next[actionUid];
+            delete next[actionChatUid];
             return next;
           });
-          setUnreadMap((prev) => ({ ...prev, [actionUid]: 0 }));
-          if (activeChatUidRef.current === actionUid) {
+          setUnreadMap((prev) => ({ ...prev, [actionChatUid]: 0 }));
+          if (activeChatUidRef.current === actionChatUid) {
             setActiveChatUid(null);
           }
           return;
@@ -2750,68 +3784,70 @@ export default function Home({ profile }: { profile: Profile }) {
 
         if (pendingAction?.type === 'group_leave' && Number.isInteger(actionUid) && actionUid > 0) {
           await storage.remove(STORAGE_KEYS.pendingChatSettingsAction);
-          messageIdSetsRef.current.delete(actionUid);
-          messageOffsetMapRef.current.delete(actionUid);
+          const actionChatUid = encodeChatUid(actionUid, 'group');
+          if (!actionChatUid) return;
+          messageIdSetsRef.current.delete(actionChatUid);
+          messageOffsetMapRef.current.delete(actionChatUid);
           setReadAtMap((prev) => {
-            if (!Object.prototype.hasOwnProperty.call(prev, actionUid)) return prev;
+            if (!Object.prototype.hasOwnProperty.call(prev, actionChatUid)) return prev;
             const next = { ...prev };
-            delete next[actionUid];
+            delete next[actionChatUid];
             storage.setJson(STORAGE_KEYS.readAt, next).catch(() => undefined);
             return next;
           });
           setGroups((prev) => prev.filter((group) => group.id !== actionUid));
           setMessagesByUid((prev) => {
             const next = { ...prev };
-            delete next[actionUid];
+            delete next[actionChatUid];
             return next;
           });
           setLatestMap((prev) => {
             const next = { ...prev };
-            delete next[actionUid];
+            delete next[actionChatUid];
             return next;
           });
           setUnreadMap((prev) => {
             const next = { ...prev };
-            delete next[actionUid];
+            delete next[actionChatUid];
             return next;
           });
           setHiddenMap((prev) => {
-            if (!prev[actionUid]) return prev;
+            if (!prev[actionChatUid]) return prev;
             const next = { ...prev };
-            delete next[actionUid];
+            delete next[actionChatUid];
             persistHiddenMap(next).catch(() => undefined);
             return next;
           });
           setHistoryLoading((prev) => {
-            if (!Object.prototype.hasOwnProperty.call(prev, actionUid)) return prev;
+            if (!Object.prototype.hasOwnProperty.call(prev, actionChatUid)) return prev;
             const next = { ...prev };
-            delete next[actionUid];
+            delete next[actionChatUid];
             return next;
           });
           setHistoryHasMore((prev) => {
-            if (!Object.prototype.hasOwnProperty.call(prev, actionUid)) return prev;
+            if (!Object.prototype.hasOwnProperty.call(prev, actionChatUid)) return prev;
             const next = { ...prev };
-            delete next[actionUid];
+            delete next[actionChatUid];
             return next;
           });
           setPinnedMap((prev) => {
-            if (!prev[actionUid]) return prev;
+            if (!prev[actionChatUid]) return prev;
             const next = { ...prev };
-            delete next[actionUid];
+            delete next[actionChatUid];
             storage.setJson(STORAGE_KEYS.pinned, next).catch(() => undefined);
             return next;
           });
           setMutedMap((prev) => {
-            if (!prev[actionUid]) return prev;
+            if (!prev[actionChatUid]) return prev;
             const next = { ...prev };
-            delete next[actionUid];
+            delete next[actionChatUid];
             storage.setJson(STORAGE_KEYS.chatMuted, next).catch(() => undefined);
             return next;
           });
           setChatBackgroundMap((prev) => {
-            if (!prev[actionUid]) return prev;
+            if (!prev[actionChatUid]) return prev;
             const next = { ...prev };
-            delete next[actionUid];
+            delete next[actionChatUid];
             storage.setJson(STORAGE_KEYS.chatBackground, next).catch(() => undefined);
             return next;
           });
@@ -2823,14 +3859,14 @@ export default function Home({ profile }: { profile: Profile }) {
             return next;
           });
           setDeleteCutoffMap((prev) => {
-            if (!Object.prototype.hasOwnProperty.call(prev, actionUid)) return prev;
+            if (!Object.prototype.hasOwnProperty.call(prev, actionChatUid)) return prev;
             const next = { ...prev };
-            delete next[actionUid];
+            delete next[actionChatUid];
             deleteCutoffMapRef.current = next;
             persistDeleteCutoffMap(next).catch(() => undefined);
             return next;
           });
-          if (activeChatUidRef.current === actionUid) {
+          if (activeChatUidRef.current === actionChatUid) {
             setActiveChatUid(null);
           }
         }
@@ -2839,7 +3875,15 @@ export default function Home({ profile }: { profile: Profile }) {
       return () => {
         cancelled = true;
       };
-    }, [persistDeleteCutoffMap, persistHiddenMap, setDeleteCutoff, setReadAt])
+    }, [
+      ensureMessageBucket,
+      friends.length,
+      groups.length,
+      persistDeleteCutoffMap,
+      persistHiddenMap,
+      setDeleteCutoff,
+      setReadAt,
+    ])
   );
 
   useEffect(() => {
@@ -2919,22 +3963,75 @@ export default function Home({ profile }: { profile: Profile }) {
   const onChatScroll = useCallback(
     async (event: any) => {
       const uid = activeChatUidRef.current;
-      if (!uid) return;
+      if (!uid || topLoadLockRef.current) return;
       const offsetY = event?.nativeEvent?.contentOffset?.y ?? 0;
-      if (offsetY > 40) return;
-      if (!historyHasMore[uid] || historyLoading[uid]) return;
-      const first = (messagesByUidRef.current[uid] || [])[0];
-      if (!first) return;
-      const prevHeight = contentHeightRef.current;
-      await loadHistory(uid, { beforeId: first.id });
-      setTimeout(() => {
-        const nextHeight = contentHeightRef.current;
-        if (messageListRef.current) {
-          messageListRef.current.scrollTo({ y: nextHeight - prevHeight, animated: false });
+      if (offsetY > CHAT_TOP_LOAD_THRESHOLD) return;
+      const bucket = messagesByUidRef.current[uid] || [];
+      if (bucket.length === 0) return;
+      topLoadLockRef.current = true;
+      try {
+        const rawLimit = Number(chatRenderLimitMapRef.current[uid]);
+        const currentLimit =
+          Number.isInteger(rawLimit) && rawLimit > 0 ? rawLimit : CHAT_RENDER_CHUNK_SIZE;
+
+        if (bucket.length > currentLimit) {
+          const prevHeight = contentHeightRef.current;
+          pendingTopRestoreRef.current = {
+            uid,
+            prevHeight,
+            prevOffsetY: Math.max(0, Number(offsetY) || 0),
+            expiresAt: Date.now() + 1600,
+          };
+          setChatRenderLimitMap((prev) => {
+            if (activeChatUidRef.current !== uid) return prev;
+            const prevLimitRaw = Number(prev[uid]);
+            const prevLimit =
+              Number.isInteger(prevLimitRaw) && prevLimitRaw > 0
+                ? prevLimitRaw
+                : CHAT_RENDER_CHUNK_SIZE;
+            const nextLimit = Math.min(bucket.length, prevLimit + CHAT_RENDER_CHUNK_SIZE);
+            if (nextLimit === prevLimit) return prev;
+            return { ...prev, [uid]: nextLimit };
+          });
+          return;
         }
-      }, 0);
+
+        if (!historyHasMoreRef.current[uid] || historyLoadingRef.current[uid]) return;
+        const first = bucket[0];
+        if (!first) return;
+        const prevHeight = contentHeightRef.current;
+        const prevBucketLength = bucket.length;
+        await loadHistory(uid, { beforeId: first.id });
+        if (activeChatUidRef.current !== uid) return;
+        const nextBucket = messagesByUidRef.current[uid] || [];
+        const addedCount = Math.max(0, nextBucket.length - prevBucketLength);
+        if (addedCount > 0) {
+          pendingTopRestoreRef.current = {
+            uid,
+            prevHeight,
+            prevOffsetY: Math.max(0, Number(offsetY) || 0),
+            expiresAt: Date.now() + 1600,
+          };
+        }
+        setChatRenderLimitMap((prev) => {
+          if (activeChatUidRef.current !== uid) return prev;
+          const prevLimitRaw = Number(prev[uid]);
+          const prevLimit =
+            Number.isInteger(prevLimitRaw) && prevLimitRaw > 0
+              ? prevLimitRaw
+              : CHAT_RENDER_CHUNK_SIZE;
+          const maxLimit = Math.max(prevLimit, nextBucket.length);
+          const nextLimit = Math.min(maxLimit, prevLimit + CHAT_RENDER_CHUNK_SIZE);
+          if (nextLimit === prevLimit) return prev;
+          return { ...prev, [uid]: nextLimit };
+        });
+      } finally {
+        setTimeout(() => {
+          topLoadLockRef.current = false;
+        }, 60);
+      }
     },
-    [historyHasMore, historyLoading, loadHistory]
+    [loadHistory]
   );
 
   const appendEmojiToDraft = useCallback(
@@ -3002,36 +4099,60 @@ export default function Home({ profile }: { profile: Profile }) {
   const sendCustomSticker = useCallback(
     async (sticker: CustomSticker) => {
       if (!sticker?.url || !activeChatUidRef.current || !selfUid) return;
-      const targetType = groupsRef.current.some((group) => group.id === activeChatUidRef.current)
-        ? 'group'
-        : 'private';
+      const chatUid = Number(activeChatUidRef.current);
+      const { targetUid, targetType } = decodeChatUid(chatUid);
+      if (!Number.isInteger(targetUid) || targetUid <= 0) return;
+      const clientMessageId = createClientMessageId();
+      const localMessageId = `local:${clientMessageId}`;
+      const localCreatedAtMs = Date.now();
+      const localCreatedAt = new Date(localCreatedAtMs).toISOString();
       const payload = {
         senderUid: selfUid,
-        targetUid: activeChatUidRef.current,
+        targetUid,
         targetType,
         type: 'image',
         url: sticker.url,
         hash: sticker.hash,
+        clientMessageId,
       };
-      try {
-        const response = await fetch(`${API_BASE}/api/chat/send`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json', ...authHeaders() },
-          body: JSON.stringify(payload),
-        });
-        const data = await response.json().catch(() => ({}));
-        if (response.ok && data?.success && data?.data) {
-          insertMessages(activeChatUidRef.current, [data.data]);
-          setTimeout(scrollToBottom, 0);
-        }
-      } catch {}
+      insertMessages(chatUid, [
+        {
+          id: localMessageId,
+          type: 'image',
+          senderUid: selfUid,
+          targetUid,
+          targetType,
+          data: {
+            url: sticker.url,
+            hash: sticker.hash,
+            mime: sticker.mime || 'image/png',
+            content: '[图片]',
+            clientMessageId,
+            clientPending: true,
+            clientFailed: false,
+            clientAnimateIn: true,
+            clientAppearAtMs: localCreatedAtMs,
+          },
+          createdAt: localCreatedAt,
+          createdAtMs: localCreatedAtMs,
+        },
+      ]);
+      scrollToBottom();
+      await submitTextMessageWithLocalId({
+        chatUid,
+        localMessageId,
+        clientMessageId,
+        payload,
+      });
     },
-    [authHeaders, insertMessages, scrollToBottom, selfUid]
+    [createClientMessageId, insertMessages, scrollToBottom, selfUid, submitTextMessageWithLocalId]
   );
 
   const sendPickedImages = useCallback(async () => {
     const chatUid = activeChatUidRef.current;
     if (chatImageSending || !chatUid || !selfUid || !tokenRef.current) return;
+    const { targetUid, targetType } = decodeChatUid(chatUid);
+    if (!Number.isInteger(targetUid) || targetUid <= 0) return;
     setEmojiPanelVisible(false);
     setChatImageSending(true);
     try {
@@ -3045,67 +4166,127 @@ export default function Home({ profile }: { profile: Profile }) {
         .filter((item) => item.data && ALLOWED_STICKER_MIME.has(item.mime));
       if (!images.length) return;
 
-      const targetType = groupsRef.current.some((group) => group.id === chatUid) ? 'group' : 'private';
-      const sentEntries: any[] = [];
       for (const image of images) {
+        const clientMessageId = createClientMessageId();
+        const localMessageId = `local:${clientMessageId}`;
+        const localCreatedAtMs = Date.now();
+        const localCreatedAt = new Date(localCreatedAtMs).toISOString();
+        const imageDataUrl = `data:${image.mime};base64,${image.data}`;
         const payload = {
           senderUid: selfUid,
-          targetUid: chatUid,
+          targetUid,
           targetType,
           type: 'image',
-          url: `data:${image.mime};base64,${image.data}`,
+          url: imageDataUrl,
+          mime: image.mime,
+          clientMessageId,
         };
-        const response = await fetch(`${API_BASE}/api/chat/send`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json', ...authHeaders() },
-          body: JSON.stringify(payload),
+        insertMessages(chatUid, [
+          {
+            id: localMessageId,
+            type: 'image',
+            senderUid: selfUid,
+            targetUid,
+            targetType,
+            data: {
+              url: imageDataUrl,
+              mime: image.mime,
+              content: '[图片]',
+              clientMessageId,
+              clientPending: true,
+              clientFailed: false,
+              clientAnimateIn: true,
+              clientAppearAtMs: localCreatedAtMs,
+            },
+            createdAt: localCreatedAt,
+            createdAtMs: localCreatedAtMs,
+          },
+        ]);
+        scrollToBottom();
+        await submitTextMessageWithLocalId({
+          chatUid,
+          localMessageId,
+          clientMessageId,
+          payload,
         });
-        const data = await response.json().catch(() => ({}));
-        if (response.ok && data?.success && data?.data) {
-          sentEntries.push(data.data);
-        }
-      }
-      if (sentEntries.length) {
-        insertMessages(chatUid, sentEntries);
-        setTimeout(scrollToBottom, 0);
       }
     } catch {}
     finally {
       setChatImageSending(false);
       focusChatInput();
     }
-  }, [authHeaders, chatImageSending, focusChatInput, insertMessages, scrollToBottom, selfUid]);
+  }, [
+    chatImageSending,
+    createClientMessageId,
+    focusChatInput,
+    insertMessages,
+    scrollToBottom,
+    selfUid,
+    submitTextMessageWithLocalId,
+  ]);
 
   const sendText = useCallback(async () => {
     if (!canSend || !activeChatUidRef.current || !selfUid) return;
     const content = draftMessage.trim().slice(0, CHAT_INPUT_MAX_LENGTH);
     if (!content) return;
-    const targetType = groupsRef.current.some((group) => group.id === activeChatUidRef.current)
-      ? 'group'
-      : 'private';
+    const chatUid = Number(activeChatUidRef.current);
+    const { targetUid, targetType } = decodeChatUid(chatUid);
+    if (!Number.isInteger(targetUid) || targetUid <= 0) return;
+    const clientMessageId = createClientMessageId();
+    const localMessageId = `local:${clientMessageId}`;
+    const localCreatedAtMs = Date.now();
+    const localCreatedAt = new Date(localCreatedAtMs).toISOString();
+
     focusChatInput();
-    const payload = {
-      senderUid: selfUid,
-      targetUid: activeChatUidRef.current,
-      targetType,
-      type: 'text',
-      content,
-    };
+    setDraftMessage('');
+    insertMessages(chatUid, [
+      {
+        id: localMessageId,
+        type: 'text',
+        senderUid: selfUid,
+        targetUid,
+        targetType,
+        data: {
+          content,
+          clientMessageId,
+          clientPending: true,
+          clientFailed: false,
+          clientAnimateIn: true,
+          clientAppearAtMs: localCreatedAtMs,
+        },
+        createdAt: localCreatedAt,
+        createdAtMs: localCreatedAtMs,
+      },
+    ]);
+    scrollToBottom();
+
     try {
-      const response = await fetch(`${API_BASE}/api/chat/send`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', ...authHeaders() },
-        body: JSON.stringify(payload),
+      await submitTextMessageWithLocalId({
+        chatUid,
+        localMessageId,
+        clientMessageId,
+        payload: {
+          senderUid: selfUid,
+          targetUid,
+          targetType,
+          type: 'text',
+          content,
+          clientMessageId,
+        },
       });
-      const data = await response.json().catch(() => ({}));
-      if (response.ok && data?.success && data?.data) {
-        insertMessages(activeChatUidRef.current, [data.data]);
-        setDraftMessage('');
-        setTimeout(scrollToBottom, 0);
-        focusChatInput();
-      }
-    } catch {}
-  }, [authHeaders, canSend, draftMessage, focusChatInput, insertMessages, scrollToBottom, selfUid]);
+    } catch {
+      // no-op; submitTextMessageWithLocalId has marked local message as failed.
+    }
+  }, [
+    canSend,
+    createClientMessageId,
+    draftMessage,
+    focusChatInput,
+    insertMessages,
+    scrollToBottom,
+    selfUid,
+    submitTextMessageWithLocalId,
+  ]);
 
   const clearVoiceTicker = useCallback(() => {
     if (!voiceRecordingTickerRef.current) return;
@@ -3307,36 +4488,426 @@ export default function Home({ profile }: { profile: Profile }) {
 
   const sendVoiceMessage = useCallback(
     async (recorded: VoiceRecordingResult) => {
-      const targetUid = activeChatUidRef.current;
-      if (!targetUid || !selfUid) return;
-      const targetType = groupsRef.current.some((group) => group.id === targetUid) ? 'group' : 'private';
+      const chatUid = activeChatUidRef.current;
+      if (!chatUid || !selfUid) return false;
+      const { targetUid, targetType } = decodeChatUid(chatUid);
+      if (!Number.isInteger(targetUid) || targetUid <= 0) return false;
       const durationMs = Number(recorded.durationMs) || 0;
       const durationSec = Math.max(1, Math.round(durationMs / 1000));
-      const voiceUrl = await uploadVoiceFile(recorded);
+      const clientMessageId = createClientMessageId();
+      const localMessageId = `local:${clientMessageId}`;
+      const localCreatedAtMs = Date.now();
+      const localCreatedAt = new Date(localCreatedAtMs).toISOString();
+      const localVoiceUri = String(recorded.uri || '').trim();
+      const voiceMime = recorded.mimeType || 'audio/mp4';
+      const voiceName = recorded.fileName || `voice-${Date.now()}.m4a`;
+      const content = `[语音 ${durationSec}s]`;
       const payload = {
         senderUid: selfUid,
         targetUid,
         targetType,
         type: 'voice',
-        url: voiceUrl,
+        url: '',
         durationMs,
-        mime: recorded.mimeType || 'audio/mp4',
-        name: recorded.fileName || `voice-${Date.now()}.m4a`,
-        content: `[语音 ${durationSec}s]`,
+        mime: voiceMime,
+        name: voiceName,
+        content,
+        clientMessageId,
       };
-      const response = await fetch(`${API_BASE}/api/chat/send`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', ...authHeaders() },
-        body: JSON.stringify(payload),
-      });
-      const data = await response.json().catch(() => ({}));
-      if (!response.ok || !data?.success || !data?.data) {
-        throw new Error(data?.message || '语音发送失败。');
+      insertMessages(chatUid, [
+        {
+          id: localMessageId,
+          type: 'voice',
+          senderUid: selfUid,
+          targetUid,
+          targetType,
+          data: {
+            ...(localVoiceUri ? { url: localVoiceUri, localVoiceUri } : {}),
+            durationMs,
+            mime: voiceMime,
+            name: voiceName,
+            content,
+            clientMessageId,
+            clientPending: true,
+            clientFailed: false,
+            clientAnimateIn: true,
+            clientAppearAtMs: localCreatedAtMs,
+          },
+          createdAt: localCreatedAt,
+          createdAtMs: localCreatedAtMs,
+        },
+      ]);
+      scrollToBottom();
+      let voiceUrl = '';
+      try {
+        voiceUrl = await uploadVoiceFile(recorded);
+      } catch {
+        markMessageAsFailed(chatUid, localMessageId);
+        return false;
       }
-      insertMessages(targetUid, [data.data]);
-      setTimeout(scrollToBottom, 0);
+      payload.url = voiceUrl;
+      const sent = await submitTextMessageWithLocalId({
+        chatUid,
+        localMessageId,
+        clientMessageId,
+        payload,
+      });
+      if (sent && localVoiceUri) {
+        revokeVoiceRecordingUri(localVoiceUri);
+      }
+      return sent;
     },
-    [authHeaders, insertMessages, scrollToBottom, selfUid, uploadVoiceFile]
+    [
+      createClientMessageId,
+      insertMessages,
+      markMessageAsFailed,
+      scrollToBottom,
+      selfUid,
+      submitTextMessageWithLocalId,
+      uploadVoiceFile,
+    ]
+  );
+
+  const replaceMessageForRetry = useCallback(
+    (uid: number, oldMessageId: string, nextEntry: any) => {
+      if (!uid || !oldMessageId || !nextEntry) return false;
+      const normalizedOldId = String(oldMessageId).trim();
+      const normalizedNext = normalizeMessage(nextEntry);
+      const normalizedNextId = String(normalizedNext?.id || '').trim();
+      if (!normalizedOldId || !normalizedNextId) return false;
+
+      let replaced = false;
+      let nextBucket: Message[] | null = null;
+      setMessagesByUid((prev) => {
+        const bucket = Array.isArray(prev[uid]) ? prev[uid] : [];
+        const filtered = bucket.filter(
+          (item) =>
+            String(item?.id || '') !== normalizedOldId &&
+            String(item?.id || '') !== normalizedNextId
+        );
+        const merged = [...filtered, normalizedNext].sort((a, b) => a.createdAtMs - b.createdAtMs);
+        nextBucket = merged;
+        replaced = true;
+        return { ...prev, [uid]: merged };
+      });
+      if (!replaced) return false;
+
+      const resolvedBucket = nextBucket as Message[] | null;
+      if (!resolvedBucket) return false;
+      const nextIdSet = new Set<number | string>();
+      resolvedBucket.forEach((item) => {
+        if (typeof item?.id === 'number' || typeof item?.id === 'string') {
+          nextIdSet.add(item.id);
+        }
+      });
+      messageIdSetsRef.current.set(uid, nextIdSet);
+      if (resolvedBucket.length > 0) {
+        updateLatest(uid, resolvedBucket[resolvedBucket.length - 1]);
+      } else {
+        setLatestMap((prev) => {
+          if (!Object.prototype.hasOwnProperty.call(prev, uid)) return prev;
+          const next = { ...prev };
+          delete next[uid];
+          return next;
+        });
+      }
+      recalcUnread(uid, resolvedBucket);
+      return true;
+    },
+    [normalizeMessage, recalcUnread, updateLatest]
+  );
+
+  const resolveRetryMessageContext = useCallback((message: Message) => {
+    const messageId = String(message?.id || '').trim();
+    if (!messageId) return null;
+
+    const hasMessageInBucket = (uid: number) => {
+      if (!Number.isInteger(uid) || uid <= 0) return false;
+      const bucket = messagesByUidRef.current[uid];
+      if (!Array.isArray(bucket) || bucket.length === 0) return false;
+      return bucket.some((item) => String(item?.id || '') === messageId);
+    };
+
+    const targetUidFromMessage = Number(message?.targetUid);
+    const targetTypeFromMessage: ChatTargetType =
+      message?.targetType === 'group' ? 'group' : 'private';
+    const preferredChatUid = encodeChatUid(targetUidFromMessage, targetTypeFromMessage);
+
+    let chatUid = 0;
+    if (preferredChatUid && hasMessageInBucket(preferredChatUid)) {
+      chatUid = preferredChatUid;
+    }
+    if (!chatUid) {
+      const activeUid = Number(activeChatUidRef.current);
+      if (hasMessageInBucket(activeUid)) {
+        chatUid = activeUid;
+      }
+    }
+    if (!chatUid) {
+      const found = Object.entries(messagesByUidRef.current).find(([rawUid, list]) => {
+        const uid = Number(rawUid);
+        if (!Number.isInteger(uid) || uid <= 0 || !Array.isArray(list) || list.length === 0) {
+          return false;
+        }
+        return list.some((item) => String(item?.id || '') === messageId);
+      });
+      if (found) {
+        chatUid = Number(found[0]);
+      }
+    }
+    if (!chatUid) {
+      chatUid = preferredChatUid || Number(activeChatUidRef.current) || 0;
+    }
+    if (!Number.isInteger(chatUid) || chatUid <= 0) return null;
+
+    const decoded = decodeChatUid(chatUid);
+    if (!Number.isInteger(decoded.targetUid) || decoded.targetUid <= 0) return null;
+    return {
+      chatUid,
+      targetUid: decoded.targetUid,
+      targetType: decoded.targetType,
+      messageId,
+    };
+  }, []);
+
+  const retryFailedTextMessage = useCallback(
+    async (message: Message) => {
+      if (!message || !selfUid) return;
+      const retryContext = resolveRetryMessageContext(message);
+      if (!retryContext) return;
+      const { chatUid, targetUid, targetType, messageId } = retryContext;
+      const content = String(
+        message.content || message?.raw?.data?.content || ''
+      )
+        .trim()
+        .slice(0, CHAT_INPUT_MAX_LENGTH);
+      if (!content) return;
+
+      const clientMessageId = createClientMessageId();
+      const localMessageId = `local:${clientMessageId}`;
+      const localCreatedAtMs = Date.now();
+      const localCreatedAt = new Date(localCreatedAtMs).toISOString();
+
+      replaceMessageForRetry(chatUid, messageId, {
+        id: localMessageId,
+        type: 'text',
+        senderUid: selfUid,
+        targetUid,
+        targetType,
+        data: {
+          content,
+          clientMessageId,
+          clientPending: true,
+          clientFailed: false,
+          clientAnimateIn: true,
+          clientAppearAtMs: localCreatedAtMs,
+        },
+        createdAt: localCreatedAt,
+        createdAtMs: localCreatedAtMs,
+      });
+      scrollToBottom();
+      await submitTextMessageWithLocalId({
+        chatUid,
+        localMessageId,
+        clientMessageId,
+        payload: {
+          senderUid: selfUid,
+          targetUid,
+          targetType,
+          type: 'text',
+          content,
+          clientMessageId,
+        },
+      });
+    },
+    [
+      createClientMessageId,
+      replaceMessageForRetry,
+      resolveRetryMessageContext,
+      scrollToBottom,
+      selfUid,
+      submitTextMessageWithLocalId,
+    ]
+  );
+
+  const retryFailedMessage = useCallback(
+    async (message: Message) => {
+      if (!message) return;
+      const type = String(message?.type || 'text');
+      if (type === 'text') {
+        await retryFailedTextMessage(message);
+        return;
+      }
+      if (!selfUid) return;
+      const retryContext = resolveRetryMessageContext(message);
+      if (!retryContext) return;
+      const { chatUid, targetUid, targetType, messageId } = retryContext;
+      const rawData =
+        message?.raw?.data && typeof message.raw.data === 'object' ? message.raw.data : {};
+      const clientMessageId = createClientMessageId();
+      const localMessageId = `local:${clientMessageId}`;
+      const localCreatedAtMs = Date.now();
+      const localCreatedAt = new Date(localCreatedAtMs).toISOString();
+
+      if (type === 'image') {
+        const imageUrl = String(rawData?.url || message.imageUrl || '').trim();
+        if (!imageUrl) return;
+        const content = String(rawData?.content || message.content || '[图片]').trim() || '[图片]';
+        replaceMessageForRetry(chatUid, messageId, {
+          id: localMessageId,
+          type: 'image',
+          senderUid: selfUid,
+          targetUid,
+          targetType,
+          data: {
+            url: imageUrl,
+            hash: typeof rawData?.hash === 'string' ? rawData.hash : undefined,
+            mime: typeof rawData?.mime === 'string' ? rawData.mime : undefined,
+            content,
+            clientMessageId,
+            clientPending: true,
+            clientFailed: false,
+            clientAnimateIn: true,
+            clientAppearAtMs: localCreatedAtMs,
+          },
+          createdAt: localCreatedAt,
+          createdAtMs: localCreatedAtMs,
+        });
+        scrollToBottom();
+        await submitTextMessageWithLocalId({
+          chatUid,
+          localMessageId,
+          clientMessageId,
+          payload: {
+            senderUid: selfUid,
+            targetUid,
+            targetType,
+            type: 'image',
+            url: imageUrl,
+            hash: rawData?.hash,
+            mime: rawData?.mime,
+            clientMessageId,
+          },
+        });
+        return;
+      }
+
+      if (type === 'voice') {
+        let localVoiceUri = String(rawData?.localVoiceUri || '').trim();
+        let voiceUrl = String(rawData?.url || message.voiceUrl || '').trim();
+        const looksLikeLocalVoiceUrl = /^(blob:|file:|content:\/\/|data:audio)/i.test(voiceUrl);
+        if (looksLikeLocalVoiceUrl) {
+          if (!localVoiceUri) {
+            localVoiceUri = voiceUrl;
+          }
+          voiceUrl = '';
+        }
+        if (!voiceUrl && !localVoiceUri) return;
+        const rawDurationMs = Number(rawData?.durationMs);
+        const fallbackDurationMs =
+          Number(message.voiceDurationSec) > 0 ? Math.round(Number(message.voiceDurationSec) * 1000) : 0;
+        const durationMs = Number.isFinite(rawDurationMs) && rawDurationMs > 0 ? rawDurationMs : fallbackDurationMs;
+        const durationSec = durationMs > 0 ? Math.max(1, Math.round(durationMs / 1000)) : 0;
+        const content =
+          String(rawData?.content || message.content || '').trim() ||
+          (durationSec > 0 ? `[语音 ${durationSec}s]` : '[语音]');
+        replaceMessageForRetry(chatUid, messageId, {
+          id: localMessageId,
+          type: 'voice',
+          senderUid: selfUid,
+          targetUid,
+          targetType,
+          data: {
+            ...(voiceUrl || localVoiceUri ? { url: voiceUrl || localVoiceUri } : {}),
+            ...(localVoiceUri ? { localVoiceUri } : {}),
+            durationMs,
+            mime: typeof rawData?.mime === 'string' ? rawData.mime : 'audio/mp4',
+            name:
+              typeof rawData?.name === 'string' && rawData.name
+                ? rawData.name
+                : `voice-${Date.now()}.m4a`,
+            content,
+            clientMessageId,
+            clientPending: true,
+            clientFailed: false,
+            clientAnimateIn: true,
+            clientAppearAtMs: localCreatedAtMs,
+          },
+          createdAt: localCreatedAt,
+          createdAtMs: localCreatedAtMs,
+        });
+        scrollToBottom();
+        if (!voiceUrl) {
+          try {
+            voiceUrl = await uploadVoiceFile({
+              uri: localVoiceUri,
+              durationMs,
+              mimeType: typeof rawData?.mime === 'string' ? rawData.mime : 'audio/mp4',
+              fileName:
+                typeof rawData?.name === 'string' && rawData.name
+                  ? rawData.name
+                  : `voice-${Date.now()}.m4a`,
+            });
+          } catch {
+            markMessageAsFailed(chatUid, localMessageId);
+            return;
+          }
+        }
+        const sent = await submitTextMessageWithLocalId({
+          chatUid,
+          localMessageId,
+          clientMessageId,
+          payload: {
+            senderUid: selfUid,
+            targetUid,
+            targetType,
+            type: 'voice',
+            url: voiceUrl,
+            durationMs,
+            mime: rawData?.mime,
+            name: rawData?.name,
+            content,
+            clientMessageId,
+          },
+        });
+        if (sent && localVoiceUri) {
+          revokeVoiceRecordingUri(localVoiceUri);
+        }
+        return;
+      }
+
+      await retryFailedTextMessage(message);
+    },
+    [
+      createClientMessageId,
+      markMessageAsFailed,
+      replaceMessageForRetry,
+      resolveRetryMessageContext,
+      retryFailedTextMessage,
+      scrollToBottom,
+      selfUid,
+      submitTextMessageWithLocalId,
+      uploadVoiceFile,
+    ]
+  );
+
+  const closeRetryPrompt = useCallback(() => {
+    setRetryPromptMessage(null);
+  }, []);
+
+  const confirmRetryPrompt = useCallback(() => {
+    const pendingMessage = retryPromptMessage;
+    setRetryPromptMessage(null);
+    if (!pendingMessage) return;
+    retryFailedMessage(pendingMessage).catch(() => undefined);
+  }, [retryFailedMessage, retryPromptMessage]);
+
+  const onPressFailedMessage = useCallback(
+    (message: Message) => {
+      if (!message) return;
+      setRetryPromptMessage(message);
+    },
+    []
   );
 
   const appendTranscriptionToDraft = useCallback(
@@ -3430,6 +5001,9 @@ export default function Home({ profile }: { profile: Profile }) {
           Number(recorded.durationMs) || Math.max(0, Date.now() - voiceRecordingStartedAtMsRef.current);
         recorded = { ...recorded, durationMs };
         if (durationMs < MIN_VOICE_DURATION_MS) {
+          if (recorded.uri) {
+            revokeVoiceRecordingUri(recorded.uri);
+          }
           Alert.alert('语音太短', '按住至少 0.5 秒再松开发送。');
           return;
         }
@@ -3437,22 +5011,25 @@ export default function Home({ profile }: { profile: Profile }) {
           setVoiceStatusText('语音转文字中...');
           const transcript = await requestVoiceTranscription(recorded);
           if (!String(transcript || '').trim()) {
+            if (recorded.uri) {
+              revokeVoiceRecordingUri(recorded.uri);
+            }
             setVoiceStatusText('未识别到有效内容');
             return;
           }
           appendTranscriptionToDraft(transcript, durationMs);
+          if (recorded.uri) {
+            revokeVoiceRecordingUri(recorded.uri);
+          }
           setVoiceStatusText('已转为文字');
           return;
         }
-        await sendVoiceMessage(recorded);
-        setVoiceStatusText('语音已发送');
+        const sent = await sendVoiceMessage(recorded);
+        setVoiceStatusText(sent ? '语音已发送' : '发送失败，可重试');
       } catch (error) {
         const message = error instanceof Error ? error.message : '语音处理失败，请稍后重试。';
         Alert.alert('语音失败', message || '语音处理失败，请稍后重试。');
       } finally {
-        if (recorded?.uri) {
-          revokeVoiceRecordingUri(recorded.uri);
-        }
         setVoiceProcessing(false);
         setVoiceGestureAction('send');
         voiceGestureActionRef.current = 'send';
@@ -3589,7 +5166,13 @@ export default function Home({ profile }: { profile: Profile }) {
     try {
       const base = new URL(API_BASE);
       const protocol = base.protocol === 'https:' ? 'wss:' : 'ws:';
-      return `${protocol}//${base.host}/ws?token=${encodeURIComponent(tokenRef.current)}`;
+      const pageHost = String((globalThis as any)?.location?.host || '').trim();
+      const wsProxyPath = String((globalThis as any)?.__XINCHAT_WS_PROXY_PATH__ || '').trim();
+      const wsPath =
+        Platform.OS === 'web' && wsProxyPath && pageHost && pageHost === base.host
+          ? wsProxyPath
+          : '/ws';
+      return `${protocol}//${base.host}${wsPath}?token=${encodeURIComponent(tokenRef.current)}`;
     } catch {
       return '';
     }
@@ -3677,7 +5260,15 @@ export default function Home({ profile }: { profile: Profile }) {
             : message.senderUid === selfUid
               ? message.targetUid
               : message.senderUid;
-        insertMessages(targetUid, [entry]);
+        const targetType: ChatTargetType = message.targetType === 'group' ? 'group' : 'private';
+        const chatUid = encodeChatUid(targetUid, targetType);
+        if (!chatUid) return;
+        const mergedPendingMessage =
+          Number(message.senderUid) === Number(selfUid) &&
+          resolvePendingMessageByClientMessageId(chatUid, entry);
+        if (!mergedPendingMessage) {
+          insertMessages(chatUid, [entry]);
+        }
         if (
           message.targetType === 'group' &&
           !groupsRef.current.some((group) => Number(group.id) === targetUid)
@@ -3688,15 +5279,15 @@ export default function Home({ profile }: { profile: Profile }) {
         const shouldNotify = shouldNotifyIncomingMessage({
           selfUid: Number(selfUid) || 0,
           senderUid: Number(message.senderUid),
-          chatUid: targetUid,
+          chatUid,
           activeChatUid: activeChatUidRef.current,
-          muted: Boolean(mutedMapRef.current[targetUid]),
+          muted: Boolean(mutedMapRef.current[chatUid]),
           appState: appStateRef.current,
         });
         if (shouldNotify) {
           const notifyContent = buildNotificationContent(message, targetUid);
           notifyIncomingSystemMessage({
-            chatUid: targetUid,
+            chatUid,
             title: notifyContent.title,
             body: notifyContent.body,
             targetType: notifyContent.targetType,
@@ -3704,10 +5295,14 @@ export default function Home({ profile }: { profile: Profile }) {
         }
 
         const isActiveChatOpen =
-          activeChatUidRef.current === targetUid && appStateRef.current === 'active';
+          activeChatUidRef.current === chatUid && appStateRef.current === 'active';
         if (isActiveChatOpen) {
-          markChatRead(targetUid);
-          setTimeout(scrollToBottom, 0);
+          if (Number(message.senderUid) !== Number(selfUid)) {
+            markChatRead(chatUid);
+            scrollToBottom();
+          } else if (!mergedPendingMessage) {
+            scrollToBottom();
+          }
         }
         return;
       }
@@ -3728,7 +5323,7 @@ export default function Home({ profile }: { profile: Profile }) {
         if (
           Number.isInteger(groupId) &&
           groupId > 0 &&
-          activeChatUidRef.current === groupId &&
+          activeChatUidRef.current === encodeChatUid(groupId, 'group') &&
           (eventType === 'group_removed' || (eventType === 'group_member_left' && actorUid === Number(selfUid)))
         ) {
           setActiveChatUid(null);
@@ -3759,6 +5354,7 @@ export default function Home({ profile }: { profile: Profile }) {
       loadPendingRequestCount,
       markChatRead,
       normalizeMessage,
+      resolvePendingMessageByClientMessageId,
       requestFriendsRefresh,
       scrollToBottom,
       selfUid,
@@ -3888,10 +5484,12 @@ export default function Home({ profile }: { profile: Profile }) {
     const privateItems: MessageListItem[] = friends
       .filter((friend) => Number.isInteger(Number(friend?.uid)) && !hiddenMap[Number(friend.uid)])
       .map((friend) => {
-        const uid = Number(friend.uid);
+        const targetUid = Number(friend.uid);
+        const uid = encodeChatUid(targetUid, 'private');
         const latest = latestMap[uid];
         return {
           uid,
+          targetUid,
           targetType: 'private',
           title: friend.nickname || friend.username || '联系人',
           preview: latest?.text || '暂无消息',
@@ -3902,12 +5500,19 @@ export default function Home({ profile }: { profile: Profile }) {
         };
       });
     const groupItems: MessageListItem[] = groups
-      .filter((group) => Number.isInteger(Number(group?.id)) && !hiddenMap[Number(group.id)])
+      .filter((group) => {
+        const targetUid = Number(group?.id);
+        if (!Number.isInteger(targetUid) || targetUid <= 0) return false;
+        const chatUid = encodeChatUid(targetUid, 'group');
+        return Boolean(chatUid) && !hiddenMap[chatUid];
+      })
       .map((group) => {
-        const uid = Number(group.id);
+        const targetUid = Number(group.id);
+        const uid = encodeChatUid(targetUid, 'group');
         const latest = latestMap[uid];
         return {
           uid,
+          targetUid,
           targetType: 'group',
           title: getGroupDisplayName(group),
           preview: latest?.text || '暂无消息',
@@ -3965,14 +5570,15 @@ export default function Home({ profile }: { profile: Profile }) {
     Object.entries(messagesByUid).forEach(([rawUid, list]) => {
       const uid = Number(rawUid);
       if (!Number.isInteger(uid) || uid <= 0 || !Array.isArray(list)) return;
+      const { targetUid, targetType } = decodeChatUid(uid);
+      if (!Number.isInteger(targetUid) || targetUid <= 0) return;
       const deleteCutoff = Number(deleteCutoffMap[uid]) || 0;
-      const maybeGroup = groupMap.get(uid);
-      const maybeFriend = friendMap.get(uid);
-      const targetType: 'private' | 'group' = maybeGroup ? 'group' : 'private';
+      const maybeGroup = targetType === 'group' ? groupMap.get(targetUid) : null;
+      const maybeFriend = targetType === 'private' ? friendMap.get(targetUid) : null;
       const title =
         targetType === 'group'
           ? getGroupDisplayName(maybeGroup)
-          : maybeFriend?.nickname || maybeFriend?.username || `用户${uid}`;
+          : maybeFriend?.nickname || maybeFriend?.username || `用户${targetUid}`;
       list.forEach((message) => {
         const messageIdRaw = message?.id;
         if (!(typeof messageIdRaw === 'number' || typeof messageIdRaw === 'string')) return;
@@ -3988,6 +5594,7 @@ export default function Home({ profile }: { profile: Profile }) {
           key: `${uid}:${messageId}:${safeCreatedAtMs}`,
           messageId,
           uid,
+          targetUid,
           targetType,
           title,
           content,
@@ -4089,18 +5696,18 @@ export default function Home({ profile }: { profile: Profile }) {
         }, 80);
       };
       if (hit.targetType === 'group') {
-        const group = groups.find((item) => item.id === hit.uid);
-        openChatFromPayload(hit.uid, undefined, { targetType: 'group', group });
+        const group = groups.find((item) => item.id === hit.targetUid);
+        openChatFromPayload(hit.targetUid, undefined, { targetType: 'group', group });
         scheduleLocate();
         return;
       }
-      const friend = friends.find((item) => item.uid === hit.uid);
+      const friend = friends.find((item) => item.uid === hit.targetUid);
       if (friend) {
         openChat(friend);
         scheduleLocate();
         return;
       }
-      openChatFromPayload(hit.uid);
+      openChatFromPayload(hit.targetUid);
       scheduleLocate();
     },
     [closeSearchPanel, friends, getDeleteCutoff, groups, locateChatMessage, openChat, openChatFromPayload]
@@ -4142,6 +5749,12 @@ export default function Home({ profile }: { profile: Profile }) {
       setReadAt(uid, deletedAt);
       messageIdSetsRef.current.delete(uid);
       messageOffsetMapRef.current.delete(uid);
+      setChatRenderLimitMap((prev) => {
+        if (!Object.prototype.hasOwnProperty.call(prev, uid)) return prev;
+        const next = { ...prev };
+        delete next[uid];
+        return next;
+      });
       setHiddenMap((prev) => {
         if (!prev[uid]) return prev;
         const next = { ...prev };
@@ -4181,6 +5794,63 @@ export default function Home({ profile }: { profile: Profile }) {
       { cancelable: true }
     );
   }, [applyLocalDeleteChat, chatMenuTargetUid, closeChatMenu]);
+
+  const renderedActiveChatMessages = useMemo(() => {
+    if (!activeChatUid) return [];
+    const keySeen = new Set<string>();
+    return activeChatVisibleMessages.map((item, idx) => {
+      const itemId = String(item.id);
+      const baseRenderKey = getMessageRenderKey(item);
+      let itemRenderKey = baseRenderKey;
+      if (keySeen.has(itemRenderKey)) {
+        itemRenderKey = `${baseRenderKey}:${itemId}:${activeChatVisibleStartIndex + idx}`;
+      }
+      keySeen.add(itemRenderKey);
+      const absoluteIndex = activeChatVisibleStartIndex + idx;
+      const previousMessage = absoluteIndex > 0 ? activeChatMessages[absoluteIndex - 1] : null;
+      return (
+        <ChatMessageRow
+          key={itemRenderKey}
+          uid={activeChatUid}
+          message={item}
+          previousMessage={previousMessage}
+          selfUid={Number(selfUid) || 0}
+          isFocused={focusedMessageId === itemId}
+          isPlayingVoice={playingVoiceMessageId === itemId}
+          isGroupChat={Boolean(activeChatGroup)}
+          selfChatAvatar={selfChatAvatar}
+          activeChatFriendAvatar={activeChatFriendAvatar}
+          profileDisplayName={profileDisplayName}
+          getAvatarText={getAvatarText}
+          formatTime={formatTime}
+          findUserByUid={findUserByUid}
+          recordMessageOffset={recordMessageOffset}
+          openImagePreview={openImagePreview}
+          onPressVoiceMessage={onPressVoiceMessage}
+          onPressFailedMessage={onPressFailedMessage}
+        />
+      );
+    });
+  }, [
+    activeChatMessages,
+    activeChatFriendAvatar,
+    activeChatGroup,
+    activeChatUid,
+    activeChatVisibleMessages,
+    activeChatVisibleStartIndex,
+    findUserByUid,
+    focusedMessageId,
+    formatTime,
+    getAvatarText,
+    onPressVoiceMessage,
+    onPressFailedMessage,
+    openImagePreview,
+    playingVoiceMessageId,
+    profileDisplayName,
+    recordMessageOffset,
+    selfChatAvatar,
+    selfUid,
+  ]);
 
   return (
     <View style={[styles.page, { paddingTop: insets.top }]}>
@@ -4234,7 +5904,7 @@ export default function Home({ profile }: { profile: Profile }) {
                 if (!activeChatUid) return;
                 if (activeChatGroup) {
                   navigation.navigate('GroupChatSettings', {
-                    uid: activeChatUid,
+                    uid: activeChatTarget.targetUid,
                     group: {
                       id: activeChatGroup.id,
                       ownerUid: activeChatGroup.ownerUid,
@@ -4249,7 +5919,7 @@ export default function Home({ profile }: { profile: Profile }) {
                   return;
                 }
                 navigation.navigate('ChatSettings', {
-                  uid: activeChatUid,
+                  uid: activeChatTarget.targetUid,
                   friend: activeChatFriend
                     ? {
                         uid: activeChatFriend.uid,
@@ -4270,10 +5940,28 @@ export default function Home({ profile }: { profile: Profile }) {
           <ScrollView
             ref={messageListRef}
             style={[styles.chatBody, { backgroundColor: activeChatBackgroundColor }]}
+            keyboardShouldPersistTaps="handled"
             onScroll={onChatScroll}
             scrollEventThrottle={16}
             onContentSizeChange={(_, height) => {
-              contentHeightRef.current = height;
+              const nextHeight = Number(height) || 0;
+              contentHeightRef.current = nextHeight;
+              const pendingRestore = pendingTopRestoreRef.current;
+              if (!pendingRestore) return;
+              if (Date.now() > pendingRestore.expiresAt) {
+                pendingTopRestoreRef.current = null;
+                return;
+              }
+              if (activeChatUidRef.current !== pendingRestore.uid) {
+                pendingTopRestoreRef.current = null;
+                return;
+              }
+              if (nextHeight <= pendingRestore.prevHeight) return;
+              pendingTopRestoreRef.current = null;
+              messageListRef.current?.scrollTo({
+                y: Math.max(0, pendingRestore.prevOffsetY + (nextHeight - pendingRestore.prevHeight)),
+                animated: false,
+              });
             }}
           >
             {historyLoading[activeChatUid] && activeChatMessages.length === 0 ? (
@@ -4282,97 +5970,7 @@ export default function Home({ profile }: { profile: Profile }) {
             {!historyLoading[activeChatUid] && activeChatMessages.length === 0 ? (
               <Text style={styles.empty}>还没有消息，先聊几句吧。</Text>
             ) : null}
-            {activeChatMessages.map((item, idx) => {
-              const isSelf = item.senderUid === selfUid;
-              const itemId = String(item.id);
-              const isFocused = focusedMessageId === itemId;
-              const prev = idx > 0 ? activeChatMessages[idx - 1] : null;
-              const prevMs = Number(prev?.createdAtMs);
-              const currentMs = Number(item.createdAtMs);
-              const showTime =
-                idx === 0 ||
-                !Number.isFinite(prevMs) ||
-                !Number.isFinite(currentMs) ||
-                currentMs - prevMs > CHAT_TIME_GAP_MS;
-              const senderProfile = !isSelf ? findUserByUid(item.senderUid) : null;
-              const senderName = senderProfile?.nickname || senderProfile?.username || `用户${item.senderUid}`;
-              const senderAvatarUrl = isSelf
-                ? selfChatAvatar
-                : normalizeImageUrl(senderProfile?.avatar || activeChatFriendAvatar);
-              const avatarLabel = isSelf
-                ? getAvatarText(profileData.nickname || profileData.username || '我')
-                : getAvatarText(senderName || '群友');
-              const showSender = Boolean(activeChatGroup && !isSelf);
-              return (
-                <React.Fragment key={itemId}>
-                  {showTime ? (
-                    <Text style={styles.chatTimeDivider}>
-                      {formatTime(item.createdAt, item.createdAtMs)}
-                    </Text>
-                  ) : null}
-                  <View
-                    style={[styles.messageRow, isSelf && styles.selfRow]}
-                    onLayout={(event) =>
-                      recordMessageOffset(
-                        activeChatUid,
-                        itemId,
-                        Number(event?.nativeEvent?.layout?.y) || 0
-                      )
-                    }
-                  >
-                    <View style={[styles.msgAvatarWrap, isSelf && styles.selfMsgAvatarWrap]}>
-                      {senderAvatarUrl ? (
-                        <Image source={{ uri: senderAvatarUrl }} style={styles.msgAvatarImage} />
-                      ) : (
-                        <View style={styles.msgAvatarFallbackCircle}>
-                          <Text style={styles.msgAvatarFallbackText}>{avatarLabel}</Text>
-                        </View>
-                      )}
-                    </View>
-                    <View style={[styles.bubbleWrap, isSelf && styles.selfBubbleWrap]}>
-                      {showSender ? <Text style={styles.groupSenderName}>{senderName}</Text> : null}
-                      <View
-                        style={[
-                          styles.bubble,
-                          isSelf && styles.selfBubble,
-                          isFocused && !isSelf && styles.bubbleFocused,
-                          isFocused && isSelf && styles.selfBubbleFocused,
-                          item.type === 'image' && styles.imageBubble,
-                        ]}
-                      >
-                        {item.type === 'image' && item.imageUrl ? (
-                          <Pressable
-                            style={styles.chatImagePressable}
-                            onPress={() => openImagePreview(item.imageUrl)}
-                          >
-                            <Image source={{ uri: item.imageUrl }} style={styles.chatImageMessage} />
-                          </Pressable>
-                        ) : item.type === 'voice' ? (
-                          <Pressable
-                            style={[
-                              styles.voiceMessageBubble,
-                              playingVoiceMessageId === itemId && styles.voiceMessageBubblePlaying,
-                            ]}
-                            onPress={() => onPressVoiceMessage(item)}
-                          >
-                            <View style={styles.voiceWaveTrack}>
-                              <VoiceWaveIcon active={playingVoiceMessageId === itemId} isSelf={isSelf} />
-                            </View>
-                            <Text style={[styles.voiceMessageDuration, isSelf && styles.selfText]}>
-                              {item.voiceDurationSec ? `${Math.max(1, Math.round(item.voiceDurationSec))}"` : '[语音]'}
-                            </Text>
-                          </Pressable>
-                        ) : (
-                          <Text style={[styles.messageText, isSelf && styles.selfText]}>
-                            {item.content}
-                          </Text>
-                        )}
-                      </View>
-                    </View>
-                  </View>
-                </React.Fragment>
-              );
-            })}
+            {renderedActiveChatMessages}
           </ScrollView>
 
           <View
@@ -4616,11 +6214,7 @@ export default function Home({ profile }: { profile: Profile }) {
                         : '长按中间麦克风开始录音'}
                   </Text>
 
-                  {!voiceRecording ? (
-                    <View style={styles.voiceModeRow}>
-                     
-                    </View>
-                  ) : null}
+                  {!voiceRecording ? <View style={styles.voiceModeRow} /> : null}
                 </View>
               </View>
             ) : null}
@@ -4683,7 +6277,7 @@ export default function Home({ profile }: { profile: Profile }) {
                       style={[styles.msgItem, item.pinned && styles.msgItemPinned]}
                       onPress={() => {
                         if (item.targetType === 'group') {
-                          openChatFromPayload(item.uid, undefined, {
+                          openChatFromPayload(item.targetUid, undefined, {
                             targetType: 'group',
                             group: item.group,
                           });
@@ -5054,6 +6648,34 @@ export default function Home({ profile }: { profile: Profile }) {
           </View>
         </View>
       ) : null}
+
+      <Modal
+        transparent
+        visible={Boolean(retryPromptMessage)}
+        animationType="fade"
+        onRequestClose={closeRetryPrompt}
+      >
+        <View style={styles.retryPromptOverlay}>
+          <Pressable style={styles.retryPromptBackdrop} onPress={closeRetryPrompt} />
+          <View style={styles.retryPromptCard}>
+            <Text style={styles.retryPromptTitle}>是否重发</Text>
+            <View style={styles.retryPromptActions}>
+              <Pressable
+                style={[styles.retryPromptBtn, styles.retryPromptBtnCancel]}
+                onPress={closeRetryPrompt}
+              >
+                <Text style={styles.retryPromptBtnCancelText}>取消</Text>
+              </Pressable>
+              <Pressable
+                style={[styles.retryPromptBtn, styles.retryPromptBtnConfirm]}
+                onPress={confirmRetryPrompt}
+              >
+                <Text style={styles.retryPromptBtnConfirmText}>确认</Text>
+              </Pressable>
+            </View>
+          </View>
+        </View>
+      </Modal>
 
       <Modal
         transparent
@@ -5967,6 +7589,92 @@ const styles = StyleSheet.create({
     textAlign: 'left',
     includeFontPadding: false,
   },
+  failedRetryBadge: {
+    width: 20,
+    height: 20,
+    borderRadius: 10,
+    backgroundColor: '#ff4d4f',
+    alignItems: 'center',
+    justifyContent: 'center',
+    alignSelf: 'center',
+    marginHorizontal: 6,
+  },
+  failedRetryBadgeText: {
+    color: '#fff',
+    fontSize: 13,
+    fontWeight: '700',
+    lineHeight: 14,
+    includeFontPadding: false,
+  },
+  retryPromptOverlay: {
+    flex: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+    paddingHorizontal: 24,
+    position: 'relative',
+  },
+  retryPromptBackdrop: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: 'rgba(0,0,0,0.28)',
+  },
+  retryPromptCard: {
+    width: '100%',
+    maxWidth: 320,
+    borderRadius: 14,
+    backgroundColor: '#fff',
+    paddingHorizontal: 18,
+    paddingTop: 18,
+    paddingBottom: 14,
+    borderWidth: 1,
+    borderColor: '#e8edf7',
+    ...(Platform.OS === 'web'
+      ? { boxShadow: '0px 14px 30px rgba(20, 36, 64, 0.18)' }
+      : {
+          shadowColor: '#000',
+          shadowOpacity: 0.14,
+          shadowOffset: { width: 0, height: 8 },
+          shadowRadius: 20,
+          elevation: 8,
+        }),
+  },
+  retryPromptTitle: {
+    fontSize: 16,
+    fontWeight: '700',
+    color: '#1f2c3c',
+    textAlign: 'center',
+  },
+  retryPromptActions: {
+    flexDirection: 'row',
+    justifyContent: 'center',
+    gap: 10,
+    marginTop: 16,
+  },
+  retryPromptBtn: {
+    minWidth: 96,
+    height: 36,
+    borderRadius: 10,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 16,
+  },
+  retryPromptBtnCancel: {
+    backgroundColor: '#f3f5f9',
+    borderWidth: 1,
+    borderColor: '#d9dfe9',
+  },
+  retryPromptBtnConfirm: {
+    backgroundColor: '#2f8bff',
+  },
+  retryPromptBtnCancelText: {
+    color: '#4d5a6b',
+    fontSize: 14,
+    fontWeight: '600',
+  },
+  retryPromptBtnConfirmText: {
+    color: '#fff',
+    fontSize: 14,
+    fontWeight: '700',
+  },
   selfText: {
     color: '#fff',
   },
@@ -6539,6 +8247,8 @@ function QuickScanIcon() {
     </Svg>
   );
 }
+
+
 
 
 

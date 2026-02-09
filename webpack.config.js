@@ -5,6 +5,8 @@ const webpack = require('webpack');
 const appDirectory = __dirname;
 const parsedWebPort = Number(process.env.WEB_PORT);
 const webPort = Number.isInteger(parsedWebPort) && parsedWebPort > 0 ? parsedWebPort : 'auto';
+const webApiProxyTarget = process.env.WEB_API_PROXY_TARGET || 'http://127.0.0.1:3001';
+const isWebpackServe = process.env.WEBPACK_SERVE === 'true';
 
 const babelLoader = {
   test: /\.[jt]sx?$/,
@@ -77,6 +79,7 @@ module.exports = {
       'globalThis.__XINCHAT_API_BASE__': JSON.stringify(
         process.env.XINCHAT_API_BASE || process.env.REACT_APP_API_BASE || process.env.VITE_API_BASE || ''
       ),
+      'globalThis.__XINCHAT_WS_PROXY_PATH__': JSON.stringify(isWebpackServe ? '/chat-ws' : ''),
     }),
   ],
   performance: {
@@ -89,5 +92,19 @@ module.exports = {
     historyApiFallback: true,
     port: webPort,
     hot: true,
+    proxy: [
+      {
+        context: ['/api', '/uploads', '/resource', '/admin'],
+        target: webApiProxyTarget,
+        changeOrigin: true,
+      },
+      {
+        context: ['/chat-ws'],
+        target: webApiProxyTarget,
+        ws: true,
+        changeOrigin: true,
+        pathRewrite: { '^/chat-ws': '/ws' },
+      },
+    ],
   },
 };
