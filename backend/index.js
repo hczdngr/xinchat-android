@@ -23,7 +23,6 @@ import voiceRouter from './routes/voice.js';
 import voiceTranscribeRouter from './routes/voiceTranscribe.js';
 import insightApiRouter, { prewarmWarmTipCache } from './routes/insightApi.js';
 import adminRouter from './routes/admin.js';
-import translateRouter from './routes/translate.js';
 import { startInsightWorker } from './routes/insight.js';
 import { getTokenId, onTokenRevoked } from './tokenRevocation.js';
 import {
@@ -985,7 +984,6 @@ app.use('/api/voice', voiceRouter);
 app.use('/api/chat/voice', voiceTranscribeRouter);
 app.use('/api/insight', insightApiRouter);
 app.use('/api/admin', adminRouter);
-app.use('/api/translate', translateRouter);
 
 app.use((err, req, res, next) => {
   if (!err) {
