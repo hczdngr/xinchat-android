@@ -7250,9 +7250,15 @@ export default function Home({
         return;
       }
 
+      if (action === 'remind') {
+        closeMessageMenu();
+        openReminderPicker(target.chatUid, target.message);
+        return;
+      }
+
       if (action === 'translate') {
         closeMessageMenu();
-        navigation.navigate('Translation', { textToTranslate: target.message.content });
+        openMessageTranslate(target.message);
         return;
       }
 
@@ -7267,13 +7273,13 @@ export default function Home({
     },
     [
       closeMessageMenu,
-      deleteMessageLocally,
       focusChatInput,
       messageMenuSourceText,
       messageMenuTarget,
-      navigation,
       openForwardPicker,
+      openMessageTranslate,
       openMultiSelectMode,
+      openReminderPicker,
       toggleFavoriteMessage,
     ]
   );
@@ -7400,7 +7406,7 @@ export default function Home({
     const { chatUid, messageId } = pendingSingleDelete;
     deleteMessageLocally(chatUid, messageId);
     setPendingSingleDelete(null);
-  }, [pendingSingleDelete]);
+  }, [deleteMessageLocally, pendingSingleDelete]);
 
   const confirmMultiDelete = useCallback(() => {
     if (!pendingMultiDelete) return;
@@ -7411,7 +7417,7 @@ export default function Home({
     setMultiSelectMode(false);
     setMultiSelectedMessageIds([]);
     setPendingMultiDelete(null);
-  }, [pendingMultiDelete]);
+  }, [deleteMessagesLocally, pendingMultiDelete]);
 
   const deleteChat = useCallback(() => {
     if (!chatMenuTargetUid) return;
