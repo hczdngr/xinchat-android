@@ -1,3 +1,8 @@
+/**
+ * 模块说明：好友路由模块：处理好友关系与好友请求流程。
+ */
+
+
 import express from 'express';
 import { hasValidToken, mutateUsers } from './auth.js';
 import { isUserOnline as isOnline } from '../online.js';
@@ -5,17 +10,29 @@ import { createAuthenticateMiddleware } from './session.js';
 
 const router = express.Router();
 
+// normalizeUsername：归一化外部输入。
 const normalizeUsername = (value) => value.trim().toLowerCase();
 const REQUEST_STATUS_PENDING = 'pending';
 const REQUEST_STATUS_REJECTED = 'rejected';
 const MAX_UID = Number.parseInt(String(process.env.MAX_UID || '2147483647'), 10);
 const SAFE_MAX_UID = Number.isInteger(MAX_UID) && MAX_UID > 0 ? MAX_UID : 2147483647;
+// isValidUid：判断条件是否成立。
 const isValidUid = (value) => Number.isInteger(value) && value > 0 && value <= SAFE_MAX_UID;
+// isPlainObject：判断条件是否成立。
+const isPlainObject = (value) =>
+  Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+// toPlainObject?处理 toPlainObject 相关逻辑。
+const toPlainObject = (value) => (isPlainObject(value) ? value : {});
 
 let friendsNotifier = null;
 
 const authenticate = createAuthenticateMiddleware({ scope: 'Friends' });
+// asyncRoute?处理 asyncRoute 相关逻辑。
+const asyncRoute = (handler) => (req, res, next) => {
+  Promise.resolve(handler(req, res, next)).catch(next);
+};
 
+// resolveFriendIndex：解析并确定最终值。
 const resolveFriendIndex = (users, payload = {}) => {
   const uidValue = Number(payload.friendUid);
   if (isValidUid(uidValue)) {
@@ -28,11 +45,13 @@ const resolveFriendIndex = (users, payload = {}) => {
   return -1;
 };
 
+// isUserOnline：判断条件是否成立。
 const isUserOnline = (user) => {
   if (!isOnline(user)) return false;
   return hasValidToken(user);
 };
 
+// ensureFriendRequests：确保前置条件与资源可用。
 const ensureFriendRequests = (user) => {
   if (!user.friendRequests || typeof user.friendRequests !== 'object') {
     user.friendRequests = { incoming: [], outgoing: [] };
@@ -45,14 +64,18 @@ const ensureFriendRequests = (user) => {
   }
 };
 
+// nowIso?处理 nowIso 相关逻辑。
 const nowIso = () => new Date().toISOString();
 
+// findRequest：查找目标记录。
 const findRequest = (list, uid) =>
   list.find((item) => item && Number.isInteger(item.uid) && item.uid === uid);
 
+// removeRequest：清理无效或过期数据。
 const removeRequest = (list, uid) =>
   list.filter((item) => !(item && Number.isInteger(item.uid) && item.uid === uid));
 
+// normalizeOutgoingEntry：归一化外部输入。
 const normalizeOutgoingEntry = (entry) => ({
   uid: entry.uid,
   status: entry.status || REQUEST_STATUS_PENDING,
@@ -60,10 +83,12 @@ const normalizeOutgoingEntry = (entry) => ({
   resolvedAt: entry.resolvedAt || null,
 });
 
+// setFriendsNotifier：设置运行时状态。
 const setFriendsNotifier = (notifier) => {
   friendsNotifier = typeof notifier === 'function' ? notifier : null;
 };
 
+// notifyUsers?处理 notifyUsers 相关逻辑。
 const notifyUsers = (uids, payload) => {
   if (!friendsNotifier) return;
   const list = Array.from(new Set(uids.filter(isValidUid)));
@@ -71,9 +96,10 @@ const notifyUsers = (uids, payload) => {
   friendsNotifier(list, payload);
 };
 
-router.post('/add', authenticate, async (req, res) => {
+// 路由：POST /add。
+router.post('/add', authenticate, asyncRoute(async (req, res) => {
   const actorUid = Number(req.auth?.user?.uid);
-  const payload = req.body || {};
+  const payload = toPlainObject(req.body);
 
   const mutation = await mutateUsers(
     (users) => {
@@ -221,11 +247,12 @@ router.post('/add', authenticate, async (req, res) => {
     notifyUsers(item.uids || [], item.payload || {});
   });
   res.status(result.httpStatus || 200).json(result.body || { success: false });
-});
+}));
 
-router.delete('/remove', authenticate, async (req, res) => {
+// 路由：DELETE /remove。
+router.delete('/remove', authenticate, asyncRoute(async (req, res) => {
   const actorUid = Number(req.auth?.user?.uid);
-  const payload = req.body || {};
+  const payload = toPlainObject(req.body);
 
   const mutation = await mutateUsers(
     (users) => {
@@ -298,9 +325,10 @@ router.delete('/remove', authenticate, async (req, res) => {
     notifyUsers(item.uids || [], item.payload || {});
   });
   res.status(result.httpStatus || 200).json(result.body || { success: false });
-});
+}));
 
-router.get('/list', authenticate, async (req, res) => {
+// 路由：GET /list。
+router.get('/list', authenticate, asyncRoute(async (req, res) => {
   const { users, user } = req.auth;
   const friendSet = new Set(user.friends || []);
   const friends = users
@@ -314,9 +342,10 @@ router.get('/list', authenticate, async (req, res) => {
       online: isUserOnline(item),
     }));
   res.json({ success: true, friends });
-});
+}));
 
-router.get('/requests', authenticate, async (req, res) => {
+// 路由：GET /requests。
+router.get('/requests', authenticate, asyncRoute(async (req, res) => {
   const actorUid = Number(req.auth?.user?.uid);
   const mutation = await mutateUsers(
     (users) => {
@@ -391,11 +420,12 @@ router.get('/requests', authenticate, async (req, res) => {
     return;
   }
   res.status(result.httpStatus || 200).json(result.body || { success: false });
-});
+}));
 
-router.post('/respond', authenticate, async (req, res) => {
+// 路由：POST /respond。
+router.post('/respond', authenticate, asyncRoute(async (req, res) => {
   const actorUid = Number(req.auth?.user?.uid);
-  const { requesterUid, action } = req.body || {};
+  const { requesterUid, action } = toPlainObject(req.body);
   const requesterId = Number(requesterUid);
   if (!isValidUid(requesterId)) {
     res.status(400).json({ success: false, message: '请求用户编号无效。' });
@@ -507,11 +537,12 @@ router.post('/respond', authenticate, async (req, res) => {
     notifyUsers(item.uids || [], item.payload || {});
   });
   res.status(result.httpStatus || 200).json(result.body || { success: false });
-});
+}));
 
-router.get('/search', authenticate, async (req, res) => {
+// 路由：GET /search。
+router.get('/search', authenticate, asyncRoute(async (req, res) => {
   const { users } = req.auth;
-  const payload = { ...(req.query || {}), ...(req.body || {}) };
+  const payload = { ...toPlainObject(req.query), ...toPlainObject(req.body) };
   const uid = Number(payload.uid);
   if (!isValidUid(uid)) {
     res.status(400).json({ success: false, message: '用户编号无效。' });
@@ -533,9 +564,10 @@ router.get('/search', authenticate, async (req, res) => {
       online: isUserOnline(target),
     },
   });
-});
+}));
 
-router.get('/profile', authenticate, async (req, res) => {
+// 路由：GET /profile。
+router.get('/profile', authenticate, asyncRoute(async (req, res) => {
   const { users, user } = req.auth;
   const uid = Number(req.query?.uid);
   if (!isValidUid(uid)) {
@@ -575,7 +607,7 @@ router.get('/profile', authenticate, async (req, res) => {
       online: isUserOnline(target),
     },
   });
-});
+}));
 
 export { setFriendsNotifier };
 export default router;

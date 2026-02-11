@@ -1,3 +1,8 @@
+/**
+ * 模块说明：令牌吊销模块：管理令牌吊销记录、索引与过期清理。
+ */
+
+
 import crypto from 'crypto';
 
 const TOKEN_TTL_DAYS = 181;
@@ -16,6 +21,7 @@ let redisConnectInFlight = null;
 let redisUnavailableLogged = false;
 let redisRuntimeErrorLogged = false;
 
+// parsePositiveInt：解析并校验输入值。
 const parsePositiveInt = (value, fallback, min = 1) => {
   const parsed = Number.parseInt(String(value || ''), 10);
   if (!Number.isFinite(parsed) || parsed < min) return fallback;
@@ -28,12 +34,14 @@ const REVOKED_MEMORY_SWEEP_INTERVAL_MS = parsePositiveInt(
   1_000
 );
 
+// getTokenId：获取并返回目标数据。
 const getTokenId = (token) => {
   const safeToken = String(token || '').trim();
   if (!safeToken) return '';
   return crypto.createHash('sha256').update(safeToken).digest('hex');
 };
 
+// parseExpiresAtMs：解析并校验输入值。
 const parseExpiresAtMs = (expiresAt) => {
   const parsed = expiresAt ? Date.parse(String(expiresAt)) : NaN;
   if (Number.isFinite(parsed) && parsed > Date.now()) {
@@ -42,11 +50,13 @@ const parseExpiresAtMs = (expiresAt) => {
   return Date.now() + DEFAULT_REVOCATION_TTL_MS;
 };
 
+// getTtlSeconds：获取并返回目标数据。
 const getTtlSeconds = (expiresAtMs) => {
   const raw = Math.ceil((expiresAtMs - Date.now()) / 1000);
   return Math.max(1, raw);
 };
 
+// sweepExpiredMemoryRevocations?处理 sweepExpiredMemoryRevocations 相关逻辑。
 const sweepExpiredMemoryRevocations = (force = false) => {
   const now = Date.now();
   if (!force && now - lastMemorySweepAt < REVOKED_MEMORY_SWEEP_INTERVAL_MS) {
@@ -60,12 +70,14 @@ const sweepExpiredMemoryRevocations = (force = false) => {
   });
 };
 
+// rememberRevokedToken?处理 rememberRevokedToken 相关逻辑。
 const rememberRevokedToken = (tokenId, expiresAtMs) => {
   if (!tokenId || !Number.isFinite(expiresAtMs)) return;
   const prev = revokedTokens.get(tokenId) || 0;
   revokedTokens.set(tokenId, Math.max(prev, expiresAtMs));
 };
 
+// markRedisUnavailable?处理 markRedisUnavailable 相关逻辑。
 const markRedisUnavailable = (error) => {
   if (redisUnavailableLogged) return;
   redisUnavailableLogged = true;
@@ -76,6 +88,7 @@ const markRedisUnavailable = (error) => {
   );
 };
 
+// markRedisRuntimeError?处理 markRedisRuntimeError 相关逻辑。
 const markRedisRuntimeError = (error) => {
   if (redisRuntimeErrorLogged) return;
   redisRuntimeErrorLogged = true;
@@ -86,6 +99,7 @@ const markRedisRuntimeError = (error) => {
   );
 };
 
+// getRedisClient：获取并返回目标数据。
 const getRedisClient = async () => {
   if (!REDIS_URL) return null;
   if (redisClient?.isOpen) return redisClient;
@@ -113,8 +127,10 @@ const getRedisClient = async () => {
   return redisConnectInFlight;
 };
 
+// redisRevokedKey?处理 redisRevokedKey 相关逻辑。
 const redisRevokedKey = (tokenId) => `${REDIS_PREFIX}${tokenId}`;
 
+// notifyRevoked?处理 notifyRevoked 相关逻辑。
 const notifyRevoked = (payload) => {
   revokedListeners.forEach((listener) => {
     try {

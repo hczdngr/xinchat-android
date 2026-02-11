@@ -1,3 +1,8 @@
+/**
+ * 模块说明：可观测性模块：提供日志、指标、请求上下文与错误序列化能力。
+ */
+
+
 import crypto from 'crypto';
 import util from 'util';
 
@@ -8,6 +13,7 @@ const LOG_LEVELS = Object.freeze({
   error: 40,
 });
 
+// normalizeLevel：归一化外部输入。
 const normalizeLevel = (value, fallback = 'info') => {
   const level = String(value || '').trim().toLowerCase();
   if (Object.prototype.hasOwnProperty.call(LOG_LEVELS, level)) {
@@ -24,11 +30,13 @@ const LOG_PASSTHROUGH_CONSOLE =
   String(process.env.LOG_PASSTHROUGH_CONSOLE || '').trim().toLowerCase() === 'true';
 const REQUEST_ID_HEADER = 'x-request-id';
 
+// toSafeNumber?处理 toSafeNumber 相关逻辑。
 const toSafeNumber = (value, fallback = 0) => {
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : fallback;
 };
 
+// serializeError?处理 serializeError 相关逻辑。
 const serializeError = (error) => {
   if (!(error instanceof Error)) {
     return { message: String(error || '') };
@@ -42,6 +50,7 @@ const serializeError = (error) => {
   return payload;
 };
 
+// sanitizeValue：清洗不可信输入。
 const sanitizeValue = (value, depth = 0) => {
   if (depth > 4) return '[depth_limit]';
   if (value == null) return value;
@@ -65,6 +74,7 @@ const sanitizeValue = (value, depth = 0) => {
   return String(value);
 };
 
+// toMetaObject?处理 toMetaObject 相关逻辑。
 const toMetaObject = (meta) => {
   const safe = sanitizeValue(meta);
   if (!safe || typeof safe !== 'object' || Array.isArray(safe)) {
@@ -73,8 +83,10 @@ const toMetaObject = (meta) => {
   return safe;
 };
 
+// shouldLog?处理 shouldLog 相关逻辑。
 const shouldLog = (level) => LOG_LEVELS[level] >= LOG_LEVELS[ACTIVE_LOG_LEVEL];
 
+// emitLog?处理 emitLog 相关逻辑。
 const emitLog = (level, message, meta = {}) => {
   if (!shouldLog(level)) return;
   const record = {
@@ -89,6 +101,7 @@ const emitLog = (level, message, meta = {}) => {
   stream.write(`${line}\n`);
 };
 
+// toMessageMeta?处理 toMessageMeta 相关逻辑。
 const toMessageMeta = (args) => {
   if (!Array.isArray(args) || args.length === 0) {
     return { message: '', meta: {} };
@@ -131,6 +144,7 @@ const logger = {
 
 let consoleBridgeInstalled = false;
 
+// installConsoleBridge?处理 installConsoleBridge 相关逻辑。
 const installConsoleBridge = () => {
   if (consoleBridgeInstalled) return;
   consoleBridgeInstalled = true;
@@ -160,6 +174,7 @@ const metricState = {
   histograms: new Map(),
 };
 
+// normalizeLabels：归一化外部输入。
 const normalizeLabels = (labels) => {
   if (!labels || typeof labels !== 'object') return {};
   const entries = Object.entries(labels)
@@ -169,8 +184,10 @@ const normalizeLabels = (labels) => {
   return Object.fromEntries(entries);
 };
 
+// makeMetricKey?处理 makeMetricKey 相关逻辑。
 const makeMetricKey = (name, labels) => `${name}|${JSON.stringify(labels)}`;
 
+// getOrCreateMetricEntry：获取并返回目标数据。
 const getOrCreateMetricEntry = (store, name, labels, initFactory) => {
   const safeName = String(name || '').trim();
   if (!safeName) {
@@ -241,6 +258,7 @@ const metrics = {
   },
 };
 
+// createRequestContextMiddleware：创建对象或中间件。
 const createRequestContextMiddleware = () => (req, res, next) => {
   const incoming = String(req.headers[REQUEST_ID_HEADER] || '').trim();
   const requestId = incoming || crypto.randomUUID();
@@ -249,6 +267,7 @@ const createRequestContextMiddleware = () => (req, res, next) => {
   next();
 };
 
+// normalizeMetricPath：归一化外部输入。
 const normalizeMetricPath = (value) => {
   const source = String(value || '').split('?')[0].trim();
   if (!source) return '/';
@@ -264,6 +283,7 @@ const normalizeMetricPath = (value) => {
   return `/${parts.join('/')}`;
 };
 
+// createHttpMetricsMiddleware：创建对象或中间件。
 const createHttpMetricsMiddleware = ({ skipPaths = [] } = {}) => {
   const skipSet = new Set(skipPaths.map((item) => normalizeMetricPath(item)));
   return (req, res, next) => {

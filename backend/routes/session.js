@@ -1,7 +1,20 @@
+/**
+ * 模块说明：会话中间件模块：统一提取 token 并校验登录态。
+ */
+
+
 import { findUserByToken, mutateUsers, readUsers } from './auth.js';
 
 const AUTH_COOKIE_NAME = String(process.env.AUTH_COOKIE_NAME || 'xinchat_token').trim() || 'xinchat_token';
+// isPlainObject：判断条件是否成立。
+const isPlainObject = (value) =>
+  Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+// toPlainObject?处理 toPlainObject 相关逻辑。
+const toPlainObject = (value) => (isPlainObject(value) ? value : {});
+// toTokenString?处理 toTokenString 相关逻辑。
+const toTokenString = (value) => (typeof value === 'string' ? value.trim() : '');
 
+// parseCookieHeader：解析并校验输入值。
 const parseCookieHeader = (raw) => {
   const result = {};
   const source = String(raw || '').trim();
@@ -23,19 +36,22 @@ const parseCookieHeader = (raw) => {
   return result;
 };
 
+// extractTokenFromCookie：提取请求中的关键信息。
 const extractTokenFromCookie = (req) => {
   const cookies = parseCookieHeader(req?.headers?.cookie || '');
   return String(cookies[AUTH_COOKIE_NAME] || '').trim();
 };
 
 export const extractToken = (req) => {
-  const header = req.headers.authorization || '';
+  const header = String(req?.headers?.authorization || '').trim();
   if (header.toLowerCase().startsWith('bearer ')) {
     return header.slice(7).trim();
   }
   const cookieToken = extractTokenFromCookie(req);
   if (cookieToken) return cookieToken;
-  return req.body?.token || req.query?.token || '';
+  const bodyToken = toTokenString(toPlainObject(req?.body).token);
+  if (bodyToken) return bodyToken;
+  return toTokenString(toPlainObject(req?.query).token);
 };
 
 export const createAuthenticateMiddleware = ({ scope = 'Auth' } = {}) =>

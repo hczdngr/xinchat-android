@@ -1,3 +1,8 @@
+/**
+ * 模块说明：应用入口模块：组装 HTTP/WS 服务、中间件、路由与运行时守护逻辑。
+ */
+
+
 import express from 'express';
 import http from 'http';
 import path from 'path';
@@ -52,6 +57,7 @@ const ROUTE_INSPECTOR_ENABLED =
   NODE_ENV !== 'production' || process.env.ENABLE_ROUTE_INSPECTOR === 'true';
 const AUTH_COOKIE_NAME =
   String(process.env.AUTH_COOKIE_NAME || 'xinchat_token').trim() || 'xinchat_token';
+// parsePositiveInt：解析并校验输入值。
 const parsePositiveInt = (value, fallback, min = 1) => {
   const parsed = Number.parseInt(String(value || ''), 10);
   if (!Number.isFinite(parsed) || parsed < min) {
@@ -59,6 +65,7 @@ const parsePositiveInt = (value, fallback, min = 1) => {
   }
   return parsed;
 };
+// parseCookieHeader：解析并校验输入值。
 const parseCookieHeader = (raw) => {
   const result = {};
   const source = String(raw || '').trim();
@@ -79,6 +86,7 @@ const parseCookieHeader = (raw) => {
   });
   return result;
 };
+// extractTokenFromCookieHeader：提取请求中的关键信息。
 const extractTokenFromCookieHeader = (cookieHeader) => {
   const cookies = parseCookieHeader(cookieHeader || '');
   return String(cookies[AUTH_COOKIE_NAME] || '').trim();
@@ -146,7 +154,12 @@ const CORS_ALLOWED_ORIGINS = String(process.env.CORS_ORIGINS || '')
   .map((item) => item.trim())
   .filter(Boolean);
 const CORS_ALLOW_ALL = NODE_ENV !== 'production' && CORS_ALLOWED_ORIGINS.length === 0;
+// isValidUid：判断条件是否成立。
 const isValidUid = (value) => Number.isInteger(value) && value > 0 && value <= MAX_UID;
+// isPlainObject：判断条件是否成立。
+const isPlainObject = (value) =>
+  Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+// estimatePayloadBytes?处理 estimatePayloadBytes 相关逻辑。
 const estimatePayloadBytes = (value) => {
   try {
     return Buffer.byteLength(JSON.stringify(value ?? null), 'utf8');
@@ -173,6 +186,20 @@ app.use(
 
 app.use(express.json({ limit: REQUEST_BODY_LIMIT }));
 app.use(express.urlencoded({ extended: true, limit: REQUEST_BODY_LIMIT }));
+app.use('/api', (req, res, next) => {
+  const method = String(req.method || '').toUpperCase();
+  const shouldValidateBody =
+    method === 'POST' || method === 'PUT' || method === 'PATCH' || method === 'DELETE';
+  if (!shouldValidateBody) {
+    next();
+    return;
+  }
+  if (req.is('application/json') && !isPlainObject(req.body)) {
+    res.status(400).json({ success: false, message: 'Invalid JSON body.' });
+    return;
+  }
+  next();
+});
 app.use((req, res, next) => {
   const origin = typeof req.headers.origin === 'string' ? req.headers.origin : '';
   const originAllowed =
@@ -767,6 +794,7 @@ const routeMeta = [
   },
 ];
 
+// normalizePath：归一化外部输入。
 const normalizePath = (value) => {
   if (!value) return '';
   let result = value.replace(/\\/g, '/').replace(/\/+/g, '/');
@@ -776,6 +804,7 @@ const normalizePath = (value) => {
   return result;
 };
 
+// joinPath?处理 joinPath 相关逻辑。
 const joinPath = (base, next) => {
   const left = normalizePath(base);
   const right = normalizePath(next);
@@ -783,6 +812,7 @@ const joinPath = (base, next) => {
   return combined || '/';
 };
 
+// regexpToPath?处理 regexpToPath 相关逻辑。
 const regexpToPath = (regexp) => {
   if (!regexp) return '';
   if (regexp.fast_slash) return '';
@@ -799,6 +829,7 @@ const regexpToPath = (regexp) => {
   return source.startsWith('/') ? source : `/${source}`;
 };
 
+// collectRoutes?处理 collectRoutes 相关逻辑。
 const collectRoutes = (target) => {
   const routes = [];
   const walk = (stack, basePath = '') => {
@@ -834,6 +865,7 @@ const collectRoutes = (target) => {
   return routes;
 };
 
+// buildRouteResponse：构建对外输出数据。
 const buildRouteResponse = (target) => {
   const autoRoutes = collectRoutes(target);
   const used = new Set();
@@ -1003,6 +1035,7 @@ app.use((err, req, res, next) => {
   res.status(500).json({ success: false, message: '服务器错误。' });
 });
 
+// startServer：启动后台流程。
 export function startServer(port = PORT) {
   metrics.incCounter('server_start_total', 1);
   const server = http.createServer(app);

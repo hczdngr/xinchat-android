@@ -1,3 +1,8 @@
+/**
+ * 模块说明：认证路由模块：处理注册、登录、资料与会话相关能力。
+ */
+
+
 import express from 'express';
 import fs from 'fs/promises';
 import path from 'path';
@@ -23,10 +28,23 @@ const DEFAULT_SIGNATURE =
 const MAX_NICKNAME_LEN = 36;
 const MAX_SIGNATURE_LEN = 80;
 const MAX_AVATAR_BYTES = 20 * 1024 * 1024;
+const MIN_USERNAME_LEN = 3;
+const MAX_USERNAME_LEN = 32;
+const MIN_PASSWORD_LEN = 8;
+const MAX_PASSWORD_LEN = 128;
 const AUTH_COOKIE_NAME = String(process.env.AUTH_COOKIE_NAME || 'xinchat_token').trim() || 'xinchat_token';
 const AUTH_COOKIE_PATH = '/';
 const AUTH_COOKIE_SAME_SITE = 'Lax';
+// normalizeUsername：归一化外部输入。
 const normalizeUsername = (value) => value.trim().toLowerCase();
+// isPlainObject：判断条件是否成立。
+const isPlainObject = (value) =>
+  Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+// toPlainObject?处理 toPlainObject 相关逻辑。
+const toPlainObject = (value) => (isPlainObject(value) ? value : {});
+// toTokenString?处理 toTokenString 相关逻辑。
+const toTokenString = (value) => (typeof value === 'string' ? value.trim() : '');
+// parsePositiveInt：解析并校验输入值。
 const parsePositiveInt = (value, fallback, min = 1) => {
   const parsed = Number.parseInt(String(value || ''), 10);
   if (!Number.isFinite(parsed) || parsed < min) {
@@ -35,6 +53,7 @@ const parsePositiveInt = (value, fallback, min = 1) => {
   return parsed;
 };
 
+// hasDepressionTendency：判断是否具备指定状态。
 const hasDepressionTendency = (user) => {
   const analysis = user?.aiProfile?.analysis || {};
   const depression = analysis?.depressionTendency || {};
@@ -42,8 +61,10 @@ const hasDepressionTendency = (user) => {
   return level === 'medium' || level === 'high';
 };
 
+// hasSuicideIntent：判断是否具备指定状态。
 const hasSuicideIntent = (user) => hasDepressionTendency(user);
 
+// estimateBase64Bytes?处理 estimateBase64Bytes 相关逻辑。
 const estimateBase64Bytes = (value) => {
   const commaIndex = value.indexOf(',');
   if (commaIndex === -1) return 0;
@@ -58,6 +79,7 @@ const estimateBase64Bytes = (value) => {
   return Math.floor(base64.length * 0.75) - padding;
 };
 
+// normalizeAvatar：归一化外部输入。
 const normalizeAvatar = (value, baseUrl = '') => {
   if (typeof value !== 'string') return null;
   const trimmed = value.trim();
@@ -81,6 +103,7 @@ const normalizeAvatar = (value, baseUrl = '') => {
   return trimmed;
 };
 
+// parseCookieHeader：解析并校验输入值。
 const parseCookieHeader = (raw) => {
   const result = {};
   const source = String(raw || '').trim();
@@ -102,6 +125,7 @@ const parseCookieHeader = (raw) => {
   return result;
 };
 
+// shouldUseSecureCookie?处理 shouldUseSecureCookie 相关逻辑。
 const shouldUseSecureCookie = (req) => {
   const env = String(process.env.AUTH_COOKIE_SECURE || '').trim().toLowerCase();
   if (env === '1' || env === 'true') return true;
@@ -112,6 +136,7 @@ const shouldUseSecureCookie = (req) => {
   return String(process.env.NODE_ENV || '').toLowerCase() === 'production';
 };
 
+// appendAuthCookie?处理 appendAuthCookie 相关逻辑。
 const appendAuthCookie = (res, req, token, expiresAt) => {
   const safeToken = String(token || '').trim();
   const ts = expiresAt ? Date.parse(String(expiresAt)) : 0;
@@ -131,6 +156,7 @@ const appendAuthCookie = (res, req, token, expiresAt) => {
   res.append('Set-Cookie', parts.join('; '));
 };
 
+// clearAuthCookie：清理无效或过期数据。
 const clearAuthCookie = (res, req) => {
   const parts = [
     `${AUTH_COOKIE_NAME}=`,
@@ -146,21 +172,31 @@ const clearAuthCookie = (res, req) => {
   res.append('Set-Cookie', parts.join('; '));
 };
 
+// extractTokenFromCookie：提取请求中的关键信息。
 const extractTokenFromCookie = (req) => {
   const cookies = parseCookieHeader(req?.headers?.cookie || '');
   return String(cookies[AUTH_COOKIE_NAME] || '').trim();
 };
 
+// extractToken：提取请求中的关键信息。
 const extractToken = (req) => {
-  const header = req.headers.authorization || '';
+  const header = String(req?.headers?.authorization || '').trim();
   if (header.toLowerCase().startsWith('bearer ')) {
     return header.slice(7).trim();
   }
   const cookieToken = extractTokenFromCookie(req);
   if (cookieToken) return cookieToken;
-  return req.body?.token || req.query?.token || '';
+  const bodyToken = toTokenString(toPlainObject(req?.body).token);
+  if (bodyToken) return bodyToken;
+  return toTokenString(toPlainObject(req?.query).token);
 };
 
+// asyncRoute?处理 asyncRoute 相关逻辑。
+const asyncRoute = (handler) => (req, res, next) => {
+  Promise.resolve(handler(req, res, next)).catch(next);
+};
+
+// authenticate?处理 authenticate 相关逻辑。
 const authenticate = async (req, res, next) => {
   try {
     const token = extractToken(req);
@@ -221,6 +257,7 @@ let usersCacheMisses = 0;
 let usersCacheForcedRefreshes = 0;
 let usersCacheLastRefreshError = '';
 
+// cloneUsers?处理 cloneUsers 相关逻辑。
 const cloneUsers = (users) => {
   const source = Array.isArray(users) ? users : [];
   if (typeof structuredClone === 'function') {
@@ -229,6 +266,7 @@ const cloneUsers = (users) => {
   return JSON.parse(JSON.stringify(source));
 };
 
+// rebuildUsersIndexes?处理 rebuildUsersIndexes 相关逻辑。
 const rebuildUsersIndexes = (users) => {
   const tokens = new Map();
   const usernames = new Map();
@@ -255,6 +293,7 @@ const rebuildUsersIndexes = (users) => {
   usernameIndexCache = usernames;
 };
 
+// setUsersCache：设置运行时状态。
 const setUsersCache = (users, timestamp = Date.now()) => {
   cachedUsers = Array.isArray(users) ? users : [];
   cachedUsersAt = timestamp;
@@ -262,18 +301,21 @@ const setUsersCache = (users, timestamp = Date.now()) => {
   rebuildUsersIndexes(cachedUsers);
 };
 
+// queueUsersWriteTask：将任务按顺序排队处理。
 const queueUsersWriteTask = async (task) => {
   const run = writeUsersQueue.then(task);
   writeUsersQueue = run.catch(() => {});
   return run;
 };
 
+// persistUsersSnapshot?处理 persistUsersSnapshot 相关逻辑。
 const persistUsersSnapshot = async (snapshot) => {
   await fs.writeFile(USERS_PATH_TMP, JSON.stringify(snapshot, null, 2), 'utf-8');
   await fs.rename(USERS_PATH_TMP, USERS_PATH);
   setUsersCache(snapshot, Date.now());
 };
 
+// ensureStorage：确保前置条件与资源可用。
 const ensureStorage = async () => {
   if (storageReady) {
     return;
@@ -298,6 +340,7 @@ const ensureStorage = async () => {
   }
 };
 
+// loadUsersFromDisk?处理 loadUsersFromDisk 相关逻辑。
 const loadUsersFromDisk = async () => {
   await ensureStorage();
   const now = Date.now();
@@ -336,6 +379,7 @@ const loadUsersFromDisk = async () => {
   return cachedUsers;
 };
 
+// readUsersCached：读取持久化或缓存数据。
 const readUsersCached = async ({ forceRefresh = false } = {}) => {
   await ensureStorage();
   const now = Date.now();
@@ -369,11 +413,13 @@ const readUsersCached = async ({ forceRefresh = false } = {}) => {
   return cachedUsers || [];
 };
 
+// readUsers：读取持久化或缓存数据。
 const readUsers = async () => {
   const users = await readUsersCached();
   return cloneUsers(users);
 };
 
+// mutateUsers?处理 mutateUsers 相关逻辑。
 const mutateUsers = async (mutator, { defaultChanged = true } = {}) => {
   if (typeof mutator !== 'function') {
     throw new TypeError('mutateUsers requires a function mutator.');
@@ -402,6 +448,7 @@ const mutateUsers = async (mutator, { defaultChanged = true } = {}) => {
   return { changed, result };
 };
 
+// invalidateUsersCache?处理 invalidateUsersCache 相关逻辑。
 const invalidateUsersCache = () => {
   cachedUsers = null;
   cachedUsersAt = 0;
@@ -409,6 +456,7 @@ const invalidateUsersCache = () => {
   usernameIndexCache = new Map();
 };
 
+// getUsersCacheInfo：获取并返回目标数据。
 const getUsersCacheInfo = () => ({
   ttlMs: USERS_CACHE_TTL_MS,
   version: usersCacheVersion,
@@ -421,11 +469,13 @@ const getUsersCacheInfo = () => ({
   lastRefreshError: usersCacheLastRefreshError || null,
 });
 
+// forceRefreshUsersCache?处理 forceRefreshUsersCache 相关逻辑。
 const forceRefreshUsersCache = async () => {
   await readUsersCached({ forceRefresh: true });
   return getUsersCacheInfo();
 };
 
+// ensureUserUids：确保前置条件与资源可用。
 const ensureUserUids = (users) => {
   let maxUid = UID_START - 1;
   users.forEach((user) => {
@@ -445,6 +495,7 @@ const ensureUserUids = (users) => {
   return updated;
 };
 
+// ensureUserDefaults：确保前置条件与资源可用。
 const ensureUserDefaults = (users) => {
   let updated = false;
   users.forEach((user) => {
@@ -535,12 +586,14 @@ const ensureUserDefaults = (users) => {
   return updated;
 };
 
+// normalizeUsersForStorage：归一化外部输入。
 const normalizeUsersForStorage = (users) => {
   const changedUid = ensureUserUids(users);
   const changedDefaults = ensureUserDefaults(users);
   return Boolean(changedUid || changedDefaults);
 };
 
+// getNextUid：获取并返回目标数据。
 const getNextUid = (users) => {
   let maxUid = UID_START - 1;
   users.forEach((user) => {
@@ -551,6 +604,7 @@ const getNextUid = (users) => {
   return Math.max(maxUid + 1, UID_START);
 };
 
+// issueToken?处理 issueToken 相关逻辑。
 const issueToken = () => {
   const token = crypto.randomBytes(32).toString('hex');
   const expiresAt = new Date(
@@ -559,12 +613,14 @@ const issueToken = () => {
   return { token, expiresAt };
 };
 
+// isTokenExpired：判断条件是否成立。
 const isTokenExpired = (expiresAt) => {
   const ts = expiresAt ? Date.parse(expiresAt) : 0;
   if (!ts || Number.isNaN(ts)) return true;
   return Date.now() > ts;
 };
 
+// removeTokenFromUser：清理无效或过期数据。
 const removeTokenFromUser = (user, token) => {
   if (!user || !token) return false;
   let changed = false;
@@ -583,6 +639,7 @@ const removeTokenFromUser = (user, token) => {
   return changed;
 };
 
+// resolveTokenExpiresAt：解析并确定最终值。
 const resolveTokenExpiresAt = (user, token) => {
   if (!user || !token) return null;
   const tokens = Array.isArray(user.tokens) ? user.tokens : [];
@@ -596,6 +653,7 @@ const resolveTokenExpiresAt = (user, token) => {
   return null;
 };
 
+// resolveTokenState：解析并确定最终值。
 const resolveTokenState = (user, token) => {
   const tokens = Array.isArray(user?.tokens) ? user.tokens : [];
   const entry = tokens.find((item) => item?.token === token);
@@ -608,6 +666,7 @@ const resolveTokenState = (user, token) => {
   return 'missing';
 };
 
+// findUserByTokenLocal：查找目标记录。
 const findUserByTokenLocal = (users, token) => {
   if (!token) return { user: null, userIndex: -1, touched: false };
 
@@ -645,6 +704,7 @@ const findUserByTokenLocal = (users, token) => {
   return { user: null, userIndex: -1, touched };
 };
 
+// findUserByToken：查找目标记录。
 const findUserByToken = async (users, token) => {
   const safeToken = String(token || '').trim();
   if (!safeToken) {
@@ -664,6 +724,7 @@ const findUserByToken = async (users, token) => {
   return { ...localFound, revoked: false };
 };
 
+// revokeCurrentToken?处理 revokeCurrentToken 相关逻辑。
 const revokeCurrentToken = async (users, userIndex, token) => {
   const safeToken = String(token || '').trim();
   if (!safeToken) {
@@ -675,6 +736,7 @@ const revokeCurrentToken = async (users, userIndex, token) => {
   return { touched, tokenId: revoked.tokenId || '' };
 };
 
+// findUserIndexByUsername：查找目标记录。
 const findUserIndexByUsername = (users, normalizedUsername) => {
   if (!normalizedUsername) return -1;
   const indexed = usernameIndexCache.get(normalizedUsername);
@@ -684,6 +746,7 @@ const findUserIndexByUsername = (users, normalizedUsername) => {
   return users.findIndex((item) => item?.username === normalizedUsername);
 };
 
+// hasValidToken：判断是否具备指定状态。
 const hasValidToken = (user) => {
   if (!user) return false;
   const tokens = Array.isArray(user.tokens) ? user.tokens : [];
@@ -696,6 +759,7 @@ const hasValidToken = (user) => {
   return false;
 };
 
+// pbkdf2Async?处理 pbkdf2Async 相关逻辑。
 const pbkdf2Async = (password, salt, iterations, keylen, digest) =>
   new Promise((resolve, reject) => {
     crypto.pbkdf2(password, salt, iterations, keylen, digest, (error, derivedKey) => {
@@ -707,6 +771,7 @@ const pbkdf2Async = (password, salt, iterations, keylen, digest) =>
     });
   });
 
+// hashPassword?处理 hashPassword 相关逻辑。
 const hashPassword = async (password, salt = crypto.randomBytes(16)) => {
   const iterations = 120000;
   const keylen = 64;
@@ -721,6 +786,7 @@ const hashPassword = async (password, salt = crypto.randomBytes(16)) => {
   };
 };
 
+// verifyPassword?处理 verifyPassword 相关逻辑。
 const verifyPassword = async (password, user) => {
   if (!user.passwordHash || !user.salt) {
     return false;
@@ -739,6 +805,7 @@ const verifyPassword = async (password, user) => {
   return crypto.timingSafeEqual(stored, hash);
 };
 
+// recordLoginAttempt?处理 recordLoginAttempt 相关逻辑。
 const recordLoginAttempt = (key) => {
   const now = Date.now();
   const entry = loginAttempts.get(key) || { count: 0, firstAttempt: now };
@@ -749,10 +816,12 @@ const recordLoginAttempt = (key) => {
   loginAttempts.set(key, { ...entry, count: entry.count + 1 });
 };
 
+// clearLoginAttempts：清理无效或过期数据。
 const clearLoginAttempts = (key) => {
   loginAttempts.delete(key);
 };
 
+// isLockedOut：判断条件是否成立。
 const isLockedOut = (key) => {
   const entry = loginAttempts.get(key);
   if (!entry) {
@@ -765,20 +834,26 @@ const isLockedOut = (key) => {
   return entry.count >= MAX_ATTEMPTS;
 };
 
+// 路由：POST /register。
 router.post('/register', async (req, res) => {
   try {
-    const { username, password } = req.body || {};
+    const { username, password } = toPlainObject(req.body);
     if (typeof username !== 'string' || typeof password !== 'string') {
       res.status(400).json({ success: false, message: '请输入用户名和密码。' });
       return;
     }
 
     const trimmedUsername = username.trim();
-    if (trimmedUsername.length < 3 || trimmedUsername.length > 32) {
+    if (trimmedUsername.length < MIN_USERNAME_LEN || trimmedUsername.length > MAX_USERNAME_LEN) {
       res.status(400).json({
         success: false,
         message: '用户名长度需在 3-32 个字符之间。',
       });
+      return;
+    }
+
+    if (password.length < MIN_PASSWORD_LEN || password.length > MAX_PASSWORD_LEN) {
+      res.status(400).json({ success: false, message: '密码长度需在 8-128 个字符之间。' });
       return;
     }
 
@@ -820,16 +895,22 @@ router.post('/register', async (req, res) => {
   }
 });
 
+// 路由：POST /login。
 router.post('/login', async (req, res) => {
   try {
-    const { username, password } = req.body || {};
+    const { username, password } = toPlainObject(req.body);
     if (typeof username !== 'string' || typeof password !== 'string') {
       res.status(400).json({ success: false, message: '请输入用户名和密码。' });
       return;
     }
 
     const trimmedUsername = username.trim();
-    if (!trimmedUsername || !password) {
+    if (
+      !trimmedUsername ||
+      trimmedUsername.length > MAX_USERNAME_LEN ||
+      !password ||
+      password.length > MAX_PASSWORD_LEN
+    ) {
       res.status(400).json({ success: false, message: '请输入用户名和密码。' });
       return;
     }
@@ -937,6 +1018,7 @@ router.post('/login', async (req, res) => {
   }
 });
 
+// revokeAuthenticatedSession?处理 revokeAuthenticatedSession 相关逻辑。
 const revokeAuthenticatedSession = async (req, res, { clearCookie = true } = {}) => {
   const token = extractToken(req);
   const uid = Number(req.auth?.user?.uid);
@@ -966,15 +1048,18 @@ const revokeAuthenticatedSession = async (req, res, { clearCookie = true } = {})
   res.json({ success: true, revokedTokenId });
 };
 
-router.post('/logout', authenticate, async (req, res) => {
+// 路由：POST /logout。
+router.post('/logout', authenticate, asyncRoute(async (req, res) => {
   await revokeAuthenticatedSession(req, res, { clearCookie: true });
-});
+}));
 
-router.post('/session/revoke', authenticate, async (req, res) => {
+// 路由：POST /session/revoke。
+router.post('/session/revoke', authenticate, asyncRoute(async (req, res) => {
   await revokeAuthenticatedSession(req, res, { clearCookie: true });
-});
+}));
 
-router.get('/profile', authenticate, async (req, res) => {
+// 路由：GET /profile。
+router.get('/profile', authenticate, asyncRoute(async (req, res) => {
   const { user } = req.auth;
   res.json({
     success: true,
@@ -992,11 +1077,12 @@ router.get('/profile', authenticate, async (req, res) => {
       hasSuicideIntent: hasSuicideIntent(user),
     },
   });
-});
+}));
 
-router.post('/profile', authenticate, async (req, res) => {
+// 路由：POST /profile。
+router.post('/profile', authenticate, asyncRoute(async (req, res) => {
   const uid = Number(req.auth?.user?.uid);
-  const payload = req.body || {};
+  const payload = toPlainObject(req.body);
   const nickname = typeof payload.nickname === 'string' ? payload.nickname.trim() : '';
   const signature = typeof payload.signature === 'string' ? payload.signature.trim() : '';
   const gender = typeof payload.gender === 'string' ? payload.gender.trim() : '';
@@ -1075,7 +1161,7 @@ router.post('/profile', authenticate, async (req, res) => {
       hasSuicideIntent: hasSuicideIntent(mutation.result),
     },
   });
-});
+}));
 
 export {
   ensureStorage,

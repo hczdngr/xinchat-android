@@ -1,3 +1,8 @@
+/**
+ * 模块说明：语音路由模块：处理语音通讯录与域名配置。
+ */
+
+
 import express from 'express';
 import { mutateUsers } from './auth.js';
 import { createAuthenticateMiddleware } from './session.js';
@@ -5,6 +10,7 @@ import { createAuthenticateMiddleware } from './session.js';
 const router = express.Router();
 const MAX_DOMAIN_LEN = 253;
 
+// isMutualFriend：判断条件是否成立。
 const isMutualFriend = (user, target) =>
   Boolean(
     user &&
@@ -15,6 +21,7 @@ const isMutualFriend = (user, target) =>
       target.friends.includes(user.uid)
   );
 
+// isValidDomain：判断条件是否成立。
 const isValidDomain = (value) => {
   if (!value) return true;
   if (value.length > MAX_DOMAIN_LEN) return false;
@@ -46,6 +53,7 @@ const isValidDomain = (value) => {
 
 const authenticate = createAuthenticateMiddleware({ scope: 'Voice' });
 
+// toDirectoryEntry?处理 toDirectoryEntry 相关逻辑。
 const toDirectoryEntry = (user) => ({
   uid: user.uid,
   username: user.username,
@@ -53,6 +61,7 @@ const toDirectoryEntry = (user) => ({
   online: user.online === true,
 });
 
+// 路由：GET /directory。
 router.get('/directory', authenticate, async (req, res) => {
   try {
     const { users, user } = req.auth;
@@ -66,6 +75,7 @@ router.get('/directory', authenticate, async (req, res) => {
   }
 });
 
+// 路由：GET /contact。
 router.get('/contact', authenticate, async (req, res) => {
   try {
     const uid = Number(req.query.uid || req.body?.uid);
@@ -90,6 +100,7 @@ router.get('/contact', authenticate, async (req, res) => {
   }
 });
 
+// 路由：POST /domain。
 router.post('/domain', authenticate, async (req, res) => {
   try {
     const domain = typeof req.body?.domain === 'string' ? req.body.domain.trim() : '';

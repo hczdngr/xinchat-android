@@ -1,3 +1,8 @@
+/**
+ * 模块说明：语音转写路由模块：处理音频上传、排队与结果查询。
+ */
+
+
 import express from 'express';
 import fs from 'fs/promises';
 import { createWriteStream } from 'fs';
@@ -18,6 +23,7 @@ const HARDCODED_GEMINI_API_KEY_B64 =
 const router = express.Router();
 const authenticate = createAuthenticateMiddleware({ scope: 'VoiceTranscribe' });
 
+// readPositiveInt：读取持久化或缓存数据。
 const readPositiveInt = (value, fallback, min = 1) => {
   const parsed = Number.parseInt(String(value || ''), 10);
   return Number.isFinite(parsed) && parsed >= min ? parsed : fallback;
@@ -64,10 +70,14 @@ const jobs = new Map();
 const hashInFlight = new Map();
 const hashCache = new Map();
 
+// nowIso?处理 nowIso 相关逻辑。
 const nowIso = () => new Date().toISOString();
+// hashInFlightKey?处理 hashInFlightKey 相关逻辑。
 const hashInFlightKey = (uid, hash) => `${Number(uid) || 0}:${String(hash || '')}`;
+// sanitizeMime：清洗不可信输入。
 const sanitizeMime = (value) => String(value || '').trim().toLowerCase();
 
+// decodeHardcodedGeminiKey?处理 decodeHardcodedGeminiKey 相关逻辑。
 const decodeHardcodedGeminiKey = () => {
   try {
     return Buffer.from(HARDCODED_GEMINI_API_KEY_B64, 'base64').toString('utf8').trim();
@@ -76,6 +86,7 @@ const decodeHardcodedGeminiKey = () => {
   }
 };
 
+// mapTranscribeError?处理 mapTranscribeError 相关逻辑。
 const mapTranscribeError = (error) => {
   const status = Number(error?.status || error?.statusCode || 0);
   const code = String(error?.code || '').toUpperCase();
@@ -110,6 +121,7 @@ const mapTranscribeError = (error) => {
   return { statusCode: 500, publicMessage: 'Voice transcribe failed.' };
 };
 
+// normalizeTranscribeText：归一化外部输入。
 const normalizeTranscribeText = (value) => {
   const text = String(value || '').trim();
   if (!text) return TRANSCRIBE_NULL_TEXT;
@@ -117,8 +129,10 @@ const normalizeTranscribeText = (value) => {
   return text;
 };
 
+// isNullTranscribeText：判断条件是否成立。
 const isNullTranscribeText = (value) => normalizeTranscribeText(value) === TRANSCRIBE_NULL_TEXT;
 
+// getAiClient：获取并返回目标数据。
 const getAiClient = () => {
   const apiKey = String(process.env.GEMINI_API_KEY || decodeHardcodedGeminiKey()).trim();
   if (!apiKey) {
@@ -133,10 +147,12 @@ const getAiClient = () => {
   return aiClient;
 };
 
+// ensureTmpDir：确保前置条件与资源可用。
 const ensureTmpDir = async () => {
   await fs.mkdir(TRANSCRIBE_TMP_DIR, { recursive: true });
 };
 
+// isAllowedAudioMime：判断条件是否成立。
 const isAllowedAudioMime = (mime) => {
   if (!mime) return true;
   if (AUDIO_MIME_ALLOW.has(mime)) return true;
@@ -144,6 +160,7 @@ const isAllowedAudioMime = (mime) => {
   return AUDIO_MIME_ALLOW.has(base);
 };
 
+// withTimeout?处理 withTimeout 相关逻辑。
 const withTimeout = async (promise, timeoutMs, label) => {
   let timer = null;
   try {
@@ -158,11 +175,13 @@ const withTimeout = async (promise, timeoutMs, label) => {
   }
 };
 
+// sleep?处理 sleep 相关逻辑。
 const sleep = (ms) =>
   new Promise((resolve) => {
     setTimeout(resolve, ms);
   });
 
+// readStreamToFile：读取持久化或缓存数据。
 const readStreamToFile = (req, tempPath, maxBytes) =>
   new Promise((resolve, reject) => {
     let size = 0;
@@ -206,6 +225,7 @@ const readStreamToFile = (req, tempPath, maxBytes) =>
     req.pipe(writer);
   });
 
+// extractText：提取请求中的关键信息。
 const extractText = (response) => {
   const plain = typeof response?.text === 'string' ? response.text.trim() : '';
   if (plain) return plain;
@@ -221,6 +241,7 @@ const extractText = (response) => {
   return '';
 };
 
+// requestTranscriptionOnce?处理 requestTranscriptionOnce 相关逻辑。
 const requestTranscriptionOnce = async ({ buffer, mimeType }) => {
   const ai = getAiClient();
   const response = await withTimeout(
@@ -251,6 +272,7 @@ const requestTranscriptionOnce = async ({ buffer, mimeType }) => {
   return normalizeTranscribeText(extractText(response));
 };
 
+// requestTranscriptionWithRetry?处理 requestTranscriptionWithRetry 相关逻辑。
 const requestTranscriptionWithRetry = async ({ buffer, mimeType }) => {
   let lastError = null;
   for (let i = 0; i <= RETRY_MAX; i += 1) {
@@ -274,6 +296,7 @@ const requestTranscriptionWithRetry = async ({ buffer, mimeType }) => {
   throw lastError || new Error('VOICE_TRANSCRIBE_FAILED');
 };
 
+// toPublicJob?处理 toPublicJob 相关逻辑。
 const toPublicJob = (job) => ({
   jobId: job.id,
   status: job.status,
@@ -284,12 +307,14 @@ const toPublicJob = (job) => ({
   error: job.status === 'failed' ? job.error : '',
 });
 
+// dropJobTempFile?处理 dropJobTempFile 相关逻辑。
 const dropJobTempFile = async (job) => {
   if (!job?.tempPath) return;
   await fs.unlink(job.tempPath).catch(() => undefined);
   job.tempPath = '';
 };
 
+// runJob?处理 runJob 相关逻辑。
 const runJob = async (job) => {
   job.status = 'processing';
   job.startedAt = nowIso();
@@ -324,6 +349,7 @@ const runJob = async (job) => {
   }
 };
 
+// pumpQueue?处理 pumpQueue 相关逻辑。
 const pumpQueue = () => {
   while (activeWorkers < MAX_PARALLEL && jobQueue.length > 0) {
     const jobId = jobQueue.shift();
@@ -341,8 +367,10 @@ const pumpQueue = () => {
   }
 };
 
+// queueDepth：将任务按顺序排队处理。
 const queueDepth = () => jobQueue.length + activeWorkers;
 
+// cleanupStores?处理 cleanupStores 相关逻辑。
 const cleanupStores = () => {
   const now = Date.now();
   for (const [hash, item] of hashCache.entries()) {
@@ -359,6 +387,7 @@ const cleanupStores = () => {
 
 setInterval(cleanupStores, 60 * 1000).unref?.();
 
+// 路由：POST /transcribe。
 router.post('/transcribe', authenticate, async (req, res) => {
   try {
     await ensureTmpDir();
@@ -458,6 +487,7 @@ router.post('/transcribe', authenticate, async (req, res) => {
   }
 });
 
+// 路由：GET /transcribe/:jobId。
 router.get('/transcribe/:jobId', authenticate, async (req, res) => {
   try {
     const jobId = String(req.params.jobId || '').trim();

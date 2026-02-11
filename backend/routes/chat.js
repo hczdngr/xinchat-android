@@ -1,3 +1,8 @@
+/**
+ * 模块说明：聊天路由模块：处理消息、上传、贴纸与会话读取逻辑。
+ */
+
+
 ﻿import express from 'express';
 import fs from 'fs/promises';
 import { createWriteStream } from 'fs';
@@ -28,7 +33,9 @@ const DEFAULT_LIMIT = 50;
 const FLUSH_INTERVAL_MS = 250;
 let chatNotifier = null;
 
+// isValidType：判断条件是否成立。
 const isValidType = (value) => typeof value === 'string' && ALLOWED_TYPES.has(value);
+// isValidTargetType：判断条件是否成立。
 const isValidTargetType = (value) =>
   typeof value === 'string' && ALLOWED_TARGET_TYPES.has(value);
 const DATA_IMAGE_RE = /^data:(image\/(png|jpe?g|gif|webp));base64,/i;
@@ -46,6 +53,7 @@ const MAX_DEVICE_ID_LENGTH = 128;
 const MAX_DEVICE_CREATED_AT_FUTURE_DRIFT_MS = 5 * 60 * 1000;
 const MAX_UID = Number.parseInt(String(process.env.MAX_UID || '2147483647'), 10);
 const SAFE_MAX_UID = Number.isInteger(MAX_UID) && MAX_UID > 0 ? MAX_UID : 2147483647;
+// isValidUid：判断条件是否成立。
 const isValidUid = (value) =>
   Number.isInteger(value) && value > 0 && value <= SAFE_MAX_UID;
 
@@ -65,6 +73,7 @@ let stickerStoreCache = {
 };
 let stickerStoreWriteChain = Promise.resolve();
 
+// parseImageDataUrl：解析并校验输入值。
 const parseImageDataUrl = (value) => {
   if (typeof value !== 'string') return null;
   const match = value.match(DATA_IMAGE_RE);
@@ -82,6 +91,7 @@ const parseImageDataUrl = (value) => {
   }
 };
 
+// parseDataUrl：解析并校验输入值。
 const parseDataUrl = (value) => {
   if (typeof value !== 'string') return null;
   const match = value.match(DATA_URL_RE);
@@ -98,6 +108,7 @@ const parseDataUrl = (value) => {
   }
 };
 
+// fileExists?处理 fileExists 相关逻辑。
 const fileExists = async (targetPath) => {
   try {
     await fs.access(targetPath);
@@ -107,6 +118,7 @@ const fileExists = async (targetPath) => {
   }
 };
 
+// readUserfileIndex：读取持久化或缓存数据。
 const readUserfileIndex = async () => {
   try {
     const raw = await fs.readFile(USERFILE_INDEX_PATH, 'utf-8');
@@ -117,11 +129,13 @@ const readUserfileIndex = async () => {
   }
 };
 
+// writeUserfileIndex：写入持久化数据。
 const writeUserfileIndex = async (index) => {
   await fs.mkdir(USERFILE_DIR, { recursive: true });
   await fs.writeFile(USERFILE_INDEX_PATH, JSON.stringify(index || {}, null, 2));
 };
 
+// normalizeStickerStore：归一化外部输入。
 const normalizeStickerStore = (input) => {
   const source = input && typeof input === 'object' ? input : {};
   const byHashSource = source.byHash && typeof source.byHash === 'object' ? source.byHash : {};
@@ -181,6 +195,7 @@ const normalizeStickerStore = (input) => {
   };
 };
 
+// ensureStickerStore：确保前置条件与资源可用。
 const ensureStickerStore = async () => {
   if (stickerStoreLoaded) return stickerStoreCache;
   try {
@@ -193,6 +208,7 @@ const ensureStickerStore = async () => {
   return stickerStoreCache;
 };
 
+// persistStickerStore?处理 persistStickerStore 相关逻辑。
 const persistStickerStore = async () => {
   await fs.mkdir(STICKER_DIR, { recursive: true });
   const next = {
@@ -205,6 +221,7 @@ const persistStickerStore = async () => {
   await fs.rename(tempPath, STICKER_INDEX_PATH);
 };
 
+// queueStickerStorePersist：将任务按顺序排队处理。
 const queueStickerStorePersist = async () => {
   stickerStoreWriteChain = stickerStoreWriteChain
     .catch(() => undefined)
@@ -212,6 +229,7 @@ const queueStickerStorePersist = async () => {
   await stickerStoreWriteChain;
 };
 
+// getUserStickerList：获取并返回目标数据。
 const getUserStickerList = (uid) => {
   const store = stickerStoreCache;
   const userEntry = store.users[String(uid)];
@@ -224,6 +242,7 @@ const getUserStickerList = (uid) => {
   return list;
 };
 
+// upsertUserSticker?处理 upsertUserSticker 相关逻辑。
 const upsertUserSticker = async ({ uid, hash, ext, mime, size, url, skipPersist = false }) => {
   await ensureStickerStore();
   const now = new Date().toISOString();
@@ -265,6 +284,7 @@ const upsertUserSticker = async ({ uid, hash, ext, mime, size, url, skipPersist 
   return stickerStoreCache.byHash[safeHash];
 };
 
+// pruneUserfileIndex：清理无效或过期数据。
 const pruneUserfileIndex = async (index) => {
   const next = { ...(index || {}) };
   const entries = Object.entries(next);
@@ -280,12 +300,14 @@ const pruneUserfileIndex = async (index) => {
   return next;
 };
 
+// sanitizeFilename：清洗不可信输入。
 const sanitizeFilename = (value) => {
   const base = path.basename(String(value || '').trim());
   if (!base) return '';
   return base.replace(/[\\/:*?"<>|]+/g, '_');
 };
 
+// guessExtension?处理 guessExtension 相关逻辑。
 const guessExtension = (name, mime) => {
   const extFromName = path.extname(name || '').slice(1).toLowerCase();
   if (extFromName) return extFromName;
@@ -299,6 +321,7 @@ const guessExtension = (name, mime) => {
   return map[mime] || 'bin';
 };
 
+// resolvePathWithinRoot：解析并确定最终值。
 const resolvePathWithinRoot = (rootDir, relativePath) => {
   if (typeof relativePath !== 'string' || !relativePath.trim()) return '';
   if (relativePath.includes('\0')) return '';
@@ -308,6 +331,7 @@ const resolvePathWithinRoot = (rootDir, relativePath) => {
   return resolved.startsWith(`${root}${path.sep}`) ? resolved : '';
 };
 
+// cleanupUserFiles?处理 cleanupUserFiles 相关逻辑。
 const cleanupUserFiles = async () => {
   const now = Date.now();
   await fs.mkdir(USERFILE_DIR, { recursive: true });
@@ -335,6 +359,7 @@ const cleanupUserFiles = async () => {
   await pruneUserfileIndex(index);
 };
 
+// maybeCleanupUserFiles?处理 maybeCleanupUserFiles 相关逻辑。
 const maybeCleanupUserFiles = async () => {
   const now = Date.now();
   if (now - lastCleanupAt < CLEANUP_INTERVAL_MS) return;
@@ -342,6 +367,7 @@ const maybeCleanupUserFiles = async () => {
   await cleanupUserFiles();
 };
 
+// buildFileMeta：构建对外输出数据。
 const buildFileMeta = (name, size, mime) => {
   const uploadedAt = new Date().toISOString();
   const expiresAt = new Date(Date.now() + FILE_TTL_MS).toISOString();
@@ -354,6 +380,7 @@ const buildFileMeta = (name, size, mime) => {
   };
 };
 
+// storeUserFileBuffer?处理 storeUserFileBuffer 相关逻辑。
 const storeUserFileBuffer = async (buffer, senderUid, name, mime) => {
   const hash = crypto.createHash('sha256').update(buffer).digest('hex');
   const safeBase = sanitizeFilename(name) || 'file';
@@ -384,6 +411,7 @@ const storeUserFileBuffer = async (buffer, senderUid, name, mime) => {
   return { filename, hash };
 };
 
+// storeUserFileFromPath?处理 storeUserFileFromPath 相关逻辑。
 const storeUserFileFromPath = async (sourcePath, senderUid, name, mime) => {
   const stat = await fs.stat(sourcePath);
   if (stat.size > MAX_FILE_BYTES) {
@@ -393,6 +421,7 @@ const storeUserFileFromPath = async (sourcePath, senderUid, name, mime) => {
   return storeUserFileBuffer(buffer, senderUid, name, mime);
 };
 
+// storeImageBuffer?处理 storeImageBuffer 相关逻辑。
 const storeImageBuffer = async (buffer, ext) => {
   const hash = crypto.createHash('sha256').update(buffer).digest('hex');
   const filename = `${hash}.${ext}`;
@@ -408,6 +437,7 @@ const storeImageBuffer = async (buffer, ext) => {
   return { filename, hash };
 };
 
+// getImageExtFromMime：获取并返回目标数据。
 const getImageExtFromMime = (mime) => {
   const map = {
     'image/png': 'png',
@@ -419,6 +449,7 @@ const getImageExtFromMime = (mime) => {
   return map[String(mime || '').toLowerCase()] || '';
 };
 
+// readStreamToFile：读取持久化或缓存数据。
 const readStreamToFile = (req, tempPath, maxBytes) =>
   new Promise((resolve, reject) => {
     let size = 0;
@@ -451,6 +482,7 @@ const readStreamToFile = (req, tempPath, maxBytes) =>
     req.pipe(out);
   });
 
+// readStreamToBuffer：读取持久化或缓存数据。
 const readStreamToBuffer = (req, maxBytes) =>
   new Promise((resolve, reject) => {
     let size = 0;
@@ -470,6 +502,7 @@ const readStreamToBuffer = (req, maxBytes) =>
     });
   });
 
+// findImageUrlByHash：查找目标记录。
 const findImageUrlByHash = async (hash, baseUrl) => {
   if (!hash) return '';
   for (const ext of IMAGE_EXTS) {
@@ -482,6 +515,7 @@ const findImageUrlByHash = async (hash, baseUrl) => {
   return '';
 };
 
+// getSqlModule：获取并返回目标数据。
 const getSqlModule = async () => {
   if (sqlModule) {
     return sqlModule;
@@ -492,6 +526,7 @@ const getSqlModule = async () => {
   return sqlModule;
 };
 
+// openDb?处理 openDb 相关逻辑。
 const openDb = async () => {
   if (db) {
     return db;
@@ -543,6 +578,7 @@ const openDb = async () => {
   return db;
 };
 
+// flushDb：将内存状态刷入磁盘。
 const flushDb = async () => {
   if (!db) {
     return;
@@ -565,6 +601,7 @@ const flushDb = async () => {
   }
 };
 
+// scheduleFlush?处理 scheduleFlush 相关逻辑。
 const scheduleFlush = () => {
   if (flushTimer) {
     return;
@@ -575,10 +612,12 @@ const scheduleFlush = () => {
   }, FLUSH_INTERVAL_MS);
 };
 
+// setChatNotifier：设置运行时状态。
 const setChatNotifier = (notifier) => {
   chatNotifier = typeof notifier === 'function' ? notifier : null;
 };
 
+// migrateChatJson?处理 migrateChatJson 相关逻辑。
 const migrateChatJson = async () => {
   const database = await openDb();
   const countStmt = database.prepare('SELECT COUNT(1) as count FROM messages');
@@ -658,6 +697,7 @@ const migrateChatJson = async () => {
   }
 };
 
+// ensureChatStorage：确保前置条件与资源可用。
 const ensureChatStorage = async () => {
   if (chatStorageReady) return;
   if (chatStoragePromise) {
@@ -681,6 +721,7 @@ const ensureChatStorage = async () => {
 
 const authenticate = createAuthenticateMiddleware({ scope: 'Chat' });
 
+// toMessage?处理 toMessage 相关逻辑。
 const toMessage = (row) => {
   let data = {};
   try {
@@ -699,6 +740,7 @@ const toMessage = (row) => {
   };
 };
 
+// parseReadAtMap：解析并校验输入值。
 const parseReadAtMap = (value) => {
   const source = value && typeof value === 'object' ? value : {};
   const result = {};
@@ -712,6 +754,7 @@ const parseReadAtMap = (value) => {
   return result;
 };
 
+// normalizeDeviceId：归一化外部输入。
 const normalizeDeviceId = (value) => {
   if (typeof value !== 'string') return '';
   const trimmed = value.trim();
@@ -726,10 +769,12 @@ const normalizeDeviceId = (value) => {
   return sanitized;
 };
 
+// resolveDeleteCutoffDeviceHeaderId：解析并确定最终值。
 const resolveDeleteCutoffDeviceHeaderId = (req) =>
   normalizeDeviceId(String(req.headers['x-xinchat-device-id'] || '')) ||
   normalizeDeviceId(String(req.headers['x-device-id'] || ''));
 
+// resolveDeleteCutoffDeviceId：解析并确定最终值。
 const resolveDeleteCutoffDeviceId = (req) => {
   const fromHeader = resolveDeleteCutoffDeviceHeaderId(req);
   if (fromHeader) return fromHeader;
@@ -739,6 +784,7 @@ const resolveDeleteCutoffDeviceId = (req) => {
   return hash ? `tok:${hash}` : '';
 };
 
+// extractDeviceCreatedAtMsFromId：提取请求中的关键信息。
 const extractDeviceCreatedAtMsFromId = (deviceId) => {
   if (typeof deviceId !== 'string') return 0;
   const match = deviceId.trim().match(/^dev_([0-9a-z]+)_/i);
@@ -748,6 +794,7 @@ const extractDeviceCreatedAtMsFromId = (deviceId) => {
   return Math.floor(parsed);
 };
 
+// normalizeDeviceCreatedAtMs：归一化外部输入。
 const normalizeDeviceCreatedAtMs = (value) => {
   const parsed = Number(value);
   if (!Number.isFinite(parsed) || parsed <= 0) return 0;
@@ -756,6 +803,7 @@ const normalizeDeviceCreatedAtMs = (value) => {
   return floored > maxAllowed ? maxAllowed : floored;
 };
 
+// resolveDeviceCreatedAtMsFromRequest：解析并确定最终值。
 const resolveDeviceCreatedAtMsFromRequest = (req, deviceId) => {
   const fromHeader =
     normalizeDeviceCreatedAtMs(req.headers['x-xinchat-device-created-at']) ||
@@ -770,6 +818,7 @@ const resolveDeviceCreatedAtMsFromRequest = (req, deviceId) => {
   return Date.now();
 };
 
+// getDeviceBaselineCutoff：获取并返回目标数据。
 const getDeviceBaselineCutoff = (database, { uid, deviceId }) => {
   if (!database) return 0;
   if (!Number.isInteger(uid) || uid <= 0 || !deviceId) return 0;
@@ -790,6 +839,7 @@ const getDeviceBaselineCutoff = (database, { uid, deviceId }) => {
   return cutoffMs;
 };
 
+// ensureDeviceBaselineCutoff：确保前置条件与资源可用。
 const ensureDeviceBaselineCutoff = (database, { uid, deviceId, createdAtMs }) => {
   if (!database) return { cutoffMs: 0, inserted: false };
   if (!Number.isInteger(uid) || uid <= 0 || !deviceId) {
@@ -821,6 +871,7 @@ const ensureDeviceBaselineCutoff = (database, { uid, deviceId, createdAtMs }) =>
   };
 };
 
+// normalizeDeleteCutoffEntry：归一化外部输入。
 const normalizeDeleteCutoffEntry = (entry) => {
   if (!entry || typeof entry !== 'object') return null;
   const targetType = String(entry.targetType || '').trim();
@@ -836,6 +887,7 @@ const normalizeDeleteCutoffEntry = (entry) => {
   };
 };
 
+// parseDeleteCutoffList：解析并校验输入值。
 const parseDeleteCutoffList = (value) => {
   let source = value;
   if (typeof source === 'string') {
@@ -859,6 +911,7 @@ const parseDeleteCutoffList = (value) => {
   return Array.from(dedup.values());
 };
 
+// upsertDeleteCutoff?处理 upsertDeleteCutoff 相关逻辑。
 const upsertDeleteCutoff = (database, { uid, deviceId, targetType, targetUid, cutoffMs }) => {
   if (!database) return;
   if (!Number.isInteger(uid) || uid <= 0) return;
@@ -881,6 +934,7 @@ const upsertDeleteCutoff = (database, { uid, deviceId, targetType, targetUid, cu
   stmt.free();
 };
 
+// getDeleteCutoffForTarget：获取并返回目标数据。
 const getDeleteCutoffForTarget = (database, { uid, deviceId, targetType, targetUid }) => {
   if (!database) return 0;
   if (!Number.isInteger(uid) || uid <= 0) return 0;
@@ -903,6 +957,7 @@ const getDeleteCutoffForTarget = (database, { uid, deviceId, targetType, targetU
   return cutoffMs;
 };
 
+// loadDeleteCutoffMapByDevice?处理 loadDeleteCutoffMapByDevice 相关逻辑。
 const loadDeleteCutoffMapByDevice = (database, { uid, deviceId }) => {
   const result = {
     private: new Map(),
@@ -934,6 +989,7 @@ const loadDeleteCutoffMapByDevice = (database, { uid, deviceId }) => {
   return result;
 };
 
+// 路由：POST /send。
 router.post('/send', authenticate, async (req, res) => {
   try {
     await ensureChatStorage();
@@ -1232,6 +1288,7 @@ router.post('/send', authenticate, async (req, res) => {
   }
 });
 
+// 路由：GET /stickers/list。
 router.get('/stickers/list', authenticate, async (req, res) => {
   try {
     await ensureChatStorage();
@@ -1244,6 +1301,7 @@ router.get('/stickers/list', authenticate, async (req, res) => {
   }
 });
 
+// 路由：POST /stickers/upload/batch。
 router.post('/stickers/upload/batch', authenticate, async (req, res) => {
   try {
     await ensureChatStorage();
@@ -1300,6 +1358,7 @@ router.post('/stickers/upload/batch', authenticate, async (req, res) => {
   }
 });
 
+// 路由：POST /stickers/upload。
 router.post('/stickers/upload', authenticate, async (req, res) => {
   try {
     await ensureChatStorage();
@@ -1340,6 +1399,7 @@ router.post('/stickers/upload', authenticate, async (req, res) => {
   }
 });
 
+// 路由：POST /upload/image。
 router.post('/upload/image', authenticate, async (req, res) => {
   try {
     await fs.mkdir(IMAGE_DIR, { recursive: true });
@@ -1425,6 +1485,7 @@ router.post('/upload/image', authenticate, async (req, res) => {
   }
 });
 
+// 路由：POST /upload/file。
 router.post('/upload/file', authenticate, async (req, res) => {
   try {
     await fs.mkdir(USERFILE_DIR, { recursive: true });
@@ -1488,6 +1549,7 @@ router.post('/upload/file', authenticate, async (req, res) => {
   }
 });
 
+// 路由：GET /get。
 router.get('/get', authenticate, async (req, res) => {
   try {
     await ensureChatStorage();
@@ -1675,6 +1737,7 @@ router.get('/get', authenticate, async (req, res) => {
   }
 });
 
+// 路由：POST /overview。
 router.post('/overview', authenticate, async (req, res) => {
   try {
     await ensureChatStorage();
@@ -1868,6 +1931,7 @@ router.post('/overview', authenticate, async (req, res) => {
   }
 });
 
+// 路由：POST /delete-cutoff。
 router.post('/delete-cutoff', authenticate, async (req, res) => {
   try {
     await ensureChatStorage();
@@ -1973,6 +2037,7 @@ router.post('/delete-cutoff', authenticate, async (req, res) => {
   }
 });
 
+// 路由：DELETE /del。
 router.delete('/del', authenticate, async (req, res) => {
   try {
     await ensureChatStorage();

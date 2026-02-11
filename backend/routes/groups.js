@@ -1,3 +1,8 @@
+/**
+ * 模块说明：群组路由模块：处理群组创建、查询、更新与退出流程。
+ */
+
+
 import express from 'express';
 import fs from 'fs/promises';
 import path from 'path';
@@ -28,13 +33,17 @@ let writeQueue = Promise.resolve();
 let mutationQueue = Promise.resolve();
 let groupsNotifier = null;
 
+// clone?处理 clone 相关逻辑。
 const clone = (value) => JSON.parse(JSON.stringify(value || []));
+// nowIso?处理 nowIso 相关逻辑。
 const nowIso = () => new Date().toISOString();
 
+// setGroupsNotifier：设置运行时状态。
 const setGroupsNotifier = (notifier) => {
   groupsNotifier = typeof notifier === 'function' ? notifier : null;
 };
 
+// notifyGroupUsers?处理 notifyGroupUsers 相关逻辑。
 const notifyGroupUsers = (uids, payload) => {
   if (!groupsNotifier) return;
   const list = Array.from(
@@ -52,16 +61,19 @@ const notifyGroupUsers = (uids, payload) => {
   }
 };
 
+// emitGroupEvent?处理 emitGroupEvent 相关逻辑。
 const emitGroupEvent = (uids, payload) => {
   setImmediate(() => notifyGroupUsers(uids, payload));
 };
 
+// enqueueMutation?处理 enqueueMutation 相关逻辑。
 const enqueueMutation = (task) => {
   const run = mutationQueue.catch(() => undefined).then(task);
   mutationQueue = run.then(() => undefined).catch(() => undefined);
   return run;
 };
 
+// fileExists?处理 fileExists 相关逻辑。
 const fileExists = async (targetPath) => {
   try {
     await fs.access(targetPath);
@@ -71,6 +83,7 @@ const fileExists = async (targetPath) => {
   }
 };
 
+// ensureGroupStorage：确保前置条件与资源可用。
 const ensureGroupStorage = async () => {
   await fs.mkdir(DATA_DIR, { recursive: true });
   if (!(await fileExists(GROUPS_PATH))) {
@@ -78,6 +91,7 @@ const ensureGroupStorage = async () => {
   }
 };
 
+// normalizeMemberUids：归一化外部输入。
 const normalizeMemberUids = (input) => {
   const set = new Set();
   const list = Array.isArray(input) ? input : [];
@@ -90,6 +104,7 @@ const normalizeMemberUids = (input) => {
   return Array.from(set);
 };
 
+// sanitizeMemberNicknames：清洗不可信输入。
 const sanitizeMemberNicknames = (input, memberUids) => {
   const memberSet = new Set(Array.isArray(memberUids) ? memberUids : []);
   const source = input && typeof input === 'object' ? input : {};
@@ -105,6 +120,7 @@ const sanitizeMemberNicknames = (input, memberUids) => {
   return next;
 };
 
+// sanitizeGroup：清洗不可信输入。
 const sanitizeGroup = (input) => {
   const id = Number(input?.id);
   if (!Number.isInteger(id) || id <= 0) return null;
@@ -155,6 +171,7 @@ const sanitizeGroup = (input) => {
   };
 };
 
+// sanitizeGroups：清洗不可信输入。
 const sanitizeGroups = (input) => {
   const source = Array.isArray(input) ? input : [];
   const seen = new Set();
@@ -168,6 +185,7 @@ const sanitizeGroups = (input) => {
   return next;
 };
 
+// readGroups：读取持久化或缓存数据。
 const readGroups = async () => {
   await ensureGroupStorage();
   const now = Date.now();
@@ -193,6 +211,7 @@ const readGroups = async () => {
   return clone(cachedGroups);
 };
 
+// writeGroups：写入持久化数据。
 const writeGroups = async (groups) => {
   await ensureGroupStorage();
   const snapshot = sanitizeGroups(groups);
@@ -206,6 +225,7 @@ const writeGroups = async (groups) => {
   await run;
 };
 
+// getNextGroupId：获取并返回目标数据。
 const getNextGroupId = (groups) => {
   let maxId = GROUP_ID_START - 1;
   groups.forEach((group) => {
@@ -216,12 +236,14 @@ const getNextGroupId = (groups) => {
   return Math.max(maxId + 1, GROUP_ID_START);
 };
 
+// getDisplayName：获取并返回目标数据。
 const getDisplayName = (user) => {
   const nickname = typeof user?.nickname === 'string' ? user.nickname.trim() : '';
   const username = typeof user?.username === 'string' ? user.username.trim() : '';
   return nickname || username || `\u7528\u6237${Number(user?.uid) || ''}`;
 };
 
+// toMemberPreview?处理 toMemberPreview 相关逻辑。
 const toMemberPreview = (user, uid, group) => ({
   uid,
   username: user?.username || '',
@@ -232,6 +254,7 @@ const toMemberPreview = (user, uid, group) => ({
   online: Boolean(user?.online),
 });
 
+// buildDefaultGroupName：构建对外输出数据。
 const buildDefaultGroupName = (inviteOrderUids, users, selfUid) => {
   const nameOrder = [...inviteOrderUids];
   if (!nameOrder.includes(selfUid)) {
@@ -246,12 +269,14 @@ const buildDefaultGroupName = (inviteOrderUids, users, selfUid) => {
   return `${joined}(${Math.max(2, nameOrder.length)})`.slice(0, GROUP_NAME_MAX_LEN);
 };
 
+// isMutualFriend：判断条件是否成立。
 const isMutualFriend = (a, b) =>
   Array.isArray(a?.friends) &&
   Array.isArray(b?.friends) &&
   a.friends.includes(b.uid) &&
   b.friends.includes(a.uid);
 
+// serializeGroup?处理 serializeGroup 相关逻辑。
 const serializeGroup = (group, users, currentUid) => {
   const safeUsers = Array.isArray(users) ? users : [];
   const memberUids = normalizeMemberUids(group?.memberUids);
@@ -275,6 +300,7 @@ const serializeGroup = (group, users, currentUid) => {
   };
 };
 
+// getGroupById：获取并返回目标数据。
 const getGroupById = async (groupId) => {
   const gid = Number(groupId);
   if (!Number.isInteger(gid) || gid <= 0) return null;
@@ -282,17 +308,20 @@ const getGroupById = async (groupId) => {
   return groups.find((group) => group.id === gid) || null;
 };
 
+// getGroupMemberUids：获取并返回目标数据。
 const getGroupMemberUids = async (groupId) => {
   const group = await getGroupById(groupId);
   if (!group) return [];
   return normalizeMemberUids(group.memberUids);
 };
 
+// isUserInGroup：判断条件是否成立。
 const isUserInGroup = async (groupId, uid) => {
   const memberUids = await getGroupMemberUids(groupId);
   return memberUids.includes(Number(uid));
 };
 
+// 路由：GET /list。
 router.get('/list', authenticate, async (req, res) => {
   try {
     await ensureGroupStorage();
@@ -309,6 +338,7 @@ router.get('/list', authenticate, async (req, res) => {
   }
 });
 
+// 路由：GET /detail。
 router.get('/detail', authenticate, async (req, res) => {
   try {
     await ensureGroupStorage();
@@ -335,6 +365,7 @@ router.get('/detail', authenticate, async (req, res) => {
   }
 });
 
+// 路由：POST /create。
 router.post('/create', authenticate, async (req, res) => {
   try {
     await ensureGroupStorage();
@@ -408,6 +439,7 @@ router.post('/create', authenticate, async (req, res) => {
   }
 });
 
+// 路由：POST /update。
 router.post('/update', authenticate, async (req, res) => {
   try {
     await ensureGroupStorage();
@@ -542,6 +574,7 @@ router.post('/update', authenticate, async (req, res) => {
   }
 });
 
+// 路由：POST /leave。
 router.post('/leave', authenticate, async (req, res) => {
   try {
     await ensureGroupStorage();

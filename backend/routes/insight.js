@@ -1,3 +1,8 @@
+/**
+ * 模块说明：洞察工作模块：处理 AI 画像分析与后台任务执行。
+ */
+
+
 import fs from 'fs/promises';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -31,6 +36,7 @@ const GEMINI_PRO_PREVIEW_MODEL = 'gemini-3-pro-preview';
 
 let sqlModulePromise = null;
 
+// decodeHardcodedGeminiKey?处理 decodeHardcodedGeminiKey 相关逻辑。
 const decodeHardcodedGeminiKey = () => {
   try {
     return Buffer.from(HARDCODED_GEMINI_API_KEY_B64, 'base64').toString('utf8').trim();
@@ -39,6 +45,7 @@ const decodeHardcodedGeminiKey = () => {
   }
 };
 
+// toErrorDetail?处理 toErrorDetail 相关逻辑。
 const toErrorDetail = (error) => {
   const detail = {
     message: error instanceof Error ? error.message : String(error),
@@ -59,6 +66,7 @@ const toErrorDetail = (error) => {
   return detail;
 };
 
+// getSqlModule：获取并返回目标数据。
 const getSqlModule = async () => {
   if (!sqlModulePromise) {
     sqlModulePromise = initSqlJs({
@@ -68,12 +76,14 @@ const getSqlModule = async () => {
   return sqlModulePromise;
 };
 
+// toPositiveInt?处理 toPositiveInt 相关逻辑。
 const toPositiveInt = (value, fallback) => {
   const parsed = Number(value);
   if (!Number.isInteger(parsed) || parsed <= 0) return fallback;
   return parsed;
 };
 
+// hasHistoricalProfile：判断是否具备指定状态。
 const hasHistoricalProfile = (user) =>
   Boolean(
     user &&
@@ -82,6 +92,7 @@ const hasHistoricalProfile = (user) =>
       typeof user.aiProfile.analysis === 'object'
   );
 
+// parseJsonSafe：解析并校验输入值。
 const parseJsonSafe = (value, fallback = {}) => {
   try {
     return JSON.parse(value);
@@ -90,6 +101,7 @@ const parseJsonSafe = (value, fallback = {}) => {
   }
 };
 
+// clipText?处理 clipText 相关逻辑。
 const clipText = (value, max = 180) => {
   const normalized = String(value || '')
     .replace(/\s+/g, ' ')
@@ -98,6 +110,7 @@ const clipText = (value, max = 180) => {
   return normalized.length > max ? `${normalized.slice(0, max)}...` : normalized;
 };
 
+// toMessageText?处理 toMessageText 相关逻辑。
 const toMessageText = (row) => {
   const data = parseJsonSafe(row.data, {});
   const type = String(row.type || '').toLowerCase();
@@ -112,6 +125,7 @@ const toMessageText = (row) => {
   return '';
 };
 
+// buildSamples：构建对外输出数据。
 const buildSamples = (rows, totalSentCount) => {
   const now = Date.now();
   const all = rows
@@ -160,6 +174,7 @@ const buildSamples = (rows, totalSentCount) => {
   };
 };
 
+// extractGeminiText：提取请求中的关键信息。
 const extractGeminiText = (payload) => {
   const candidates = Array.isArray(payload?.candidates) ? payload.candidates : [];
   for (const candidate of candidates) {
@@ -173,6 +188,7 @@ const extractGeminiText = (payload) => {
   return '';
 };
 
+// parseModelJson：解析并校验输入值。
 const parseModelJson = (text) => {
   const raw = String(text || '').trim();
   if (!raw) return null;
@@ -203,6 +219,7 @@ const parseModelJson = (text) => {
   return null;
 };
 
+// toNumberConfidence?处理 toNumberConfidence 相关逻辑。
 const toNumberConfidence = (value) => {
   const parsed = Number(value);
   if (!Number.isFinite(parsed)) return 0;
@@ -211,6 +228,7 @@ const toNumberConfidence = (value) => {
   return parsed;
 };
 
+// normalizeAnalysis：归一化外部输入。
 const normalizeAnalysis = (value) => {
   const input = value && typeof value === 'object' ? value : {};
   const preferences = Array.isArray(input.preferences) ? input.preferences : [];
@@ -258,6 +276,7 @@ const normalizeAnalysis = (value) => {
   };
 };
 
+// buildPrompt：构建对外输出数据。
 const buildPrompt = ({ totalSentCount, sampleMeta, sampleText }) => `
 You are a user profiling assistant for a social app.
 Analyze only the user's sent chat messages and return a strict JSON object.
@@ -294,6 +313,7 @@ Chat samples (ordered from newest to oldest):
 ${sampleText}
 `.trim();
 
+// callGemini?处理 callGemini 相关逻辑。
 const callGemini = async ({ apiKey, prompt, requestedModel }) => {
   const allowedModels = new Set([GEMINI_FLASH_PREVIEW_MODEL, GEMINI_PRO_PREVIEW_MODEL]);
   const envModels = String(process.env.GEMINI_MODELS || '')
@@ -371,6 +391,7 @@ const callGemini = async ({ apiKey, prompt, requestedModel }) => {
   throw finalError;
 };
 
+// getDb：获取并返回目标数据。
 const getDb = async () => {
   let file;
   try {
@@ -382,6 +403,7 @@ const getDb = async () => {
   return new SQL.Database(new Uint8Array(file));
 };
 
+// loadMessageStatsMap?处理 loadMessageStatsMap 相关逻辑。
 const loadMessageStatsMap = async ({ now = Date.now() } = {}) => {
   const db = await getDb();
   if (!db) return new Map();
@@ -437,6 +459,7 @@ const loadMessageStatsMap = async ({ now = Date.now() } = {}) => {
   }
 };
 
+// loadMessagesForUser?处理 loadMessagesForUser 相关逻辑。
 const loadMessagesForUser = async (uid) => {
   const db = await getDb();
   if (!db) return { totalSentCount: 0, rows: [] };

@@ -1,3 +1,8 @@
+/**
+ * 模块说明：在线状态模块：管理心跳、超时与用户在线离线状态。
+ */
+
+
 const HEARTBEAT_TIMEOUT_MS = 45 * 1000;
 const HEARTBEAT_CHECK_MS = 5 * 1000;
 
@@ -7,14 +12,17 @@ let statusChangeHandler = null;
 let timeoutHandler = null;
 let heartbeatTimer = null;
 
+// setStatusChangeHandler：设置运行时状态。
 const setStatusChangeHandler = (handler) => {
   statusChangeHandler = typeof handler === 'function' ? handler : null;
 };
 
+// setTimeoutHandler：设置运行时状态。
 const setTimeoutHandler = (handler) => {
   timeoutHandler = typeof handler === 'function' ? handler : null;
 };
 
+// touchHeartbeat?处理 touchHeartbeat 相关逻辑。
 const touchHeartbeat = (uid) => {
   if (!Number.isInteger(uid)) return false;
   lastHeartbeatAt.set(uid, Date.now());
@@ -28,6 +36,7 @@ const touchHeartbeat = (uid) => {
   return false;
 };
 
+// markDisconnected?处理 markDisconnected 相关逻辑。
 const markDisconnected = (uid) => {
   if (!Number.isInteger(uid)) return;
   lastHeartbeatAt.delete(uid);
@@ -39,6 +48,7 @@ const markDisconnected = (uid) => {
   }
 };
 
+// isUserOnline：判断条件是否成立。
 const isUserOnline = (user) => {
   if (!user || !Number.isInteger(user.uid)) return false;
   if (onlineState.has(user.uid)) {
@@ -47,6 +57,7 @@ const isUserOnline = (user) => {
   return user.online === true;
 };
 
+// startHeartbeatMonitor：启动后台流程。
 const startHeartbeatMonitor = () => {
   if (heartbeatTimer) return;
   heartbeatTimer = setInterval(() => {
@@ -68,6 +79,7 @@ const startHeartbeatMonitor = () => {
   }, HEARTBEAT_CHECK_MS);
 };
 
+// stopHeartbeatMonitor：停止后台流程。
 const stopHeartbeatMonitor = () => {
   if (!heartbeatTimer) return;
   clearInterval(heartbeatTimer);

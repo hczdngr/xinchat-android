@@ -1,3 +1,8 @@
+/**
+ * 模块说明：管理路由模块：提供用户与商品管理及瓶颈诊断接口。
+ */
+
+
 import express from 'express';
 import fs from 'fs/promises';
 import path from 'path';
@@ -42,13 +47,17 @@ let productsLoadInFlight = null;
 let productsWriteQueue = Promise.resolve();
 let productsVersion = 0;
 
+// asyncRoute?处理 asyncRoute 相关逻辑。
 const asyncRoute = (handler) => (req, res, next) => {
   Promise.resolve(handler(req, res, next)).catch(next);
 };
 
+// hasOwn：判断是否具备指定状态。
 const hasOwn = (obj, key) => Object.prototype.hasOwnProperty.call(obj, key);
+// isValidUid：判断条件是否成立。
 const isValidUid = (value) => Number.isInteger(value) && value > 0 && value <= SAFE_MAX_UID;
 
+// toPositiveInt?处理 toPositiveInt 相关逻辑。
 const toPositiveInt = (value, fallback, min = 1, max = Number.MAX_SAFE_INTEGER) => {
   const parsed = Number.parseInt(String(value || ''), 10);
   if (!Number.isInteger(parsed) || parsed < min) return fallback;
@@ -56,15 +65,18 @@ const toPositiveInt = (value, fallback, min = 1, max = Number.MAX_SAFE_INTEGER) 
   return parsed;
 };
 
+// sanitizeText：清洗不可信输入。
 const sanitizeText = (value, maxLen = 200) =>
   typeof value === 'string' ? value.trim().slice(0, maxLen) : '';
 
+// normalizeUserStatus：归一化外部输入。
 const normalizeUserStatus = (user) => {
   if (typeof user?.deletedAt === 'string' && user.deletedAt.trim()) return 'deleted';
   if (user?.blocked === true) return 'blocked';
   return 'active';
 };
 
+// resolveTokenCount：解析并确定最终值。
 const resolveTokenCount = (user) => {
   const list = Array.isArray(user?.tokens)
     ? user.tokens.filter((entry) => entry && typeof entry.token === 'string' && entry.token)
@@ -74,6 +86,7 @@ const resolveTokenCount = (user) => {
   return list.some((entry) => entry.token === user.token) ? list.length : list.length + 1;
 };
 
+// toUserSummary?处理 toUserSummary 相关逻辑。
 const toUserSummary = (user) => ({
   uid: Number(user?.uid) || 0,
   username: String(user?.username || ''),
@@ -91,6 +104,7 @@ const toUserSummary = (user) => ({
   lastLoginAt: typeof user?.lastLoginAt === 'string' ? user.lastLoginAt : '',
 });
 
+// toUserDetail?处理 toUserDetail 相关逻辑。
 const toUserDetail = (user) => ({
   ...toUserSummary(user),
   gender: String(user?.gender || ''),
@@ -105,6 +119,7 @@ const toUserDetail = (user) => ({
   aiProfileUpdatedAt: typeof user?.aiProfile?.updatedAt === 'string' ? user.aiProfile.updatedAt : '',
 });
 
+// parseAdminToken：解析并校验输入值。
 const parseAdminToken = (req) => {
   const auth = String(req.headers.authorization || '').trim();
   if (auth.toLowerCase().startsWith('bearer ')) {
@@ -115,6 +130,7 @@ const parseAdminToken = (req) => {
   return String(req.query?.adminToken || '').trim();
 };
 
+// requireAdmin?处理 requireAdmin 相关逻辑。
 const requireAdmin = (req, res, next) => {
   const token = parseAdminToken(req);
   if (ADMIN_API_TOKEN) {
@@ -135,17 +151,20 @@ const requireAdmin = (req, res, next) => {
   next();
 };
 
+// cloneValue?处理 cloneValue 相关逻辑。
 const cloneValue = (value) => {
   if (typeof structuredClone === 'function') return structuredClone(value);
   return JSON.parse(JSON.stringify(value));
 };
 
+// normalizeProductStatus：归一化外部输入。
 const normalizeProductStatus = (value, fallback = 'draft') => {
   const normalized = String(value || '').trim().toLowerCase();
   if (PRODUCT_STATUS_SET.has(normalized)) return normalized;
   return fallback;
 };
 
+// normalizeTags：归一化外部输入。
 const normalizeTags = (value) => {
   const list = Array.isArray(value) ? value : typeof value === 'string' ? value.split(',') : [];
   return Array.from(
@@ -157,6 +176,7 @@ const normalizeTags = (value) => {
     )
   );
 };
+// normalizeProductRecord：归一化外部输入。
 const normalizeProductRecord = (record, { fallbackId, nowIso }) => {
   if (!record || typeof record !== 'object') return null;
   const name = sanitizeText(record.name, 120);
@@ -187,12 +207,14 @@ const normalizeProductRecord = (record, { fallbackId, nowIso }) => {
   };
 };
 
+// setProductsCache：设置运行时状态。
 const setProductsCache = (products, timestamp = Date.now()) => {
   productsCache = Array.isArray(products) ? products : [];
   productsCacheAt = timestamp;
   productsVersion += 1;
 };
 
+// ensureProductsStorage：确保前置条件与资源可用。
 const ensureProductsStorage = async () => {
   await fs.mkdir(DATA_DIR, { recursive: true });
   try {
@@ -202,18 +224,21 @@ const ensureProductsStorage = async () => {
   }
 };
 
+// queueProductsWriteTask：将任务按顺序排队处理。
 const queueProductsWriteTask = async (task) => {
   const run = productsWriteQueue.then(task);
   productsWriteQueue = run.catch(() => {});
   return run;
 };
 
+// persistProductsSnapshot?处理 persistProductsSnapshot 相关逻辑。
 const persistProductsSnapshot = async (snapshot) => {
   await fs.writeFile(PRODUCTS_PATH_TMP, JSON.stringify(snapshot, null, 2), 'utf-8');
   await fs.rename(PRODUCTS_PATH_TMP, PRODUCTS_PATH);
   setProductsCache(snapshot, Date.now());
 };
 
+// loadProductsFromDisk?处理 loadProductsFromDisk 相关逻辑。
 const loadProductsFromDisk = async () => {
   await ensureProductsStorage();
   const raw = await fs.readFile(PRODUCTS_PATH, 'utf-8');
@@ -235,6 +260,7 @@ const loadProductsFromDisk = async () => {
   return productsCache || [];
 };
 
+// readProductsCached：读取持久化或缓存数据。
 const readProductsCached = async ({ forceRefresh = false } = {}) => {
   const now = Date.now();
   if (
@@ -262,6 +288,7 @@ const readProductsCached = async ({ forceRefresh = false } = {}) => {
   return productsCache || [];
 };
 
+// mutateProducts?处理 mutateProducts 相关逻辑。
 const mutateProducts = async (mutator, { defaultChanged = true } = {}) => {
   if (typeof mutator !== 'function') {
     throw new TypeError('mutateProducts requires a function mutator.');
@@ -287,6 +314,7 @@ const mutateProducts = async (mutator, { defaultChanged = true } = {}) => {
   return { changed, result };
 };
 
+// getNextProductId：获取并返回目标数据。
 const getNextProductId = (products) => {
   let maxId = 0;
   (products || []).forEach((item) => {
@@ -298,12 +326,14 @@ const getNextProductId = (products) => {
   return maxId + 1;
 };
 
+// buildProductsCacheInfo：构建对外输出数据。
 const buildProductsCacheInfo = () => ({
   version: productsVersion,
   cachedAt: productsCacheAt ? new Date(productsCacheAt).toISOString() : null,
   ageMs: productsCacheAt ? Math.max(0, Date.now() - productsCacheAt) : null,
 });
 
+// aggregateSlowEndpoints?处理 aggregateSlowEndpoints 相关逻辑。
 const aggregateSlowEndpoints = (snapshot) => {
   const map = new Map();
   (snapshot?.histograms || [])
@@ -325,6 +355,7 @@ const aggregateSlowEndpoints = (snapshot) => {
     .slice(0, 10);
 };
 
+// aggregateErrorEndpoints?处理 aggregateErrorEndpoints 相关逻辑。
 const aggregateErrorEndpoints = (snapshot) => {
   const map = new Map();
   (snapshot?.counters || [])
@@ -348,6 +379,7 @@ const aggregateErrorEndpoints = (snapshot) => {
 };
 
 router.use(requireAdmin);
+// 路由：GET /users/summary。
 router.get(
   '/users/summary',
   asyncRoute(async (req, res) => {
@@ -380,6 +412,7 @@ router.get(
   })
 );
 
+// 路由：GET /users。
 router.get(
   '/users',
   asyncRoute(async (req, res) => {
@@ -422,6 +455,7 @@ router.get(
   })
 );
 
+// 路由：GET /users/detail。
 router.get(
   '/users/detail',
   asyncRoute(async (req, res) => {
@@ -442,6 +476,7 @@ router.get(
   })
 );
 
+// 路由：POST /users/update。
 router.post(
   '/users/update',
   asyncRoute(async (req, res) => {
@@ -575,6 +610,7 @@ router.post(
   })
 );
 
+// 路由：POST /users/revoke-all。
 router.post(
   '/users/revoke-all',
   asyncRoute(async (req, res) => {
@@ -623,6 +659,7 @@ router.post(
   })
 );
 
+// 路由：POST /users/soft-delete。
 router.post(
   '/users/soft-delete',
   asyncRoute(async (req, res) => {
@@ -665,6 +702,7 @@ router.post(
     res.json({ success: true, data: mutation.result });
   })
 );
+// 路由：GET /products/summary。
 router.get(
   '/products/summary',
   asyncRoute(async (req, res) => {
@@ -723,6 +761,7 @@ router.get(
   })
 );
 
+// 路由：GET /products。
 router.get(
   '/products',
   asyncRoute(async (req, res) => {
@@ -764,6 +803,7 @@ router.get(
   })
 );
 
+// 路由：POST /products/create。
 router.post(
   '/products/create',
   asyncRoute(async (req, res) => {
@@ -817,6 +857,7 @@ router.post(
   })
 );
 
+// 路由：POST /products/update。
 router.post(
   '/products/update',
   asyncRoute(async (req, res) => {
@@ -936,6 +977,7 @@ router.post(
   })
 );
 
+// 路由：DELETE /products/delete。
 router.delete(
   '/products/delete',
   asyncRoute(async (req, res) => {
@@ -964,6 +1006,7 @@ router.delete(
   })
 );
 
+// 路由：GET /bottlenecks。
 router.get(
   '/bottlenecks',
   asyncRoute(async (req, res) => {
