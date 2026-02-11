@@ -260,7 +260,7 @@ export default function GroupChatSearch() {
   );
 
   useEffect(() => {
-    if (!searched || loading) return;
+    if (!searched) return;
     performSearch().catch(() => undefined);
   }, [filter, performSearch, searched]);
 
