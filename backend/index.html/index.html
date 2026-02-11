@@ -1,960 +1,470 @@
-<!doctype html>
+﻿<!doctype html>
 <html lang="zh-CN">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>XinChat Admin Console</title>
-    <link
-      rel="stylesheet"
-      href="https://cdn.jsdelivr.net/npm/@tabler/core@1.0.0-beta20/dist/css/tabler.min.css"
-    />
+    <title>XinChat Admin Pro</title>
+    <link rel="stylesheet" href="https://unpkg.com/antd@5.27.0/dist/reset.css" />
     <style>
-      :root {
-        --xin-bg: linear-gradient(120deg, #f6f9ff 0%, #eef4ff 45%, #edf7f3 100%);
-      }
+      html, body, #root { height: 100%; }
       body {
-        background: var(--xin-bg);
+        margin: 0;
+        background: radial-gradient(circle at 10% 10%, #edf7ff 0%, #f4fbf5 45%, #ffffff 100%);
+        font-family: 'PingFang SC', 'Microsoft YaHei', sans-serif;
       }
-      .metric-value {
-        font-size: 1.45rem;
-        font-weight: 700;
-        line-height: 1.2;
-      }
-      .mono {
-        font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono',
-          'Courier New', monospace;
-      }
-      .chart-wrap {
-        position: relative;
-        min-height: 240px;
-      }
-      .route-list {
-        max-height: 24rem;
-        overflow: auto;
-      }
-      .route-item {
-        cursor: pointer;
-      }
-      .response-box {
-        min-height: 12rem;
+      .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Courier New', monospace; }
+      .glass { background: linear-gradient(135deg, rgba(255,255,255,0.88), rgba(244,250,255,0.95)); backdrop-filter: blur(5px); }
+      .resp {
         white-space: pre-wrap;
-        background: #0f172a;
-        color: #e2e8f0;
-        border-radius: 0.5rem;
-        padding: 0.75rem;
-      }
-      .table-fix {
-        max-height: 520px;
+        word-break: break-word;
+        background: #0b1020;
+        color: #dbeafe;
+        border-radius: 10px;
+        padding: 12px;
+        max-height: 420px;
         overflow: auto;
-      }
-      .pill {
-        border-radius: 999px;
-        padding: 0.15rem 0.5rem;
-        font-size: 0.75rem;
-      }
-      .pill-active {
-        background: #d3f9d8;
-        color: #2b8a3e;
-      }
-      .pill-blocked {
-        background: #ffe3e3;
-        color: #c92a2a;
-      }
-      .pill-deleted {
-        background: #e9ecef;
-        color: #495057;
-      }
-      @media (max-width: 767.98px) {
-        .metric-value {
-          font-size: 1.2rem;
-        }
-        .chart-wrap {
-          min-height: 200px;
-        }
       }
     </style>
   </head>
   <body>
-    <div class="page">
-      <header class="navbar navbar-expand-md navbar-light d-print-none">
-        <div class="container-xl">
-          <h1 class="navbar-brand mb-0">XinChat Admin Console</h1>
-          <div class="ms-auto d-flex gap-2">
-            <button id="refreshAllBtn" class="btn btn-primary">立即刷新</button>
-            <span id="globalStatus" class="text-muted small align-self-center">等待加载...</span>
-          </div>
-        </div>
-      </header>
+    <div id="root"></div>
 
-      <div class="page-wrapper">
-        <div class="page-body">
-          <div class="container-xl">
-            <div class="card mb-3">
-              <div class="card-body">
-                <div class="row g-3 align-items-end">
-                  <div class="col-md-4">
-                    <label class="form-label">Admin Token</label>
-                    <input id="adminToken" class="form-control mono" placeholder="可留空（开发环境）" />
-                  </div>
-                  <div class="col-md-4">
-                    <label class="form-label">Bearer Token（API Lab）</label>
-                    <input id="authToken" class="form-control mono" placeholder="仅 API 调试使用" />
-                  </div>
-                  <div class="col-md-4">
-                    <label class="form-label">自动刷新间隔（秒）</label>
-                    <div class="input-group">
-                      <input id="refreshSeconds" type="number" min="3" max="120" value="10" class="form-control mono" />
-                      <button id="applyRefreshBtn" class="btn btn-outline-secondary">应用</button>
-                    </div>
-                  </div>
-                </div>
-              </div>
-            </div>
+    <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+    <script>if (!window.React) { document.write('<script src="https://cdn.jsdelivr.net/npm/react@18/umd/react.production.min.js"><\\/script>'); }</script>
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+    <script>if (!window.ReactDOM) { document.write('<script src="https://cdn.jsdelivr.net/npm/react-dom@18/umd/react-dom.production.min.js"><\\/script>'); }</script>
+    <script src="https://unpkg.com/dayjs@1/dayjs.min.js"></script>
+    <script>if (!window.dayjs) { document.write('<script src="https://cdn.jsdelivr.net/npm/dayjs@1/dayjs.min.js"><\\/script>'); }</script>
+    <script src="https://unpkg.com/antd@5.27.0/dist/antd.min.js"></script>
+    <script>if (!window.antd) { document.write('<script src="https://cdn.jsdelivr.net/npm/antd@5.27.0/dist/antd.min.js"><\\/script>'); }</script>
+    <script src="https://unpkg.com/@ant-design/icons@5.6.1/dist/index.umd.js"></script>
+    <script>if (!window.icons) { document.write('<script src="https://cdn.jsdelivr.net/npm/@ant-design/icons@5.6.1/dist/index.umd.js"><\\/script>'); }</script>
+    <script src="https://unpkg.com/@ant-design/pro-components@2.8.6/dist/pro-components.min.js"></script>
+    <script>if (!window.ProComponents) { document.write('<script src="https://cdn.jsdelivr.net/npm/@ant-design/pro-components@2.8.6/dist/pro-components.min.js"><\\/script>'); }</script>
+    <script src="https://unpkg.com/@babel/standalone@7.28.5/babel.min.js"></script>
 
-            <ul class="nav nav-tabs" id="mainTabs" role="tablist">
-              <li class="nav-item" role="presentation">
-                <button class="nav-link active" data-bs-toggle="tab" data-bs-target="#tab-overview" type="button" role="tab">概览</button>
-              </li>
-              <li class="nav-item" role="presentation">
-                <button class="nav-link" data-bs-toggle="tab" data-bs-target="#tab-users" type="button" role="tab">用户管理</button>
-              </li>
-              <li class="nav-item" role="presentation">
-                <button class="nav-link" data-bs-toggle="tab" data-bs-target="#tab-products" type="button" role="tab">产品管理</button>
-              </li>
-              <li class="nav-item" role="presentation">
-                <button class="nav-link" data-bs-toggle="tab" data-bs-target="#tab-api" type="button" role="tab">API Lab</button>
-              </li>
-            </ul>
-
-            <div class="tab-content pt-3">
-              <section class="tab-pane fade show active" id="tab-overview" role="tabpanel">
-                <div class="row row-deck row-cards">
-                  <div class="col-sm-6 col-lg-2">
-                    <div class="card"><div class="card-body"><div class="text-secondary mb-1">运行时长</div><div id="mUptime" class="metric-value">-</div></div></div>
-                  </div>
-                  <div class="col-sm-6 col-lg-2">
-                    <div class="card"><div class="card-body"><div class="text-secondary mb-1">WS 连接</div><div id="mWsSockets" class="metric-value">-</div></div></div>
-                  </div>
-                  <div class="col-sm-6 col-lg-2">
-                    <div class="card"><div class="card-body"><div class="text-secondary mb-1">在线用户</div><div id="mWsUsers" class="metric-value">-</div></div></div>
-                  </div>
-                  <div class="col-sm-6 col-lg-2">
-                    <div class="card"><div class="card-body"><div class="text-secondary mb-1">堆使用率</div><div id="mHeapRatio" class="metric-value">-</div></div></div>
-                  </div>
-                  <div class="col-sm-6 col-lg-2">
-                    <div class="card"><div class="card-body"><div class="text-secondary mb-1">用户总数</div><div id="mUsersTotal" class="metric-value">-</div></div></div>
-                  </div>
-                  <div class="col-sm-6 col-lg-2">
-                    <div class="card"><div class="card-body"><div class="text-secondary mb-1">产品总数</div><div id="mProductsTotal" class="metric-value">-</div></div></div>
-                  </div>
-                </div>
-
-                <div class="row row-cards mt-1">
-                  <div class="col-lg-6">
-                    <div class="card">
-                      <div class="card-header"><h3 class="card-title">连接趋势</h3></div>
-                      <div class="card-body chart-wrap"><canvas id="runtimeChart"></canvas></div>
-                    </div>
-                  </div>
-                  <div class="col-lg-6">
-                    <div class="card">
-                      <div class="card-header"><h3 class="card-title">内存趋势（MB）</h3></div>
-                      <div class="card-body chart-wrap"><canvas id="memoryChart"></canvas></div>
-                    </div>
-                  </div>
-                </div>
-
-                <div class="row row-cards mt-1">
-                  <div class="col-lg-6">
-                    <div class="card">
-                      <div class="card-header"><h3 class="card-title">慢接口 Top 10（Avg ms）</h3></div>
-                      <div class="card-body chart-wrap"><canvas id="slowChart"></canvas></div>
-                    </div>
-                  </div>
-                  <div class="col-lg-6">
-                    <div class="card">
-                      <div class="card-header"><h3 class="card-title">5xx 热点 Top 10</h3></div>
-                      <div class="card-body chart-wrap"><canvas id="errorChart"></canvas></div>
-                    </div>
-                  </div>
-                </div>
-
-                <div class="row row-cards mt-1">
-                  <div class="col-lg-6">
-                    <div class="card">
-                      <div class="card-header"><h3 class="card-title">用户状态分布</h3></div>
-                      <div class="card-body chart-wrap"><canvas id="usersPieChart"></canvas></div>
-                    </div>
-                  </div>
-                  <div class="col-lg-6">
-                    <div class="card">
-                      <div class="card-header"><h3 class="card-title">产品状态分布</h3></div>
-                      <div class="card-body chart-wrap"><canvas id="productsPieChart"></canvas></div>
-                    </div>
-                  </div>
-                </div>
-
-                <div class="row row-cards mt-1">
-                  <div class="col-lg-6">
-                    <div class="card">
-                      <div class="card-header"><h3 class="card-title">瓶颈建议</h3></div>
-                      <div class="card-body"><ul id="recommendationList" class="mb-0"></ul></div>
-                    </div>
-                  </div>
-                  <div class="col-lg-6">
-                    <div class="card">
-                      <div class="card-header"><h3 class="card-title">关键计数器 Top 12</h3></div>
-                      <div class="table-responsive table-fix">
-                        <table class="table table-vcenter card-table"><thead><tr><th>指标</th><th class="text-end">值</th></tr></thead><tbody id="counterTbody"></tbody></table>
-                      </div>
-                    </div>
-                  </div>
-                </div>
-              </section>
-
-              <section class="tab-pane fade" id="tab-users" role="tabpanel">
-                <div class="card mb-3">
-                  <div class="card-body">
-                    <div class="row g-2 align-items-end">
-                      <div class="col-md-4"><label class="form-label">搜索</label><input id="usersQuery" class="form-control" placeholder="UID / username / nickname / domain" /></div>
-                      <div class="col-md-2"><label class="form-label">状态</label><select id="usersStatus" class="form-select"><option value="all">全部</option><option value="active">active</option><option value="blocked">blocked</option><option value="deleted">deleted</option></select></div>
-                      <div class="col-md-2"><label class="form-label">每页</label><select id="usersPageSize" class="form-select"><option>20</option><option>50</option><option>100</option></select></div>
-                      <div class="col-md-4 d-flex gap-2"><button id="usersSearchBtn" class="btn btn-primary">查询</button><button id="usersReloadBtn" class="btn btn-outline-secondary">刷新</button><span id="usersStatusText" class="text-muted small align-self-center"></span></div>
-                    </div>
-                  </div>
-                </div>
-
-                <div class="row row-cards">
-                  <div class="col-lg-8">
-                    <div class="card">
-                      <div class="table-responsive table-fix">
-                        <table class="table table-vcenter card-table" id="usersTable">
-                          <thead><tr><th>UID</th><th>账号</th><th>昵称</th><th>状态</th><th>在线</th><th>令牌</th><th>好友</th><th>最后登录</th><th>操作</th></tr></thead>
-                          <tbody id="usersTbody"></tbody>
-                        </table>
-                      </div>
-                    </div>
-                  </div>
-                  <div class="col-lg-4">
-                    <div class="card mb-3">
-                      <div class="card-header"><h3 class="card-title">用户编辑</h3></div>
-                      <div class="card-body">
-                        <div class="mb-2"><label class="form-label">UID</label><input id="editUid" class="form-control mono" readonly /></div>
-                        <div class="mb-2"><label class="form-label">昵称</label><input id="editNickname" class="form-control" maxlength="36" /></div>
-                        <div class="mb-2"><label class="form-label">签名</label><input id="editSignature" class="form-control" maxlength="80" /></div>
-                        <div class="mb-2"><label class="form-label">域名</label><input id="editDomain" class="form-control" maxlength="253" /></div>
-                        <div class="mb-2"><label class="form-label">状态</label><select id="editStatus" class="form-select"><option value="active">active</option><option value="blocked">blocked</option><option value="deleted">deleted</option></select></div>
-                        <div class="d-flex gap-2 mt-3"><button id="saveUserBtn" class="btn btn-primary">保存</button><button id="revokeUserBtn" class="btn btn-outline-danger">注销全部会话</button></div>
-                      </div>
-                    </div>
-                    <div class="card">
-                      <div class="card-header"><h3 class="card-title">用户详情</h3></div>
-                      <div class="card-body"><pre id="userDetailBox" class="response-box mono">请选择用户...</pre></div>
-                    </div>
-                  </div>
-                </div>
-              </section>
-              <section class="tab-pane fade" id="tab-products" role="tabpanel">
-                <div class="card mb-3">
-                  <div class="card-body">
-                    <div class="row g-2 align-items-end">
-                      <div class="col-md-4"><label class="form-label">搜索</label><input id="productsQuery" class="form-control" placeholder="ID / name / sku / category" /></div>
-                      <div class="col-md-2"><label class="form-label">状态</label><select id="productsStatus" class="form-select"><option value="all">全部</option><option value="active">active</option><option value="inactive">inactive</option><option value="draft">draft</option><option value="archived">archived</option></select></div>
-                      <div class="col-md-2"><label class="form-label">每页</label><select id="productsPageSize" class="form-select"><option>20</option><option>50</option><option>100</option></select></div>
-                      <div class="col-md-4 d-flex gap-2"><button id="productsSearchBtn" class="btn btn-primary">查询</button><button id="productsReloadBtn" class="btn btn-outline-secondary">刷新</button><span id="productsStatusText" class="text-muted small align-self-center"></span></div>
-                    </div>
-                  </div>
-                </div>
-
-                <div class="row row-cards">
-                  <div class="col-lg-8">
-                    <div class="card">
-                      <div class="table-responsive table-fix">
-                        <table class="table table-vcenter card-table">
-                          <thead><tr><th>ID</th><th>名称</th><th>SKU</th><th>状态</th><th class="text-end">价格</th><th class="text-end">库存</th><th class="text-end">销量</th><th>更新时间</th><th>操作</th></tr></thead>
-                          <tbody id="productsTbody"></tbody>
-                        </table>
-                      </div>
-                    </div>
-                  </div>
-                  <div class="col-lg-4">
-                    <div class="card">
-                      <div class="card-header"><h3 class="card-title">产品编辑 / 新建</h3></div>
-                      <div class="card-body">
-                        <div class="mb-2"><label class="form-label">ID（新建留空）</label><input id="pId" class="form-control mono" /></div>
-                        <div class="mb-2"><label class="form-label">名称</label><input id="pName" class="form-control" /></div>
-                        <div class="mb-2"><label class="form-label">SKU</label><input id="pSku" class="form-control" /></div>
-                        <div class="mb-2"><label class="form-label">分类</label><input id="pCategory" class="form-control" /></div>
-                        <div class="mb-2"><label class="form-label">状态</label><select id="pStatus" class="form-select"><option value="active">active</option><option value="inactive">inactive</option><option value="draft">draft</option><option value="archived">archived</option></select></div>
-                        <div class="row g-2">
-                          <div class="col-6"><label class="form-label">价格</label><input id="pPrice" class="form-control mono" value="0" /></div>
-                          <div class="col-6"><label class="form-label">成本</label><input id="pCost" class="form-control mono" value="0" /></div>
-                          <div class="col-6"><label class="form-label">库存</label><input id="pStock" class="form-control mono" value="0" /></div>
-                          <div class="col-6"><label class="form-label">销量</label><input id="pSales" class="form-control mono" value="0" /></div>
-                        </div>
-                        <div class="mb-2 mt-2"><label class="form-label">标签（逗号分隔）</label><input id="pTags" class="form-control" /></div>
-                        <div class="mb-2"><label class="form-label">描述</label><textarea id="pDesc" rows="3" class="form-control"></textarea></div>
-                        <div class="d-flex gap-2"><button id="saveProductBtn" class="btn btn-primary">保存</button><button id="createProductBtn" class="btn btn-outline-success">新建</button><button id="clearProductBtn" class="btn btn-outline-secondary">清空</button></div>
-                      </div>
-                    </div>
-                  </div>
-                </div>
-              </section>
-
-              <section class="tab-pane fade" id="tab-api" role="tabpanel">
-                <div class="row row-cards">
-                  <div class="col-lg-5">
-                    <div class="card">
-                      <div class="card-header"><h3 class="card-title">接口列表</h3></div>
-                      <div class="card-body">
-                        <div id="routeList" class="list-group route-list"></div>
-                      </div>
-                    </div>
-                  </div>
-                  <div class="col-lg-7">
-                    <div class="card">
-                      <div class="card-header"><h3 class="card-title">请求构造</h3></div>
-                      <div class="card-body">
-                        <div class="row g-2 mb-2">
-                          <div class="col-4"><label class="form-label">Method</label><input id="httpMethod" class="form-control mono" readonly /></div>
-                          <div class="col-8"><label class="form-label">Path</label><input id="httpPath" class="form-control mono" /></div>
-                        </div>
-                        <div class="mb-2"><label class="form-label">模板</label><select id="templateSelect" class="form-select"></select></div>
-                        <div class="mb-2"><label class="form-label">JSON Body</label><textarea id="httpPayload" class="form-control mono" rows="8"></textarea></div>
-                        <div class="d-flex gap-2 mb-2"><button id="sendRequestBtn" class="btn btn-primary">发送请求</button><button id="clearResponseBtn" class="btn btn-outline-secondary">清空响应</button></div>
-                        <div id="routeHint" class="text-muted small mb-2">-</div>
-                        <div id="httpResponse" class="response-box mono">等待请求...</div>
-                      </div>
-                    </div>
-                  </div>
-                </div>
-              </section>
-            </div>
-          </div>
-        </div>
-      </div>
-    </div>
-
-    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.6/dist/chart.umd.min.js"></script>
-    <script>
-      const MAX_HISTORY_POINTS = 42;
-      const state = {
-        refreshMs: 10000,
-        timer: null,
-        routes: [],
-        selectedRouteId: '',
-        users: [],
-        selectedUser: null,
-        products: [],
-      };
-
-      const charts = {
-        runtime: null,
-        memory: null,
-        slow: null,
-        error: null,
-        usersPie: null,
-        productsPie: null,
-      };
-
-      const historyState = [];
-
-      const el = {
-        globalStatus: document.getElementById('globalStatus'),
-        refreshAllBtn: document.getElementById('refreshAllBtn'),
-        refreshSeconds: document.getElementById('refreshSeconds'),
-        applyRefreshBtn: document.getElementById('applyRefreshBtn'),
-        adminToken: document.getElementById('adminToken'),
-        authToken: document.getElementById('authToken'),
-      };
-
-      const pretty = (value) => {
-        if (typeof value === 'string') return value;
-        try {
-          return JSON.stringify(value, null, 2);
-        } catch {
-          return String(value);
+    <script type="text/babel" data-presets="env,react">
+      if (!window.React || !window.ReactDOM || !window.antd || !window.ProComponents || !window.icons) {
+        const root = document.getElementById('root');
+        if (root) {
+          root.innerHTML = '<div style="padding:24px;font-family:Segoe UI,Microsoft YaHei,sans-serif;color:#b91c1c;">后台依赖加载失败，请刷新页面或关闭会注入脚本的浏览器扩展后重试。</div>';
         }
-      };
+        throw new Error('Admin dependencies failed to load.');
+      }
+      const React = window.React;
+      const ReactDOM = window.ReactDOM;
+      const antd = window.antd;
+      const ProComponents = window.ProComponents;
+      const icons = window.icons;
+      const { useState, useEffect, useMemo, useRef, useCallback } = React;
+      const { ConfigProvider, Card, Row, Col, Space, Tag, Button, Input, InputNumber, Select, Form, Modal, Drawer, Alert, Popconfirm, Typography } = antd;
+      const { ProLayout, PageContainer, ProTable, ProDescriptions } = ProComponents;
+      const { DashboardOutlined, TeamOutlined, MessageOutlined, ApiOutlined, ReloadOutlined, EditOutlined, DeleteOutlined, EyeOutlined, StopOutlined } = icons;
+      const { Text, Paragraph } = Typography;
 
-      const safeJson = async (res) => {
-        const text = await res.text();
-        try {
-          return JSON.parse(text);
-        } catch {
-          return { raw: text };
-        }
-      };
+      const types = ['text','image','video','voice','gif','file','card','call'];
+      const reviewStatus = ['unreviewed','approved','flagged','blocked','deleted'];
+      const riskLevels = ['low','medium','high'];
 
-      const fmtNumber = (value, digits = 0) => {
-        const num = Number(value);
-        if (!Number.isFinite(num)) return '-';
-        return num.toLocaleString('zh-CN', {
-          minimumFractionDigits: digits,
-          maximumFractionDigits: digits,
-        });
-      };
+      const fmtNum = (v,d=0)=>Number.isFinite(Number(v))?Number(v).toLocaleString('zh-CN',{minimumFractionDigits:d,maximumFractionDigits:d}):'-';
+      const fmtTime = (v)=>{ const d=new Date(v||''); return Number.isNaN(d.getTime())?'-':d.toLocaleString('zh-CN',{hour12:false}); };
+      const fmtDur = (ms)=>{ const s=Math.max(0,Math.floor(Number(ms||0)/1000)); const h=Math.floor(s/3600); const m=Math.floor((s%3600)/60); const r=s%60; return h>0?`${h}h ${m}m ${r}s`:`${m}m ${r}s`; };
+      const toTs = (v)=>{ if(!v) return ''; if(typeof v==='number') return String(v); if(typeof v==='string') return v; if(typeof v.valueOf==='function'){ const n=Number(v.valueOf()); return Number.isFinite(n)&&n>0?String(n):'';} return ''; };
 
-      const fmtDuration = (ms) => {
-        const total = Math.max(0, Math.floor(Number(ms || 0) / 1000));
-        const d = Math.floor(total / 86400);
-        const h = Math.floor((total % 86400) / 3600);
-        const m = Math.floor((total % 3600) / 60);
-        const s = total % 60;
-        if (d > 0) return `${d}天 ${h}小时 ${m}分`;
-        if (h > 0) return `${h}小时 ${m}分 ${s}秒`;
-        return `${m}分 ${s}秒`;
-      };
+      function App(){
+        const [path,setPath] = useState('/dashboard');
+        const [adminToken,setAdminToken] = useState(localStorage.getItem('xinchat_admin_token')||'');
+        const [authToken,setAuthToken] = useState(localStorage.getItem('xinchat_auth_token')||'');
+        const [refreshSec,setRefreshSec] = useState(Number(localStorage.getItem('xinchat_admin_refresh_seconds')||15));
 
-      const fmtTime = (iso) => {
-        if (!iso) return '-';
-        const d = new Date(iso);
-        if (Number.isNaN(d.getTime())) return '-';
-        return d.toLocaleString('zh-CN', { hour12: false });
-      };
+        const [dash,setDash] = useState(null);
+        const [dashLoading,setDashLoading] = useState(false);
 
-      const adminHeaders = () => {
-        const token = (el.adminToken.value || '').trim();
-        return token ? { 'X-Admin-Token': token } : {};
-      };
+        const [userKeys,setUserKeys] = useState([]);
+        const [userOpen,setUserOpen] = useState(false);
+        const [userDetail,setUserDetail] = useState(null);
 
-      const bearerHeader = () => {
-        const token = (el.authToken.value || '').trim();
-        return token ? { Authorization: `Bearer ${token}` } : {};
-      };
+        const [msgSummary,setMsgSummary] = useState(null);
+        const [msgOpen,setMsgOpen] = useState(false);
+        const [msgDetail,setMsgDetail] = useState(null);
 
-      const fetchJson = async (url, { method = 'GET', body, headers = {} } = {}) => {
-        const res = await fetch(url, {
-          method,
-          headers,
-          body: body === undefined ? undefined : JSON.stringify(body),
-        });
-        const json = await safeJson(res);
-        if (!res.ok || !json?.success) {
-          throw new Error(String(json?.message || json?.raw || `HTTP ${res.status}`));
-        }
-        return json.data;
-      };
+        const [routes,setRoutes] = useState([]);
+        const [routeId,setRouteId] = useState('');
+        const [labMethod,setLabMethod] = useState('GET');
+        const [labPath,setLabPath] = useState('/api/routes');
+        const [labBody,setLabBody] = useState('');
+        const [labResp,setLabResp] = useState('等待请求...');
 
-      const statusPill = (status) => {
-        const value = String(status || 'active');
-        const cls = value === 'blocked' ? 'pill-blocked' : value === 'deleted' ? 'pill-deleted' : 'pill-active';
-        return `<span class="pill ${cls}">${value}</span>`;
-      };
+        const userRef = useRef();
+        const msgRef = useRef();
+        const [userForm] = Form.useForm();
+        const [msgForm] = Form.useForm();
 
-      const initCharts = () => {
-        const lineCfg = (label, color) => ({
-          label,
-          data: [],
-          borderColor: color,
-          backgroundColor: color + '22',
-          tension: 0.25,
-          borderWidth: 2,
-          fill: true,
-        });
-        charts.runtime = new Chart(document.getElementById('runtimeChart').getContext('2d'), {
-          type: 'line',
-          data: { labels: [], datasets: [lineCfg('WS连接', '#206bc4'), lineCfg('在线用户', '#2fb344')] },
-          options: { maintainAspectRatio: false, scales: { y: { beginAtZero: true } } },
-        });
+        useEffect(()=>{ localStorage.setItem('xinchat_admin_token',adminToken||''); },[adminToken]);
+        useEffect(()=>{ localStorage.setItem('xinchat_auth_token',authToken||''); },[authToken]);
+        useEffect(()=>{ if(Number(refreshSec)>0) localStorage.setItem('xinchat_admin_refresh_seconds',String(refreshSec)); },[refreshSec]);
 
-        charts.memory = new Chart(document.getElementById('memoryChart').getContext('2d'), {
-          type: 'line',
-          data: { labels: [], datasets: [lineCfg('Heap', '#f59f00'), lineCfg('RSS', '#12b886')] },
-          options: { maintainAspectRatio: false, scales: { y: { beginAtZero: true } } },
-        });
+        const api = useCallback(async (url,{method='GET',body,admin=false,auth=false}={})=>{
+          const headers={};
+          if(admin && adminToken.trim()) headers['X-Admin-Token']=adminToken.trim();
+          if(auth && authToken.trim()) headers['Authorization']=`Bearer ${authToken.trim()}`;
+          if(body!==undefined) headers['Content-Type']='application/json';
+          const res=await fetch(url,{method,headers:Object.keys(headers).length?headers:undefined,body:body===undefined?undefined:JSON.stringify(body)});
+          const text=await res.text();
+          let json; try{ json=JSON.parse(text);}catch{ json={success:false,message:text}; }
+          if(!res.ok || !json?.success) throw new Error(String(json?.message||`HTTP ${res.status}`));
+          return json.data;
+        },[adminToken,authToken]);
 
-        const barCfg = (label, color) => ({ label, data: [], borderWidth: 1, backgroundColor: color });
-        charts.slow = new Chart(document.getElementById('slowChart').getContext('2d'), {
-          type: 'bar',
-          data: { labels: [], datasets: [barCfg('Avg ms', 'rgba(206, 76, 96, 0.7)')] },
-          options: { maintainAspectRatio: false, indexAxis: 'y' },
-        });
-        charts.error = new Chart(document.getElementById('errorChart').getContext('2d'), {
-          type: 'bar',
-          data: { labels: [], datasets: [barCfg('5xx', 'rgba(239, 68, 68, 0.7)')] },
-          options: { maintainAspectRatio: false, indexAxis: 'y' },
-        });
+        const loadDash = useCallback(async ()=>{
+          setDashLoading(true);
+          try{
+            const [metrics,users,bottlenecks,messages]=await Promise.all([
+              api('/api/admin/metrics'),
+              api('/api/admin/users/summary',{admin:true}),
+              api('/api/admin/bottlenecks',{admin:true}),
+              api('/api/admin/messages/summary',{admin:true}),
+            ]);
+            setDash({metrics,users,bottlenecks,messages});
+            setMsgSummary(messages);
+          }catch(e){ antd.message.error(e.message); }
+          finally{ setDashLoading(false); }
+        },[api]);
 
-        const pieOpt = { maintainAspectRatio: false, plugins: { legend: { position: 'bottom' } } };
-        charts.usersPie = new Chart(document.getElementById('usersPieChart').getContext('2d'), {
-          type: 'doughnut',
-          data: { labels: ['active', 'blocked', 'deleted'], datasets: [{ data: [0, 0, 0], backgroundColor: ['#2fb344', '#f03e3e', '#868e96'] }] },
-          options: pieOpt,
-        });
-        charts.productsPie = new Chart(document.getElementById('productsPieChart').getContext('2d'), {
-          type: 'doughnut',
-          data: { labels: ['active', 'inactive', 'draft', 'archived'], datasets: [{ data: [0, 0, 0, 0], backgroundColor: ['#12b886', '#4c6ef5', '#f59f00', '#868e96'] }] },
-          options: pieOpt,
-        });
-      };
+        const loadRoutes = useCallback(async ()=>{
+          try{
+            const list = await api('/api/routes');
+            const arr = Array.isArray(list)?list:[];
+            setRoutes(arr);
+            if(arr[0]){
+              setRouteId(arr[0].id);
+              setLabMethod(arr[0].method||'GET');
+              const tpl = Array.isArray(arr[0].templates)&&arr[0].templates[0]?arr[0].templates[0]:null;
+              setLabPath(tpl?.path||arr[0].path||'/api/routes');
+              setLabBody(tpl?.body?JSON.stringify(tpl.body,null,2):'');
+            }
+          }catch(e){ antd.message.error(e.message); }
+        },[api]);
 
-      const renderCounters = (metrics) => {
-        const body = document.getElementById('counterTbody');
-        body.innerHTML = '';
-        const top = (Array.isArray(metrics?.counters) ? metrics.counters : [])
-          .slice()
-          .sort((a, b) => Number(b.value || 0) - Number(a.value || 0))
-          .slice(0, 12);
+        useEffect(()=>{ loadDash(); },[loadDash]);
+        useEffect(()=>{ if(path==='/lab' && routes.length===0) loadRoutes(); if(path==='/messages') api('/api/admin/messages/summary',{admin:true}).then(setMsgSummary).catch(()=>{}); },[path]);
 
-        if (!top.length) {
-          body.innerHTML = '<tr><td colspan="2" class="text-muted">暂无指标</td></tr>';
-          return;
-        }
+        useEffect(()=>{
+          const sec=Math.max(5,Number(refreshSec)||15);
+          const t=setInterval(()=>{
+            if(path==='/dashboard') loadDash();
+            if(path==='/users') userRef.current?.reload();
+            if(path==='/messages'){ msgRef.current?.reload(); api('/api/admin/messages/summary',{admin:true}).then(setMsgSummary).catch(()=>{}); }
+          },sec*1000);
+          return ()=>clearInterval(t);
+        },[path,refreshSec,loadDash,api]);
+        const openUser = async(uid)=>{
+          try{
+            const d=await api(`/api/admin/users/detail?uid=${encodeURIComponent(uid)}`,{admin:true});
+            setUserDetail(d);
+            userForm.setFieldsValue({ uid:d.uid,nickname:d.nickname||'',signature:d.signature||'',domain:d.domain||'',status:d.status||'active',gender:d.gender||'',birthday:d.birthday||'',country:d.country||'',province:d.province||'',region:d.region||'' });
+            setUserOpen(true);
+          }catch(e){ antd.message.error(e.message); }
+        };
 
-        top.forEach((entry) => {
-          const row = document.createElement('tr');
-          const label = entry.labels && Object.keys(entry.labels).length
-            ? `${entry.name} ${JSON.stringify(entry.labels)}`
-            : entry.name;
-          row.innerHTML = `<td class="mono">${label}</td><td class="text-end mono">${fmtNumber(entry.value)}</td>`;
-          body.appendChild(row);
-        });
-      };
+        const saveUser = async()=>{
+          try{
+            const v=await userForm.validateFields();
+            await api('/api/admin/users/update',{method:'POST',body:v,admin:true});
+            antd.message.success('用户已更新');
+            setUserOpen(false);
+            userRef.current?.reload();
+            loadDash();
+          }catch(e){ if(!e?.errorFields) antd.message.error(e.message); }
+        };
 
-      const renderOverview = ({ metricsData, userSummary, productSummary, bottlenecks }) => {
-        const processData = metricsData?.process || {};
-        const ws = metricsData?.ws || {};
+        const userBatch = async(action)=>{
+          if(!userKeys.length) return antd.message.warning('请先选择用户');
+          try{
+            const r=await api('/api/admin/users/batch-action',{method:'POST',body:{action,uids:userKeys},admin:true});
+            antd.message.success(`批量操作完成，变更 ${r.changed} 个账号`);
+            setUserKeys([]); userRef.current?.reload();
+          }catch(e){ antd.message.error(e.message); }
+        };
 
-        document.getElementById('mUptime').textContent = fmtDuration(metricsData?.uptimeMs || 0);
-        document.getElementById('mWsSockets').textContent = fmtNumber(ws.activeSockets || 0);
-        document.getElementById('mWsUsers').textContent = fmtNumber(ws.activeUsers || 0);
-        document.getElementById('mHeapRatio').textContent = `${fmtNumber((processData.heapTotalBytes > 0 ? (processData.heapUsedBytes / processData.heapTotalBytes) * 100 : 0), 1)}%`;
-        document.getElementById('mUsersTotal').textContent = fmtNumber(userSummary?.total || 0);
-        document.getElementById('mProductsTotal').textContent = fmtNumber(productSummary?.total || 0);
+        const revokeUser = async(uid)=>{ try{ await api('/api/admin/users/revoke-all',{method:'POST',body:{uid},admin:true}); antd.message.success('会话已下线'); userRef.current?.reload(); }catch(e){ antd.message.error(e.message);} };
+        const softDeleteUser = async(uid,restore=false)=>{ try{ await api('/api/admin/users/soft-delete',{method:'POST',body:{uid,restore},admin:true}); antd.message.success(restore?'已恢复':'已软删除'); userRef.current?.reload(); }catch(e){ antd.message.error(e.message);} };
 
-        const nowLabel = new Date().toLocaleTimeString('zh-CN', { hour12: false });
-        historyState.push({
-          t: nowLabel,
-          sockets: Number(ws.activeSockets || 0),
-          users: Number(ws.activeUsers || 0),
-          heapMb: Number(processData.heapUsedBytes || 0) / 1024 / 1024,
-          rssMb: Number(processData.rssBytes || 0) / 1024 / 1024,
-        });
-        while (historyState.length > MAX_HISTORY_POINTS) historyState.shift();
+        const openMsg = async(id)=>{
+          try{
+            const d=await api(`/api/admin/messages/detail?id=${encodeURIComponent(id)}`,{admin:true});
+            setMsgDetail(d);
+            msgForm.setFieldsValue({ id:d.id,status:d.reviewStatus==='unreviewed'?'approved':d.reviewStatus,riskLevel:d.riskLevel||'low',reviewer:d.review?.reviewer||'',reason:d.review?.reason||'',tags:Array.isArray(d.review?.tags)?d.review.tags.join(','):'' });
+            setMsgOpen(true);
+          }catch(e){ antd.message.error(e.message); }
+        };
 
-        charts.runtime.data.labels = historyState.map((it) => it.t);
-        charts.runtime.data.datasets[0].data = historyState.map((it) => it.sockets);
-        charts.runtime.data.datasets[1].data = historyState.map((it) => it.users);
-        charts.runtime.update();
+        const saveMsg = async()=>{
+          try{
+            const v=await msgForm.validateFields();
+            await api('/api/admin/messages/review',{method:'POST',body:{id:v.id,status:v.status,riskLevel:v.riskLevel,reviewer:v.reviewer||'',reason:v.reason||'',tags:v.tags||''},admin:true});
+            antd.message.success('审查结果已保存');
+            setMsgOpen(false);
+            msgRef.current?.reload();
+            setMsgSummary(await api('/api/admin/messages/summary',{admin:true}));
+          }catch(e){ if(!e?.errorFields) antd.message.error(e.message); }
+        };
 
-        charts.memory.data.labels = historyState.map((it) => it.t);
-        charts.memory.data.datasets[0].data = historyState.map((it) => Number(it.heapMb.toFixed(2)));
-        charts.memory.data.datasets[1].data = historyState.map((it) => Number(it.rssMb.toFixed(2)));
-        charts.memory.update();
+        const delMsg = async(id)=>{ try{ await api('/api/admin/messages/delete',{method:'POST',body:{id,reason:'Admin review deletion'},admin:true}); antd.message.success('消息已删除'); msgRef.current?.reload(); setMsgSummary(await api('/api/admin/messages/summary',{admin:true})); }catch(e){ antd.message.error(e.message);} };
 
-        const slow = Array.isArray(bottlenecks?.slowEndpoints) ? bottlenecks.slowEndpoints : [];
-        charts.slow.data.labels = slow.map((it) => it.key);
-        charts.slow.data.datasets[0].data = slow.map((it) => Number((it.avgMs || 0).toFixed(2)));
-        charts.slow.update();
+        const sendLab = async()=>{
+          const method=String(labMethod||'GET').toUpperCase();
+          const p=String(labPath||'').trim();
+          if(!p.startsWith('/')) return antd.message.error('Path 必须以 / 开头');
+          let body;
+          if(labBody.trim()){ try{ body=JSON.parse(labBody);}catch{return antd.message.error('JSON Body 解析失败'); } }
+          const headers={};
+          if(p.startsWith('/api/admin') && adminToken.trim()) headers['X-Admin-Token']=adminToken.trim();
+          if(authToken.trim()) headers['Authorization']=`Bearer ${authToken.trim()}`;
+          if(body!==undefined) headers['Content-Type']='application/json';
+          try{
+            const res=await fetch(p,{method,headers:Object.keys(headers).length?headers:undefined,body:body===undefined?undefined:JSON.stringify(body)});
+            setLabResp(`[${res.status}]\n${await res.text()}`);
+          }catch(e){ setLabResp(`[ClientError]\n${e.message}`); }
+        };
 
-        const err = Array.isArray(bottlenecks?.errorEndpoints) ? bottlenecks.errorEndpoints : [];
-        charts.error.data.labels = err.map((it) => it.key);
-        charts.error.data.datasets[0].data = err.map((it) => Number(it.errors || 0));
-        charts.error.update();
+        const menus = useMemo(()=>[
+          { path:'/dashboard', name:'运行概览', icon:<DashboardOutlined/> },
+          { path:'/users', name:'用户管理', icon:<TeamOutlined/> },
+          { path:'/messages', name:'消息审查', icon:<MessageOutlined/> },
+          { path:'/lab', name:'扩展中心', icon:<ApiOutlined/> },
+        ],[]);
 
-        charts.usersPie.data.datasets[0].data = [
-          Number(userSummary?.active || 0),
-          Number(userSummary?.blocked || 0),
-          Number(userSummary?.deleted || 0),
+        const userCols = [
+          { title:'UID', dataIndex:'uid', search:false, width:110 },
+          { title:'账号', dataIndex:'username' },
+          { title:'昵称', dataIndex:'nickname' },
+          { title:'状态', dataIndex:'status', valueType:'select', valueEnum:{all:{text:'all'},active:{text:'active'},blocked:{text:'blocked'},deleted:{text:'deleted'}}, render:(_,r)=> <Tag color={r.status==='active'?'success':r.status==='blocked'?'warning':'default'}>{r.status}</Tag> },
+          { title:'在线', dataIndex:'online', search:false, width:90, render:(_,r)=> r.online?<Tag color='green'>online</Tag>:<Tag>offline</Tag> },
+          { title:'令牌', dataIndex:'tokenCount', search:false, width:90 },
+          { title:'好友', dataIndex:'friendsCount', search:false, width:90 },
+          { title:'最后登录', dataIndex:'lastLoginAt', search:false, render:(_,r)=>fmtTime(r.lastLoginAt) },
+          { title:'操作', valueType:'option', search:false, width:260, render:(_,r)=>[
+            <Button key='e' size='small' icon={<EditOutlined/>} onClick={()=>openUser(r.uid)}>编辑</Button>,
+            <Button key='o' size='small' icon={<StopOutlined/>} onClick={()=>revokeUser(r.uid)}>下线</Button>,
+            r.status==='deleted'
+              ? <Button key='rs' size='small' onClick={()=>softDeleteUser(r.uid,true)}>恢复</Button>
+              : <Popconfirm key='sd' title='确认软删除该用户？' onConfirm={()=>softDeleteUser(r.uid,false)}><Button size='small' danger icon={<DeleteOutlined/>}>软删除</Button></Popconfirm>
+          ] }
         ];
-        charts.usersPie.update();
 
-        charts.productsPie.data.datasets[0].data = [
-          Number(productSummary?.active || 0),
-          Number(productSummary?.inactive || 0),
-          Number(productSummary?.draft || 0),
-          Number(productSummary?.archived || 0),
+        const msgCols = [
+          { title:'消息ID', dataIndex:'id', search:false, width:210, ellipsis:true, copyable:true },
+          { title:'时间', dataIndex:'createdAt', search:false, width:170, render:(_,r)=>fmtTime(r.createdAt) },
+          { title:'类型', dataIndex:'type', valueType:'select', valueEnum:Object.fromEntries(types.map(x=>[x,{text:x}])), width:100 },
+          { title:'发送者', dataIndex:'senderUid', valueType:'digit', width:90 },
+          { title:'目标', dataIndex:'targetUid', valueType:'digit', width:90 },
+          { title:'会话', dataIndex:'targetType', valueType:'select', valueEnum:{private:{text:'private'},group:{text:'group'}}, width:100 },
+          { title:'摘要', dataIndex:'preview', search:false, ellipsis:true, render:(_,r)=>r.preview||r.inspection?.textSample||'-' },
+          { title:'风险', dataIndex:'riskLevel', valueType:'select', valueEnum:{low:{text:'low'},medium:{text:'medium'},high:{text:'high'}}, width:90, render:(_,r)=><Tag color={r.riskLevel==='high'?'red':r.riskLevel==='medium'?'orange':'green'}>{r.riskLevel}</Tag> },
+          { title:'审查状态', dataIndex:'reviewStatus', valueType:'select', valueEnum:{all:{text:'all'},unreviewed:{text:'unreviewed'},approved:{text:'approved'},flagged:{text:'flagged'},blocked:{text:'blocked'},deleted:{text:'deleted'}}, width:130 },
+          { title:'关键词', dataIndex:'q', hideInTable:true },
+          { title:'起始时间', dataIndex:'startAt', hideInTable:true, valueType:'dateTime' },
+          { title:'结束时间', dataIndex:'endAt', hideInTable:true, valueType:'dateTime' },
+          { title:'操作', valueType:'option', search:false, width:170, render:(_,r)=>[
+            <Button key='rv' size='small' icon={<EyeOutlined/>} onClick={()=>openMsg(r.id)}>审查</Button>,
+            <Popconfirm key='rm' title='确认删除该消息？' onConfirm={()=>delMsg(r.id)}><Button size='small' danger icon={<DeleteOutlined/>}>删除</Button></Popconfirm>
+          ] }
         ];
-        charts.productsPie.update();
+        const dashboardView = (
+          <Space direction='vertical' size={16} style={{width:'100%'}}>
+            <Row gutter={[16,16]}>
+              <Col xs={24} sm={12} md={8} lg={6}><Card className='glass' loading={dashLoading}><Text type='secondary'>运行时长</Text><div style={{fontSize:24,fontWeight:600}}>{fmtDur(dash?.metrics?.uptimeMs||0)}</div></Card></Col>
+              <Col xs={24} sm={12} md={8} lg={6}><Card className='glass' loading={dashLoading}><Text type='secondary'>在线用户</Text><div style={{fontSize:24,fontWeight:600}}>{fmtNum(dash?.users?.online||0)}</div></Card></Col>
+              <Col xs={24} sm={12} md={8} lg={6}><Card className='glass' loading={dashLoading}><Text type='secondary'>用户总量</Text><div style={{fontSize:24,fontWeight:600}}>{fmtNum(dash?.users?.total||0)}</div></Card></Col>
+              <Col xs={24} sm={12} md={8} lg={6}><Card className='glass' loading={dashLoading}><Text type='secondary'>消息总量</Text><div style={{fontSize:24,fontWeight:600}}>{fmtNum(dash?.messages?.messages?.total||0)}</div></Card></Col>
+            </Row>
+            <Card className='glass' title='消息审查汇总'>
+              <Space wrap>
+                <Tag color='blue'>总消息 {fmtNum(msgSummary?.messages?.total||0)}</Tag>
+                <Tag color='cyan'>窗口消息 {fmtNum(msgSummary?.messages?.inWindow||0)}</Tag>
+                <Tag color='orange'>flagged {fmtNum(msgSummary?.reviews?.byStatus?.flagged||0)}</Tag>
+                <Tag color='red'>blocked {fmtNum(msgSummary?.reviews?.byStatus?.blocked||0)}</Tag>
+              </Space>
+            </Card>
+            <Card className='glass' title='瓶颈建议'>
+              {(dash?.bottlenecks?.recommendations||[]).map((x,i)=><Paragraph key={i} style={{marginBottom:8}}>{x}</Paragraph>)}
+              {(!dash?.bottlenecks?.recommendations || dash.bottlenecks.recommendations.length===0) && <Text type='secondary'>暂无建议</Text>}
+            </Card>
+          </Space>
+        );
 
-        renderCounters(metricsData?.metrics);
+        const usersView = (
+          <ProTable
+            actionRef={userRef}
+            rowKey='uid'
+            columns={userCols}
+            request={async(params)=>{
+              const q=new URLSearchParams();
+              q.set('page',String(params.current||1));
+              q.set('pageSize',String(params.pageSize||20));
+              q.set('status',String(params.status||'all'));
+              q.set('q',String(params.username||params.nickname||params.q||''));
+              const d=await api(`/api/admin/users?${q.toString()}`,{admin:true});
+              return {success:true,data:Array.isArray(d.items)?d.items:[],total:Number(d.total||0)};
+            }}
+            pagination={{pageSize:20,showSizeChanger:true}}
+            rowSelection={{selectedRowKeys:userKeys,onChange:(keys)=>setUserKeys(keys)}}
+            toolbar={{title:'支持批量封禁/恢复/下线，便于运营审查'}}
+            toolBarRender={()=>[
+              <Button key='r' icon={<ReloadOutlined/>} onClick={()=>userRef.current?.reload()}>刷新</Button>,
+              <Button key='a' onClick={()=>userBatch('activate')}>批量激活</Button>,
+              <Button key='b' danger onClick={()=>userBatch('block')}>批量封禁</Button>,
+              <Button key='d' danger onClick={()=>userBatch('soft-delete')}>批量软删</Button>,
+              <Button key='rs' onClick={()=>userBatch('restore')}>批量恢复</Button>,
+              <Button key='rv' onClick={()=>userBatch('revoke-sessions')}>批量下线</Button>,
+            ]}
+          />
+        );
 
-        const rec = document.getElementById('recommendationList');
-        rec.innerHTML = '';
-        const list = Array.isArray(bottlenecks?.recommendations) ? bottlenecks.recommendations : [];
-        if (!list.length) {
-          rec.innerHTML = '<li class="text-muted">暂无建议</li>';
-        } else {
-          list.forEach((item) => {
-            const li = document.createElement('li');
-            li.textContent = item;
-            rec.appendChild(li);
-          });
-        }
-      };
+        const messagesView = (
+          <Space direction='vertical' style={{width:'100%'}} size={16}>
+            <Card className='glass' size='small'>
+              <Space wrap>
+                <Tag color='blue'>总消息 {fmtNum(msgSummary?.messages?.total||0)}</Tag>
+                <Tag color='orange'>flagged {fmtNum(msgSummary?.reviews?.byStatus?.flagged||0)}</Tag>
+                <Tag color='red'>blocked {fmtNum(msgSummary?.reviews?.byStatus?.blocked||0)}</Tag>
+                <Tag>deleted {fmtNum(msgSummary?.reviews?.byStatus?.deleted||0)}</Tag>
+              </Space>
+            </Card>
+            <ProTable
+              actionRef={msgRef}
+              rowKey='id'
+              columns={msgCols}
+              request={async(params)=>{
+                const q=new URLSearchParams();
+                q.set('page',String(params.current||1));
+                q.set('pageSize',String(params.pageSize||20));
+                ['q','senderUid','targetUid','targetType','type','reviewStatus','riskLevel'].forEach((k)=>{
+                  if(params[k]!==undefined && params[k]!==null && String(params[k]).trim()!=='') q.set(k,String(params[k]));
+                });
+                const s=toTs(params.startAt), e=toTs(params.endAt);
+                if(s) q.set('startAt',s); if(e) q.set('endAt',e);
+                const d=await api(`/api/admin/messages/search?${q.toString()}`,{admin:true});
+                return {success:true,data:Array.isArray(d.items)?d.items:[],total:Number(d.total||0)};
+              }}
+              pagination={{pageSize:20,showSizeChanger:true}}
+              toolbar={{title:'支持按 UID/类型/时间窗口检索，并直接审查与删除'}}
+              toolBarRender={()=>[<Button key='r' icon={<ReloadOutlined/>} onClick={()=>msgRef.current?.reload()}>刷新</Button>]}
+            />
+          </Space>
+        );
 
-      const loadOverview = async ({ forceRefresh = false } = {}) => {
-        const query = forceRefresh ? '?refresh=true' : '';
-        const [metricsData, userSummary, productSummary, bottlenecks] = await Promise.all([
-          fetchJson(`/api/admin/metrics${query}`),
-          fetchJson('/api/admin/users/summary', { headers: adminHeaders() }),
-          fetchJson('/api/admin/products/summary', { headers: adminHeaders() }),
-          fetchJson('/api/admin/bottlenecks', { headers: adminHeaders() }),
-        ]);
+        const selectedRoute = routes.find((x)=>x.id===routeId) || null;
+        const labView = (
+          <Row gutter={[16,16]}>
+            <Col xs={24} lg={8}>
+              <Card title='接口目录' className='glass'>
+                <Space direction='vertical' style={{width:'100%'}}>
+                  <Button size='small' icon={<ReloadOutlined/>} onClick={loadRoutes}>刷新目录</Button>
+                  {(routes||[]).map((r)=><Button key={r.id} type={routeId===r.id?'primary':'default'} style={{width:'100%',textAlign:'left'}} onClick={()=>{ setRouteId(r.id); setLabMethod(r.method||'GET'); const t=Array.isArray(r.templates)&&r.templates[0]?r.templates[0]:null; setLabPath(t?.path||r.path||'/'); setLabBody(t?.body?JSON.stringify(t.body,null,2):''); }}><span className='mono' style={{marginRight:8}}>{r.method}</span><span className='mono'>{r.path}</span></Button>)}
+                </Space>
+              </Card>
+            </Col>
+            <Col xs={24} lg={16}>
+              <Card title='API Lab' className='glass'>
+                <Space direction='vertical' style={{width:'100%'}} size={12}>
+                  {selectedRoute && <Alert type='info' showIcon message={selectedRoute.note||'自定义调试'} />}
+                  <Row gutter={8}>
+                    <Col span={6}><Select value={labMethod} onChange={setLabMethod} style={{width:'100%'}} options={['GET','POST','PUT','PATCH','DELETE'].map(x=>({label:x,value:x}))} /></Col>
+                    <Col span={18}><Input className='mono' value={labPath} onChange={(e)=>setLabPath(e.target.value)} /></Col>
+                  </Row>
+                  <Input.TextArea className='mono' rows={10} value={labBody} onChange={(e)=>setLabBody(e.target.value)} placeholder='JSON body' />
+                  <Space><Button type='primary' onClick={sendLab}>发送请求</Button><Button onClick={()=>setLabResp('等待请求...')}>清空响应</Button></Space>
+                  <pre className='resp mono'>{labResp}</pre>
+                </Space>
+              </Card>
+              <Card title='扩展指引' className='glass' style={{marginTop:16}}>
+                <Paragraph>页面按模块注册组织，新增后台能力只需增加路由并在菜单注册页面组件。</Paragraph>
+                <Paragraph>当前示例模块：用户管理、消息审查、API Lab。可扩展举报中心、风控策略、运营活动模块。</Paragraph>
+              </Card>
+            </Col>
+          </Row>
+        );
 
-        renderOverview({ metricsData, userSummary, productSummary, bottlenecks });
-        el.globalStatus.textContent = `最近更新 ${new Date().toLocaleTimeString('zh-CN', { hour12: false })}`;
-      };
+        const page = { '/dashboard':dashboardView, '/users':usersView, '/messages':messagesView, '/lab':labView }[path] || dashboardView;
 
-      const renderUsers = (items = []) => {
-        const tbody = document.getElementById('usersTbody');
-        tbody.innerHTML = '';
-        if (!items.length) {
-          tbody.innerHTML = '<tr><td colspan="9" class="text-muted">暂无数据</td></tr>';
-          return;
-        }
+        return (
+          <ConfigProvider theme={{ token:{ colorPrimary:'#0f766e', borderRadius:10 } }}>
+            <ProLayout
+              title='XinChat Admin Pro'
+              logo={false}
+              layout='mix'
+              fixedHeader
+              fixSiderbar
+              location={{ pathname:path }}
+              route={{ path:'/', routes:menus }}
+              menuItemRender={(item,dom)=><a onClick={(e)=>{e.preventDefault();setPath(item.path||'/dashboard');}}>{dom}</a>}
+              token={{ header:{ colorBgHeader:'rgba(255,255,255,0.9)' } }}
+            >
+              <PageContainer title={menus.find((m)=>m.path===path)?.name||'Admin'} extra={[<Button key='rd' icon={<ReloadOutlined/>} onClick={loadDash}>刷新概览</Button>]}>
+                <Card className='glass' size='small' style={{marginBottom:16}}>
+                  <Space wrap>
+                    <Input.Password className='mono' placeholder='Admin Token' value={adminToken} onChange={(e)=>setAdminToken(e.target.value)} style={{width:260}} />
+                    <Input.Password className='mono' placeholder='Bearer Token (API Lab)' value={authToken} onChange={(e)=>setAuthToken(e.target.value)} style={{width:260}} />
+                    <Space><Text type='secondary'>自动刷新(秒)</Text><InputNumber min={5} max={300} value={refreshSec} onChange={(v)=>setRefreshSec(v||15)} /></Space>
+                  </Space>
+                </Card>
+                {page}
+              </PageContainer>
+            </ProLayout>
 
-        items.forEach((user) => {
-          const row = document.createElement('tr');
-          row.innerHTML = `
-            <td class="mono">${user.uid}</td>
-            <td>${user.username}</td>
-            <td>${user.nickname || ''}</td>
-            <td>${statusPill(user.status)}</td>
-            <td>${user.online ? 'online' : 'offline'}</td>
-            <td class="mono">${fmtNumber(user.tokenCount || 0)}</td>
-            <td class="mono">${fmtNumber(user.friendsCount || 0)}</td>
-            <td class="small">${fmtTime(user.lastLoginAt)}</td>
-            <td>
-              <div class="btn-list">
-                <button class="btn btn-sm btn-outline-primary" data-act="edit">编辑</button>
-                <button class="btn btn-sm btn-outline-secondary" data-act="detail">详情</button>
-                <button class="btn btn-sm btn-outline-danger" data-act="revoke">下线</button>
-              </div>
-            </td>
-          `;
+            <Modal title='用户编辑' open={userOpen} onCancel={()=>setUserOpen(false)} onOk={saveUser} width={760} okText='保存'>
+              <Form form={userForm} layout='vertical'>
+                <Row gutter={12}>
+                  <Col span={8}><Form.Item label='UID' name='uid'><Input className='mono' disabled /></Form.Item></Col>
+                  <Col span={8}><Form.Item label='状态' name='status'><Select options={['active','blocked','deleted'].map(x=>({label:x,value:x}))} /></Form.Item></Col>
+                  <Col span={8}><Form.Item label='昵称' name='nickname'><Input maxLength={36} /></Form.Item></Col>
+                </Row>
+                <Row gutter={12}>
+                  <Col span={12}><Form.Item label='签名' name='signature'><Input maxLength={80} /></Form.Item></Col>
+                  <Col span={12}><Form.Item label='域名' name='domain'><Input maxLength={253} /></Form.Item></Col>
+                </Row>
+                <Row gutter={12}>
+                  <Col span={8}><Form.Item label='性别' name='gender'><Input /></Form.Item></Col>
+                  <Col span={8}><Form.Item label='生日' name='birthday'><Input /></Form.Item></Col>
+                  <Col span={8}><Form.Item label='国家' name='country'><Input /></Form.Item></Col>
+                </Row>
+                <Row gutter={12}>
+                  <Col span={12}><Form.Item label='省份' name='province'><Input /></Form.Item></Col>
+                  <Col span={12}><Form.Item label='地区' name='region'><Input /></Form.Item></Col>
+                </Row>
+                {userDetail && <Alert type='info' showIcon message={`好友请求: incoming ${userDetail.friendRequests?.incoming||0}, outgoing ${userDetail.friendRequests?.outgoing||0}`} />}
+              </Form>
+            </Modal>
 
-          row.querySelector('[data-act="edit"]').onclick = () => fillUserEditor(user);
-          row.querySelector('[data-act="detail"]').onclick = () => loadUserDetail(user.uid);
-          row.querySelector('[data-act="revoke"]').onclick = () => revokeUserSessions(user.uid);
-          tbody.appendChild(row);
-        });
-      };
+            <Drawer title='消息审查' open={msgOpen} onClose={()=>setMsgOpen(false)} width={760} extra={<Button type='primary' onClick={saveMsg}>保存审查</Button>}>
+              {msgDetail ? (
+                <Space direction='vertical' style={{width:'100%'}} size={16}>
+                  <ProDescriptions column={2} bordered dataSource={msgDetail} columns={[{title:'消息ID',dataIndex:'id',copyable:true},{title:'时间',dataIndex:'createdAt',renderText:(v)=>fmtTime(v)},{title:'发送者',dataIndex:'senderUid'},{title:'目标',dataIndex:'targetUid'},{title:'类型',dataIndex:'type'},{title:'会话类型',dataIndex:'targetType'}]} />
+                  <Card className='glass' size='small' title='内容摘要'>
+                    <Paragraph>{msgDetail.preview || msgDetail.inspection?.textSample || '-'}</Paragraph>
+                    {Array.isArray(msgDetail.inspection?.hitRules)&&msgDetail.inspection.hitRules.length>0 && <Space wrap>{msgDetail.inspection.hitRules.map((r)=><Tag key={r.id} color={r.risk==='high'?'red':'orange'}>{r.label}</Tag>)}</Space>}
+                  </Card>
+                  <Form form={msgForm} layout='vertical'>
+                    <Form.Item name='id' hidden><Input /></Form.Item>
+                    <Row gutter={12}>
+                      <Col span={8}><Form.Item label='审查状态' name='status' rules={[{required:true}]}><Select options={reviewStatus.filter(x=>x!=='unreviewed').map(x=>({label:x,value:x}))} /></Form.Item></Col>
+                      <Col span={8}><Form.Item label='风险级别' name='riskLevel' rules={[{required:true}]}><Select options={riskLevels.map(x=>({label:x,value:x}))} /></Form.Item></Col>
+                      <Col span={8}><Form.Item label='审核人' name='reviewer'><Input placeholder='ops@xinchat' /></Form.Item></Col>
+                    </Row>
+                    <Form.Item label='标签(逗号分隔)' name='tags'><Input placeholder='spam,fraud' /></Form.Item>
+                    <Form.Item label='审查说明' name='reason'><Input.TextArea rows={4} maxLength={300} /></Form.Item>
+                  </Form>
+                  <Card className='glass' size='small' title='原始消息数据'><pre className='resp mono'>{JSON.stringify(msgDetail.data||{},null,2)}</pre></Card>
+                </Space>
+              ) : <Alert type='info' showIcon message='加载中...' />}
+            </Drawer>
+          </ConfigProvider>
+        );
+      }
 
-      const loadUsers = async () => {
-        const q = encodeURIComponent((document.getElementById('usersQuery').value || '').trim());
-        const status = encodeURIComponent(document.getElementById('usersStatus').value || 'all');
-        const pageSize = encodeURIComponent(document.getElementById('usersPageSize').value || '20');
-        const data = await fetchJson(`/api/admin/users?page=1&pageSize=${pageSize}&status=${status}&q=${q}`, {
-          headers: adminHeaders(),
-        });
-        state.users = Array.isArray(data?.items) ? data.items : [];
-        renderUsers(state.users);
-        document.getElementById('usersStatusText').textContent = `共 ${fmtNumber(data?.total || 0)} 条`;
-      };
-
-      const fillUserEditor = (user) => {
-        state.selectedUser = user;
-        document.getElementById('editUid').value = String(user.uid || '');
-        document.getElementById('editNickname').value = user.nickname || '';
-        document.getElementById('editSignature').value = user.signature || '';
-        document.getElementById('editDomain').value = user.domain || '';
-        document.getElementById('editStatus').value = user.status || 'active';
-      };
-
-      const loadUserDetail = async (uid) => {
-        const data = await fetchJson(`/api/admin/users/detail?uid=${encodeURIComponent(uid)}`, {
-          headers: adminHeaders(),
-        });
-        document.getElementById('userDetailBox').textContent = pretty(data);
-        fillUserEditor(data);
-      };
-      const saveUser = async () => {
-        const uid = Number(document.getElementById('editUid').value);
-        if (!Number.isInteger(uid) || uid <= 0) {
-          throw new Error('请先选择用户');
-        }
-        await fetchJson('/api/admin/users/update', {
-          method: 'POST',
-          headers: { ...adminHeaders(), 'Content-Type': 'application/json' },
-          body: {
-            uid,
-            nickname: document.getElementById('editNickname').value,
-            signature: document.getElementById('editSignature').value,
-            domain: document.getElementById('editDomain').value,
-            status: document.getElementById('editStatus').value,
-          },
-        });
-        await Promise.all([loadUsers(), loadOverview()]);
-      };
-
-      const revokeUserSessions = async (uid) => {
-        await fetchJson('/api/admin/users/revoke-all', {
-          method: 'POST',
-          headers: { ...adminHeaders(), 'Content-Type': 'application/json' },
-          body: { uid: Number(uid) },
-        });
-        await Promise.all([loadUsers(), loadOverview()]);
-      };
-
-      const renderProducts = (items = []) => {
-        const tbody = document.getElementById('productsTbody');
-        tbody.innerHTML = '';
-        if (!items.length) {
-          tbody.innerHTML = '<tr><td colspan="9" class="text-muted">暂无数据</td></tr>';
-          return;
-        }
-
-        items.forEach((p) => {
-          const row = document.createElement('tr');
-          row.innerHTML = `
-            <td class="mono">${p.id}</td>
-            <td>${p.name || ''}</td>
-            <td class="mono">${p.sku || ''}</td>
-            <td>${statusPill(p.status)}</td>
-            <td class="text-end mono">${fmtNumber(p.price || 0, 2)}</td>
-            <td class="text-end mono">${fmtNumber(p.stock || 0)}</td>
-            <td class="text-end mono">${fmtNumber(p.sales || 0)}</td>
-            <td class="small">${fmtTime(p.updatedAt)}</td>
-            <td>
-              <div class="btn-list">
-                <button class="btn btn-sm btn-outline-primary" data-act="edit">编辑</button>
-                <button class="btn btn-sm btn-outline-danger" data-act="del">删除</button>
-              </div>
-            </td>
-          `;
-          row.querySelector('[data-act="edit"]').onclick = () => fillProductEditor(p);
-          row.querySelector('[data-act="del"]').onclick = () => deleteProduct(p.id);
-          tbody.appendChild(row);
-        });
-      };
-
-      const loadProducts = async () => {
-        const q = encodeURIComponent((document.getElementById('productsQuery').value || '').trim());
-        const status = encodeURIComponent(document.getElementById('productsStatus').value || 'all');
-        const pageSize = encodeURIComponent(document.getElementById('productsPageSize').value || '20');
-        const data = await fetchJson(`/api/admin/products?page=1&pageSize=${pageSize}&status=${status}&q=${q}`, {
-          headers: adminHeaders(),
-        });
-        state.products = Array.isArray(data?.items) ? data.items : [];
-        renderProducts(state.products);
-        document.getElementById('productsStatusText').textContent = `共 ${fmtNumber(data?.total || 0)} 条`;
-      };
-
-      const fillProductEditor = (p) => {
-        document.getElementById('pId').value = p.id || '';
-        document.getElementById('pName').value = p.name || '';
-        document.getElementById('pSku').value = p.sku || '';
-        document.getElementById('pCategory').value = p.category || '';
-        document.getElementById('pStatus').value = p.status || 'draft';
-        document.getElementById('pPrice').value = p.price || 0;
-        document.getElementById('pCost').value = p.cost || 0;
-        document.getElementById('pStock').value = p.stock || 0;
-        document.getElementById('pSales').value = p.sales || 0;
-        document.getElementById('pTags').value = Array.isArray(p.tags) ? p.tags.join(',') : '';
-        document.getElementById('pDesc').value = p.description || '';
-      };
-
-      const buildProductPayload = () => ({
-        id: document.getElementById('pId').value.trim(),
-        name: document.getElementById('pName').value.trim(),
-        sku: document.getElementById('pSku').value.trim(),
-        category: document.getElementById('pCategory').value.trim(),
-        status: document.getElementById('pStatus').value,
-        price: Number(document.getElementById('pPrice').value || 0),
-        cost: Number(document.getElementById('pCost').value || 0),
-        stock: Number(document.getElementById('pStock').value || 0),
-        sales: Number(document.getElementById('pSales').value || 0),
-        tags: document.getElementById('pTags').value,
-        description: document.getElementById('pDesc').value,
-      });
-
-      const saveProduct = async (create = false) => {
-        const payload = buildProductPayload();
-        const url = create ? '/api/admin/products/create' : '/api/admin/products/update';
-        if (!create) {
-          const idNum = Number(payload.id);
-          if (!Number.isInteger(idNum) || idNum <= 0) throw new Error('更新产品必须填写有效ID');
-          payload.id = idNum;
-        } else {
-          delete payload.id;
-        }
-
-        await fetchJson(url, {
-          method: 'POST',
-          headers: { ...adminHeaders(), 'Content-Type': 'application/json' },
-          body: payload,
-        });
-        await Promise.all([loadProducts(), loadOverview()]);
-      };
-
-      const deleteProduct = async (id) => {
-        await fetchJson('/api/admin/products/delete', {
-          method: 'DELETE',
-          headers: { ...adminHeaders(), 'Content-Type': 'application/json' },
-          body: { id: Number(id) },
-        });
-        await Promise.all([loadProducts(), loadOverview()]);
-      };
-
-      const clearProductEditor = () => {
-        ['pId', 'pName', 'pSku', 'pCategory', 'pPrice', 'pCost', 'pStock', 'pSales', 'pTags', 'pDesc'].forEach((id) => {
-          document.getElementById(id).value = id === 'pPrice' || id === 'pCost' || id === 'pStock' || id === 'pSales' ? '0' : '';
-        });
-        document.getElementById('pStatus').value = 'active';
-      };
-
-      const routeEls = {
-        list: document.getElementById('routeList'),
-        method: document.getElementById('httpMethod'),
-        path: document.getElementById('httpPath'),
-        payload: document.getElementById('httpPayload'),
-        template: document.getElementById('templateSelect'),
-        hint: document.getElementById('routeHint'),
-        response: document.getElementById('httpResponse'),
-      };
-
-      const renderRouteList = () => {
-        routeEls.list.innerHTML = '';
-        state.routes.forEach((route) => {
-          const btn = document.createElement('button');
-          btn.type = 'button';
-          btn.className = `list-group-item list-group-item-action route-item ${route.id === state.selectedRouteId ? 'active' : ''}`;
-          btn.innerHTML = `<span class="badge bg-azure-lt text-azure me-2 mono">${route.method}</span><span class="mono">${route.path}</span>`;
-          btn.onclick = () => selectRoute(route.id);
-          routeEls.list.appendChild(btn);
-        });
-      };
-
-      const applyTemplate = (route, index) => {
-        const tpl = Array.isArray(route.templates) ? route.templates[index] : null;
-        if (!tpl) return;
-        routeEls.method.value = route.method;
-        routeEls.path.value = tpl.path || (route.path === '/resource/*' ? '/resource/' : route.path);
-        routeEls.payload.value = tpl.body ? pretty(tpl.body) : '';
-        routeEls.hint.textContent = tpl.hint || route.note || '';
-      };
-
-      const renderTemplateSelect = (route) => {
-        const templates = Array.isArray(route.templates) ? route.templates : [];
-        routeEls.template.innerHTML = '';
-        templates.forEach((tpl, idx) => {
-          const option = document.createElement('option');
-          option.value = String(idx);
-          option.textContent = tpl.name || `模板 ${idx + 1}`;
-          routeEls.template.appendChild(option);
-        });
-        if (!templates.length) {
-          const option = document.createElement('option');
-          option.textContent = '无模板';
-          routeEls.template.appendChild(option);
-        } else {
-          applyTemplate(route, 0);
-        }
-        routeEls.template.onchange = () => applyTemplate(route, Number(routeEls.template.value));
-      };
-
-      const selectRoute = (routeId) => {
-        state.selectedRouteId = routeId;
-        const route = state.routes.find((item) => item.id === routeId);
-        if (!route) return;
-        renderRouteList();
-        renderTemplateSelect(route);
-        routeEls.hint.textContent = route.note || '';
-      };
-
-      const loadRoutes = async () => {
-        const data = await fetchJson('/api/routes');
-        state.routes = Array.isArray(data) ? data : [];
-        if (!state.routes.length) return;
-        state.selectedRouteId = state.routes[0].id;
-        renderRouteList();
-        selectRoute(state.selectedRouteId);
-      };
-
-      const sendApiRequest = async () => {
-        const method = (routeEls.method.value || 'GET').toUpperCase();
-        const path = (routeEls.path.value || '').trim();
-        if (!path.startsWith('/')) throw new Error('路径必须以 / 开头');
-
-        let body;
-        const raw = routeEls.payload.value.trim();
-        if (raw) {
-          body = JSON.parse(raw);
-        }
-
-        const headers = { ...bearerHeader() };
-        if (path.startsWith('/api/admin')) {
-          Object.assign(headers, adminHeaders());
-        }
-        if (body !== undefined) {
-          headers['Content-Type'] = 'application/json';
-        }
-
-        const res = await fetch(path, {
-          method,
-          headers: Object.keys(headers).length ? headers : undefined,
-          body: body === undefined ? undefined : JSON.stringify(body),
-        });
-        const text = await res.text();
-        routeEls.response.textContent = `[${res.status}]\n${text}`;
-      };
-
-      const withBusy = async (task) => {
-        try {
-          el.globalStatus.textContent = '加载中...';
-          await task();
-        } catch (error) {
-          el.globalStatus.textContent = `失败: ${error.message}`;
-        }
-      };
-
-      const scheduleRefresh = () => {
-        if (state.timer) clearInterval(state.timer);
-        state.timer = setInterval(() => {
-          withBusy(async () => {
-            await loadOverview({ forceRefresh: false });
-            const activeTab = document.querySelector('.tab-pane.active')?.id;
-            if (activeTab === 'tab-users') await loadUsers();
-            if (activeTab === 'tab-products') await loadProducts();
-          });
-        }, state.refreshMs);
-      };
-
-      const bindEvents = () => {
-        el.refreshAllBtn.onclick = () => withBusy(async () => {
-          await Promise.all([loadOverview({ forceRefresh: true }), loadUsers(), loadProducts()]);
-        });
-
-        el.applyRefreshBtn.onclick = () => {
-          const sec = Number(el.refreshSeconds.value || 10);
-          state.refreshMs = Math.min(120000, Math.max(3000, Math.floor(sec * 1000)));
-          scheduleRefresh();
-          el.globalStatus.textContent = `自动刷新: ${state.refreshMs / 1000}s`;
-        };
-
-        document.getElementById('usersSearchBtn').onclick = () => withBusy(loadUsers);
-        document.getElementById('usersReloadBtn').onclick = () => withBusy(loadUsers);
-        document.getElementById('saveUserBtn').onclick = () => withBusy(saveUser);
-        document.getElementById('revokeUserBtn').onclick = () => {
-          const uid = Number(document.getElementById('editUid').value || 0);
-          withBusy(() => revokeUserSessions(uid));
-        };
-
-        document.getElementById('productsSearchBtn').onclick = () => withBusy(loadProducts);
-        document.getElementById('productsReloadBtn').onclick = () => withBusy(loadProducts);
-        document.getElementById('saveProductBtn').onclick = () => withBusy(() => saveProduct(false));
-        document.getElementById('createProductBtn').onclick = () => withBusy(() => saveProduct(true));
-        document.getElementById('clearProductBtn').onclick = clearProductEditor;
-
-        document.getElementById('sendRequestBtn').onclick = () => withBusy(sendApiRequest);
-        document.getElementById('clearResponseBtn').onclick = () => {
-          routeEls.response.textContent = '等待请求...';
-        };
-      };
-
-      const boot = async () => {
-        initCharts();
-        bindEvents();
-        await withBusy(async () => {
-          await Promise.all([loadRoutes(), loadOverview({ forceRefresh: false }), loadUsers(), loadProducts()]);
-        });
-        scheduleRefresh();
-      };
-
-      boot();
+      ReactDOM.createRoot(document.getElementById('root')).render(<App />);
     </script>
   </body>
 </html>

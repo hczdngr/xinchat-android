@@ -2095,7 +2095,281 @@ router.delete('/del', authenticate, async (req, res) => {
   }
 });
 
-export { ensureChatStorage, setChatNotifier };
+const ADMIN_MAX_PAGE_SIZE = 200;
+
+const sanitizeAdminKeyword = (value, maxLen = 160) =>
+  typeof value === 'string' ? value.trim().slice(0, maxLen) : '';
+
+const toAdminPositiveInt = (value, fallback, min = 1, max = Number.MAX_SAFE_INTEGER) => {
+  const parsed = Number.parseInt(String(value || ''), 10);
+  if (!Number.isInteger(parsed) || parsed < min) return fallback;
+  if (parsed > max) return max;
+  return parsed;
+};
+
+const parseAdminTimestamp = (value) => {
+  if (typeof value === 'number' && Number.isFinite(value) && value > 0) {
+    return Math.floor(value);
+  }
+  if (typeof value === 'string') {
+    const trimmed = value.trim();
+    if (!trimmed) return 0;
+    const asNumber = Number(trimmed);
+    if (Number.isFinite(asNumber) && asNumber > 0) {
+      return Math.floor(asNumber);
+    }
+    const asDate = Date.parse(trimmed);
+    if (Number.isFinite(asDate) && asDate > 0) {
+      return Math.floor(asDate);
+    }
+  }
+  return 0;
+};
+
+const toAdminMessagePreview = (message) => {
+  const data = message?.data && typeof message.data === 'object' ? message.data : {};
+  if (typeof data.content === 'string' && data.content.trim()) {
+    return data.content.trim();
+  }
+  if (typeof data.text === 'string' && data.text.trim()) {
+    return data.text.trim();
+  }
+  if (typeof data.name === 'string' && data.name.trim()) {
+    return `[${message?.type || 'message'}] ${data.name.trim()}`;
+  }
+  if (typeof data.url === 'string' && data.url.trim()) {
+    return `[${message?.type || 'message'}] ${data.url.trim()}`;
+  }
+  return '';
+};
+
+const normalizeAdminMessageFilters = (filters = {}) => {
+  const page = toAdminPositiveInt(filters.page, 1, 1);
+  const pageSize = toAdminPositiveInt(filters.pageSize, 20, 1, ADMIN_MAX_PAGE_SIZE);
+  const q = sanitizeAdminKeyword(filters.q, 160).toLowerCase();
+  const targetType = sanitizeAdminKeyword(filters.targetType, 20).toLowerCase();
+  const type = sanitizeAdminKeyword(filters.type, 20).toLowerCase();
+  const sort = sanitizeAdminKeyword(filters.sort, 8).toLowerCase() === 'asc' ? 'asc' : 'desc';
+  const senderUid = Number(filters.senderUid);
+  const targetUid = Number(filters.targetUid);
+  let startMs = parseAdminTimestamp(filters.startMs ?? filters.sinceMs ?? filters.startAt);
+  let endMs = parseAdminTimestamp(filters.endMs ?? filters.beforeMs ?? filters.endAt);
+
+  if (startMs > 0 && endMs > 0 && startMs > endMs) {
+    const temp = startMs;
+    startMs = endMs;
+    endMs = temp;
+  }
+
+  return {
+    page,
+    pageSize,
+    q,
+    targetType: ALLOWED_TARGET_TYPES.has(targetType) ? targetType : '',
+    type: ALLOWED_TYPES.has(type) ? type : '',
+    senderUid: isValidUid(senderUid) ? senderUid : 0,
+    targetUid: isValidUid(targetUid) ? targetUid : 0,
+    startMs: startMs > 0 ? startMs : 0,
+    endMs: endMs > 0 ? endMs : 0,
+    sort,
+  };
+};
+
+const buildAdminMessagesWhere = (filters) => {
+  const clauses = [];
+  const params = [];
+
+  if (filters.senderUid > 0) {
+    clauses.push('senderUid = ?');
+    params.push(filters.senderUid);
+  }
+  if (filters.targetUid > 0) {
+    clauses.push('targetUid = ?');
+    params.push(filters.targetUid);
+  }
+  if (filters.targetType) {
+    clauses.push('targetType = ?');
+    params.push(filters.targetType);
+  }
+  if (filters.type) {
+    clauses.push('type = ?');
+    params.push(filters.type);
+  }
+  if (filters.startMs > 0) {
+    clauses.push('createdAtMs >= ?');
+    params.push(filters.startMs);
+  }
+  if (filters.endMs > 0) {
+    clauses.push('createdAtMs <= ?');
+    params.push(filters.endMs);
+  }
+  if (filters.q) {
+    const like = `%${filters.q}%`;
+    clauses.push('(LOWER(id) LIKE ? OR LOWER(data) LIKE ? OR CAST(senderUid AS TEXT) LIKE ? OR CAST(targetUid AS TEXT) LIKE ?)');
+    params.push(like, like, like, like);
+  }
+
+  return {
+    whereSql: clauses.length ? `WHERE ${clauses.join(' AND ')}` : '',
+    params,
+  };
+};
+
+const toAdminMessage = (row) => {
+  const message = toMessage(row);
+  const createdAtMs = Number(row?.createdAtMs);
+  const normalizedCreatedAtMs =
+    Number.isFinite(createdAtMs) && createdAtMs > 0
+      ? Math.floor(createdAtMs)
+      : Number.isFinite(Date.parse(message.createdAt))
+        ? Date.parse(message.createdAt)
+        : 0;
+  return {
+    ...message,
+    createdAtMs: normalizedCreatedAtMs,
+    preview: toAdminMessagePreview(message).slice(0, 220),
+  };
+};
+
+const querySingleNumber = (database, sql, params = []) => {
+  const stmt = database.prepare(sql);
+  stmt.bind(params);
+  let value = 0;
+  if (stmt.step()) {
+    const row = stmt.getAsObject();
+    const first = row ? Object.values(row)[0] : 0;
+    const parsed = Number(first);
+    value = Number.isFinite(parsed) ? parsed : 0;
+  }
+  stmt.free();
+  return value;
+};
+
+const searchMessagesForAdmin = async (filters = {}) => {
+  await ensureChatStorage();
+  const database = await openDb();
+  const normalized = normalizeAdminMessageFilters(filters);
+  const { whereSql, params } = buildAdminMessagesWhere(normalized);
+
+  const total = querySingleNumber(database, `SELECT COUNT(1) AS total FROM messages ${whereSql}`, params);
+  const offset = Math.max(0, (normalized.page - 1) * normalized.pageSize);
+  const order = normalized.sort === 'asc' ? 'ASC' : 'DESC';
+  const stmt = database.prepare(`
+    SELECT id, type, senderUid, targetUid, targetType, data, createdAt, createdAtMs
+    FROM messages
+    ${whereSql}
+    ORDER BY createdAtMs ${order}
+    LIMIT ? OFFSET ?
+  `);
+  stmt.bind([...params, normalized.pageSize, offset]);
+  const items = [];
+  while (stmt.step()) {
+    items.push(toAdminMessage(stmt.getAsObject()));
+  }
+  stmt.free();
+
+  return {
+    items,
+    total,
+    page: normalized.page,
+    pageSize: normalized.pageSize,
+    filters: normalized,
+  };
+};
+
+const findMessageByIdForAdmin = async (id) => {
+  const messageId = typeof id === 'string' ? id.trim() : String(id || '').trim();
+  if (!messageId) return null;
+  await ensureChatStorage();
+  const database = await openDb();
+  const stmt = database.prepare(
+    'SELECT id, type, senderUid, targetUid, targetType, data, createdAt, createdAtMs FROM messages WHERE id = ?'
+  );
+  stmt.bind([messageId]);
+  if (!stmt.step()) {
+    stmt.free();
+    return null;
+  }
+  const row = stmt.getAsObject();
+  stmt.free();
+  return toAdminMessage(row);
+};
+
+const deleteMessageByIdForAdmin = async (id) => {
+  const messageId = typeof id === 'string' ? id.trim() : String(id || '').trim();
+  if (!messageId) return null;
+  await ensureChatStorage();
+  const database = await openDb();
+  const selectStmt = database.prepare(
+    'SELECT id, type, senderUid, targetUid, targetType, data, createdAt, createdAtMs FROM messages WHERE id = ?'
+  );
+  selectStmt.bind([messageId]);
+  if (!selectStmt.step()) {
+    selectStmt.free();
+    return null;
+  }
+  const row = selectStmt.getAsObject();
+  selectStmt.free();
+
+  const delStmt = database.prepare('DELETE FROM messages WHERE id = ?');
+  delStmt.run([messageId]);
+  delStmt.free();
+  scheduleFlush();
+
+  return toAdminMessage(row);
+};
+
+const summarizeMessagesForAdmin = async ({ windowHours = 24 } = {}) => {
+  await ensureChatStorage();
+  const database = await openDb();
+  const safeWindowHours = toAdminPositiveInt(windowHours, 24, 1, 24 * 365);
+  const sinceMs = Date.now() - safeWindowHours * 60 * 60 * 1000;
+
+  const total = querySingleNumber(database, 'SELECT COUNT(1) AS total FROM messages');
+  const inWindow = querySingleNumber(
+    database,
+    'SELECT COUNT(1) AS total FROM messages WHERE createdAtMs >= ?',
+    [sinceMs]
+  );
+
+  const byType = {};
+  const typeStmt = database.prepare('SELECT type, COUNT(1) AS count FROM messages GROUP BY type');
+  while (typeStmt.step()) {
+    const row = typeStmt.getAsObject();
+    const type = String(row?.type || '').trim() || 'unknown';
+    byType[type] = Number(row?.count) || 0;
+  }
+  typeStmt.free();
+
+  const byTargetType = {};
+  const targetStmt = database.prepare(
+    'SELECT targetType, COUNT(1) AS count FROM messages GROUP BY targetType'
+  );
+  while (targetStmt.step()) {
+    const row = targetStmt.getAsObject();
+    const targetType = String(row?.targetType || '').trim() || 'unknown';
+    byTargetType[targetType] = Number(row?.count) || 0;
+  }
+  targetStmt.free();
+
+  return {
+    total,
+    inWindow,
+    windowHours: safeWindowHours,
+    sinceAt: new Date(sinceMs).toISOString(),
+    byType,
+    byTargetType,
+  };
+};
+
+export {
+  ensureChatStorage,
+  setChatNotifier,
+  searchMessagesForAdmin,
+  findMessageByIdForAdmin,
+  deleteMessageByIdForAdmin,
+  summarizeMessagesForAdmin,
+};
 export default router;
 
 

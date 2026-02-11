@@ -718,6 +718,98 @@ const routeMeta = [
     ],
   },
   {
+    method: 'POST',
+    path: '/api/admin/users/batch-action',
+    label: 'Batch user action',
+    note: 'Apply activate/block/delete/restore/revoke actions to multiple users.',
+    templates: [
+      {
+        name: 'Batch block',
+        body: { action: 'block', uids: [100000000, 100000001] },
+        hint: 'X-Admin-Token or adminToken',
+      },
+      {
+        name: 'Batch restore',
+        body: { action: 'restore', uids: [100000000] },
+        hint: 'X-Admin-Token or adminToken',
+      },
+    ],
+  },
+  {
+    method: 'GET',
+    path: '/api/admin/messages/summary',
+    label: 'Messages summary',
+    note: 'Return message counters and review status summary.',
+    templates: [
+      {
+        name: 'Summary',
+        body: null,
+        path: '/api/admin/messages/summary?windowHours=24',
+        hint: 'X-Admin-Token or adminToken',
+      },
+    ],
+  },
+  {
+    method: 'GET',
+    path: '/api/admin/messages/search',
+    label: 'Messages search',
+    note: 'Search messages for audit by uid/type/time/keyword.',
+    templates: [
+      {
+        name: 'Search latest',
+        body: null,
+        path: '/api/admin/messages/search?page=1&pageSize=20&type=text&q=&reviewStatus=all',
+        hint: 'X-Admin-Token or adminToken',
+      },
+    ],
+  },
+  {
+    method: 'GET',
+    path: '/api/admin/messages/detail',
+    label: 'Message detail',
+    note: 'Get one message detail with audit metadata.',
+    templates: [
+      {
+        name: 'Detail by id',
+        body: null,
+        path: '/api/admin/messages/detail?id=<message-id>',
+        hint: 'X-Admin-Token or adminToken',
+      },
+    ],
+  },
+  {
+    method: 'POST',
+    path: '/api/admin/messages/review',
+    label: 'Review message',
+    note: 'Save review decision for a message.',
+    templates: [
+      {
+        name: 'Flag message',
+        body: {
+          id: '<message-id>',
+          status: 'flagged',
+          riskLevel: 'high',
+          reason: 'Suspicious scam text',
+          tags: 'fraud,spam',
+        },
+        hint: 'X-Admin-Token or adminToken',
+      },
+    ],
+  },
+  {
+    method: 'POST',
+    path: '/api/admin/messages/delete',
+    label: 'Delete message',
+    note: 'Delete one message by id and write audit review.',
+    templates: [
+      {
+        name: 'Delete by id',
+        body: { id: '<message-id>', reason: 'Policy violation' },
+        hint: 'X-Admin-Token or adminToken',
+      },
+    ],
+  },
+  {
     method: 'GET',
     path: '/api/admin/products/summary',
     label: 'Products summary',

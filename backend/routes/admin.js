@@ -8,6 +8,12 @@ import fs from 'fs/promises';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { getUsersCacheInfo, mutateUsers, readUsersCached } from './auth.js';
+import {
+  deleteMessageByIdForAdmin,
+  findMessageByIdForAdmin,
+  searchMessagesForAdmin,
+  summarizeMessagesForAdmin,
+} from './chat.js';
 import { metrics } from '../observability.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -15,6 +21,8 @@ const __dirname = path.dirname(__filename);
 const DATA_DIR = path.join(__dirname, '..', 'data');
 const PRODUCTS_PATH = path.join(DATA_DIR, 'products.json');
 const PRODUCTS_PATH_TMP = path.join(DATA_DIR, 'products.json.tmp');
+const MESSAGE_REVIEWS_PATH = path.join(DATA_DIR, 'message-reviews.json');
+const MESSAGE_REVIEWS_PATH_TMP = path.join(DATA_DIR, 'message-reviews.json.tmp');
 
 const NODE_ENV = String(process.env.NODE_ENV || 'development').trim().toLowerCase();
 const ADMIN_API_TOKEN = String(process.env.ADMIN_API_TOKEN || '').trim();
@@ -38,6 +46,55 @@ const SAFE_MAX_UID = Number.isInteger(MAX_UID) && MAX_UID > 0 ? MAX_UID : 214748
 const DEFAULT_SIGNATURE =
   '\u8fd9\u4e2a\u4eba\u5f88\u795e\u79d8\uff0c\u6682\u672a\u586b\u5199\u7b7e\u540d';
 const PRODUCT_STATUS_SET = new Set(['active', 'inactive', 'draft', 'archived']);
+const USER_BATCH_ACTION_SET = new Set([
+  'activate',
+  'block',
+  'soft-delete',
+  'restore',
+  'revoke-sessions',
+]);
+const MESSAGE_REVIEW_STATUS_SET = new Set(['approved', 'flagged', 'blocked', 'deleted']);
+const MESSAGE_REVIEW_RISK_SET = new Set(['low', 'medium', 'high']);
+const MESSAGE_RISK_RULES = [
+  {
+    id: 'violence',
+    label: 'Violence/Threat',
+    risk: 'high',
+    tags: ['violence'],
+    pattern: /(kill|murder|shoot|stab|threat|\u6740|\u5f04\u6b7b|\u7838\u6bc1|\u5a01\u80c1)/i,
+  },
+  {
+    id: 'hate',
+    label: 'Hate/Abuse',
+    risk: 'high',
+    tags: ['hate', 'abuse'],
+    pattern: /(hate|racist|slur|nazi|\u6c11\u65cf\u6b67\u89c6|\u4fae\u8fb1|\u4ec7\u6068)/i,
+  },
+  {
+    id: 'fraud',
+    label: 'Fraud/Scam',
+    risk: 'high',
+    tags: ['fraud'],
+    pattern: /(scam|fraud|loan shark|ponzi|btc transfer|\u8bd0\u9a97|\u8d37\u6b3e\u9a97\u5c40|\u6d17\u94b1)/i,
+  },
+  {
+    id: 'ads',
+    label: 'Spam/Ads',
+    risk: 'medium',
+    tags: ['spam', 'ads'],
+    pattern: /(telegram|whatsapp|vx[:\s]|buy now|discount code|\u5fae\u4fe1|\u4ee3\u7406|\u5237\u5355|\u5e7f\u544a)/i,
+  },
+  {
+    id: 'sensitive',
+    label: 'Sensitive Content',
+    risk: 'medium',
+    tags: ['sensitive'],
+    pattern: /(porn|drug|weapon|\u9ec4\u7247|\u6bd2\u54c1|\u67aa\u652f|\u88f8\u804a)/i,
+  },
+];
+const MAX_BATCH_USERS = 200;
+const MAX_MESSAGE_REVIEW_NOTE_LEN = 300;
+const MAX_MESSAGE_REVIEW_TAGS = 12;
 
 const router = express.Router();
 
@@ -46,6 +103,9 @@ let productsCacheAt = 0;
 let productsLoadInFlight = null;
 let productsWriteQueue = Promise.resolve();
 let productsVersion = 0;
+let messageReviewsCache = null;
+let messageReviewsLoadInFlight = null;
+let messageReviewsWriteQueue = Promise.resolve();
 
 // asyncRoute?处理 asyncRoute 相关逻辑。
 const asyncRoute = (handler) => (req, res, next) => {
@@ -378,6 +438,332 @@ const aggregateErrorEndpoints = (snapshot) => {
     .slice(0, 10);
 };
 
+const normalizeMessageReviewStatus = (value) => {
+  const status = sanitizeText(value, 24).toLowerCase();
+  return MESSAGE_REVIEW_STATUS_SET.has(status) ? status : '';
+};
+
+const normalizeMessageReviewRiskLevel = (value) => {
+  const riskLevel = sanitizeText(value, 24).toLowerCase();
+  return MESSAGE_REVIEW_RISK_SET.has(riskLevel) ? riskLevel : '';
+};
+
+const normalizeMessageReviewTags = (value) => {
+  const list = Array.isArray(value) ? value : typeof value === 'string' ? value.split(',') : [];
+  return Array.from(
+    new Set(
+      list
+        .map((item) => sanitizeText(item, 24).toLowerCase())
+        .filter(Boolean)
+        .slice(0, MAX_MESSAGE_REVIEW_TAGS)
+    )
+  );
+};
+
+const parseIsoTimestamp = (value) => {
+  const parsed = Date.parse(String(value || ''));
+  return Number.isFinite(parsed) && parsed > 0 ? new Date(parsed).toISOString() : '';
+};
+
+const normalizeMessageReviewRecord = (messageId, record) => {
+  if (typeof messageId !== 'string' || !messageId.trim()) return null;
+  if (!record || typeof record !== 'object') return null;
+  const id = messageId.trim();
+  const status = normalizeMessageReviewStatus(record.status);
+  if (!status) return null;
+  const riskLevel = normalizeMessageReviewRiskLevel(record.riskLevel) || 'low';
+  const reviewedAt = parseIsoTimestamp(record.reviewedAt) || new Date().toISOString();
+  const reviewer = sanitizeText(record.reviewer, 64);
+  const reason = sanitizeText(record.reason, MAX_MESSAGE_REVIEW_NOTE_LEN);
+  const tags = normalizeMessageReviewTags(record.tags);
+  const historyRaw = Array.isArray(record.history) ? record.history : [];
+  const history = historyRaw
+    .map((entry) => {
+      if (!entry || typeof entry !== 'object') return null;
+      const entryStatus = normalizeMessageReviewStatus(entry.status);
+      if (!entryStatus) return null;
+      return {
+        status: entryStatus,
+        riskLevel: normalizeMessageReviewRiskLevel(entry.riskLevel) || 'low',
+        reviewer: sanitizeText(entry.reviewer, 64),
+        reason: sanitizeText(entry.reason, MAX_MESSAGE_REVIEW_NOTE_LEN),
+        tags: normalizeMessageReviewTags(entry.tags),
+        reviewedAt: parseIsoTimestamp(entry.reviewedAt) || reviewedAt,
+      };
+    })
+    .filter(Boolean)
+    .slice(-30);
+
+  return {
+    messageId: id,
+    status,
+    riskLevel,
+    reviewer,
+    reason,
+    tags,
+    reviewedAt,
+    history,
+  };
+};
+
+const ensureMessageReviewsStorage = async () => {
+  await fs.mkdir(DATA_DIR, { recursive: true });
+  try {
+    await fs.access(MESSAGE_REVIEWS_PATH);
+  } catch {
+    const seed = { version: 1, updatedAt: '', records: {} };
+    await fs.writeFile(MESSAGE_REVIEWS_PATH, JSON.stringify(seed, null, 2), 'utf-8');
+  }
+};
+
+const queueMessageReviewsWriteTask = async (task) => {
+  const run = messageReviewsWriteQueue.then(task);
+  messageReviewsWriteQueue = run.catch(() => {});
+  return run;
+};
+
+const loadMessageReviewsFromDisk = async () => {
+  await ensureMessageReviewsStorage();
+  const raw = await fs.readFile(MESSAGE_REVIEWS_PATH, 'utf-8');
+  const parsed = JSON.parse(raw || '{}');
+  const recordsSource = parsed?.records && typeof parsed.records === 'object' ? parsed.records : {};
+  const records = {};
+  Object.entries(recordsSource).forEach(([messageId, record]) => {
+    const normalized = normalizeMessageReviewRecord(messageId, record);
+    if (normalized) {
+      records[messageId] = normalized;
+    }
+  });
+  messageReviewsCache = {
+    version: 1,
+    updatedAt: typeof parsed?.updatedAt === 'string' ? parsed.updatedAt : '',
+    records,
+  };
+  return messageReviewsCache;
+};
+
+const persistMessageReviewsSnapshot = async (snapshot) => {
+  const normalized = {
+    version: 1,
+    updatedAt: new Date().toISOString(),
+    records: snapshot?.records && typeof snapshot.records === 'object' ? snapshot.records : {},
+  };
+  await fs.writeFile(MESSAGE_REVIEWS_PATH_TMP, JSON.stringify(normalized, null, 2), 'utf-8');
+  await fs.rename(MESSAGE_REVIEWS_PATH_TMP, MESSAGE_REVIEWS_PATH);
+  messageReviewsCache = normalized;
+};
+
+const readMessageReviewsCached = async ({ forceRefresh = false } = {}) => {
+  if (!forceRefresh && messageReviewsCache) {
+    return messageReviewsCache;
+  }
+  if (messageReviewsLoadInFlight) {
+    await messageReviewsLoadInFlight;
+    return messageReviewsCache || { version: 1, updatedAt: '', records: {} };
+  }
+  messageReviewsLoadInFlight = queueMessageReviewsWriteTask(() => loadMessageReviewsFromDisk())
+    .catch(async () => {
+      await ensureMessageReviewsStorage();
+      messageReviewsCache = { version: 1, updatedAt: '', records: {} };
+    })
+    .finally(() => {
+      messageReviewsLoadInFlight = null;
+    });
+  await messageReviewsLoadInFlight;
+  return messageReviewsCache || { version: 1, updatedAt: '', records: {} };
+};
+
+const mutateMessageReviews = async (mutator, { defaultChanged = true } = {}) => {
+  if (typeof mutator !== 'function') {
+    throw new TypeError('mutateMessageReviews requires a function mutator.');
+  }
+  await ensureMessageReviewsStorage();
+  await readMessageReviewsCached();
+  let changed = defaultChanged;
+  let result = null;
+  await queueMessageReviewsWriteTask(async () => {
+    const working = cloneValue(messageReviewsCache || { version: 1, updatedAt: '', records: {} });
+    const output = await mutator(working);
+    if (output && typeof output === 'object' && hasOwn(output, 'changed')) {
+      changed = Boolean(output.changed);
+      result = output.result;
+    } else {
+      result = output;
+    }
+    if (changed) {
+      await persistMessageReviewsSnapshot(working);
+    } else {
+      messageReviewsCache = working;
+    }
+  });
+  return { changed, result };
+};
+
+const getMessageAuditText = (message) => {
+  const data = message?.data && typeof message.data === 'object' ? message.data : {};
+  const parts = [];
+  if (typeof data.content === 'string' && data.content.trim()) parts.push(data.content.trim());
+  if (typeof data.text === 'string' && data.text.trim()) parts.push(data.text.trim());
+  if (typeof data.caption === 'string' && data.caption.trim()) parts.push(data.caption.trim());
+  if (typeof data.name === 'string' && data.name.trim()) parts.push(data.name.trim());
+  if (!parts.length && typeof message?.preview === 'string') {
+    parts.push(message.preview.trim());
+  }
+  return parts.join(' ').trim();
+};
+
+const riskRank = (value) => {
+  if (value === 'high') return 3;
+  if (value === 'medium') return 2;
+  return 1;
+};
+
+const inspectMessageRisk = (message) => {
+  const text = getMessageAuditText(message);
+  if (!text) {
+    return { textSample: '', autoRiskLevel: 'low', hitRules: [] };
+  }
+  let autoRiskLevel = 'low';
+  const hitRules = [];
+  MESSAGE_RISK_RULES.forEach((rule) => {
+    if (!rule.pattern.test(text)) return;
+    hitRules.push({
+      id: rule.id,
+      label: rule.label,
+      risk: rule.risk,
+      tags: Array.isArray(rule.tags) ? rule.tags : [],
+    });
+    if (riskRank(rule.risk) > riskRank(autoRiskLevel)) {
+      autoRiskLevel = rule.risk;
+    }
+  });
+  return {
+    textSample: text.slice(0, 220),
+    autoRiskLevel,
+    hitRules,
+  };
+};
+
+const attachMessageAudit = (message, reviewsMap) => {
+  const review = reviewsMap?.[message.id] || null;
+  const inspection = inspectMessageRisk(message);
+  const reviewStatus = review?.status || 'unreviewed';
+  const riskLevel = normalizeMessageReviewRiskLevel(review?.riskLevel) || inspection.autoRiskLevel;
+  return {
+    ...message,
+    reviewStatus,
+    riskLevel,
+    review,
+    inspection,
+  };
+};
+
+const summarizeMessageReviewRecords = (records) => {
+  const list = Object.values(records || {});
+  const byStatus = { approved: 0, flagged: 0, blocked: 0, deleted: 0 };
+  const byRisk = { low: 0, medium: 0, high: 0 };
+  list.forEach((item) => {
+    const status = normalizeMessageReviewStatus(item?.status);
+    if (status) {
+      byStatus[status] = (byStatus[status] || 0) + 1;
+    }
+    const risk = normalizeMessageReviewRiskLevel(item?.riskLevel) || 'low';
+    byRisk[risk] = (byRisk[risk] || 0) + 1;
+  });
+  return {
+    totalReviewed: list.length,
+    byStatus,
+    byRisk,
+  };
+};
+
+const applyUserBatchAction = (user, action, nowIso) => {
+  const next = { ...user };
+  let changed = false;
+  const clearSessions = () => {
+    const tokenCount = resolveTokenCount(next);
+    if (tokenCount > 0 || next.online === true) {
+      changed = true;
+    }
+    next.online = false;
+    next.tokens = [];
+    next.token = null;
+    next.tokenExpiresAt = null;
+  };
+
+  if (action === 'activate' || action === 'restore') {
+    if (next.blocked === true) {
+      next.blocked = false;
+      changed = true;
+    }
+    if (typeof next.deletedAt === 'string' && next.deletedAt) {
+      next.deletedAt = '';
+      changed = true;
+    }
+    return { changed, user: next };
+  }
+
+  if (action === 'block') {
+    if (next.blocked !== true) {
+      next.blocked = true;
+      changed = true;
+    }
+    clearSessions();
+    return { changed, user: next };
+  }
+
+  if (action === 'soft-delete') {
+    if (!next.deletedAt) {
+      next.deletedAt = nowIso;
+      changed = true;
+    }
+    if (next.blocked !== true) {
+      next.blocked = true;
+      changed = true;
+    }
+    clearSessions();
+    return { changed, user: next };
+  }
+
+  if (action === 'revoke-sessions') {
+    clearSessions();
+    return { changed, user: next };
+  }
+
+  return { changed: false, user: next };
+};
+
+const buildMessageReviewRecord = ({
+  current,
+  messageId,
+  status,
+  riskLevel,
+  reason,
+  tags,
+  reviewer,
+  reviewedAt = new Date().toISOString(),
+}) => {
+  const nextHistory = Array.isArray(current?.history) ? [...current.history] : [];
+  nextHistory.push({
+    status,
+    riskLevel,
+    reason,
+    tags,
+    reviewer,
+    reviewedAt,
+  });
+  return {
+    messageId,
+    status,
+    riskLevel,
+    reason,
+    tags,
+    reviewer,
+    reviewedAt,
+    history: nextHistory.slice(-30),
+  };
+};
+
 router.use(requireAdmin);
 // 路由：GET /users/summary。
 router.get(
@@ -703,6 +1089,69 @@ router.post(
   })
 );
 // 路由：GET /products/summary。
+router.post(
+  '/users/batch-action',
+  asyncRoute(async (req, res) => {
+    const payload = req.body || {};
+    const action = sanitizeText(payload.action, 32).toLowerCase();
+    if (!USER_BATCH_ACTION_SET.has(action)) {
+      res.status(400).json({ success: false, message: 'Invalid batch action.' });
+      return;
+    }
+
+    const source = Array.isArray(payload.uids) ? payload.uids : [];
+    const uids = Array.from(
+      new Set(
+        source
+          .map((value) => Number(value))
+          .filter((uid) => isValidUid(uid))
+          .slice(0, MAX_BATCH_USERS)
+      )
+    );
+    if (!uids.length) {
+      res.status(400).json({ success: false, message: 'uids is required.' });
+      return;
+    }
+
+    const nowIso = new Date().toISOString();
+    const mutation = await mutateUsers(
+      (users) => {
+        const updated = [];
+        const skipped = [];
+        let changed = false;
+        uids.forEach((uid) => {
+          const index = users.findIndex((item) => item.uid === uid);
+          if (index < 0) {
+            skipped.push(uid);
+            return;
+          }
+          const output = applyUserBatchAction(users[index], action, nowIso);
+          if (!output.changed) {
+            updated.push({ uid, changed: false, status: normalizeUserStatus(users[index]) });
+            return;
+          }
+          users[index] = output.user;
+          changed = true;
+          updated.push({ uid, changed: true, status: normalizeUserStatus(output.user) });
+        });
+        return { changed, result: { action, updated, skipped } };
+      },
+      { defaultChanged: false }
+    );
+
+    res.json({
+      success: true,
+      data: {
+        action,
+        requested: uids.length,
+        changed: mutation.result?.updated?.filter((entry) => entry.changed).length || 0,
+        updated: mutation.result?.updated || [],
+        skipped: mutation.result?.skipped || [],
+      },
+    });
+  })
+);
+
 router.get(
   '/products/summary',
   asyncRoute(async (req, res) => {
@@ -1007,6 +1456,194 @@ router.delete(
 );
 
 // 路由：GET /bottlenecks。
+router.get(
+  '/messages/summary',
+  asyncRoute(async (req, res) => {
+    const windowHours = toPositiveInt(req.query?.windowHours, 24, 1, 24 * 365);
+    const [messageSummary, reviews] = await Promise.all([
+      summarizeMessagesForAdmin({ windowHours }),
+      readMessageReviewsCached(),
+    ]);
+    const reviewSummary = summarizeMessageReviewRecords(reviews.records);
+    res.json({
+      success: true,
+      data: {
+        generatedAt: new Date().toISOString(),
+        messages: messageSummary,
+        reviews: reviewSummary,
+      },
+    });
+  })
+);
+
+router.get(
+  '/messages/search',
+  asyncRoute(async (req, res) => {
+    const result = await searchMessagesForAdmin(req.query || {});
+    const reviews = await readMessageReviewsCached();
+    const reviewStatusFilter = sanitizeText(req.query?.reviewStatus, 24).toLowerCase();
+    const riskLevelFilter = normalizeMessageReviewRiskLevel(req.query?.riskLevel);
+    const itemsWithAudit = result.items.map((message) => attachMessageAudit(message, reviews.records));
+    const items = itemsWithAudit.filter((item) => {
+      if (reviewStatusFilter && reviewStatusFilter !== 'all' && item.reviewStatus !== reviewStatusFilter) {
+        return false;
+      }
+      if (riskLevelFilter && item.riskLevel !== riskLevelFilter) {
+        return false;
+      }
+      return true;
+    });
+    res.json({
+      success: true,
+      data: {
+        items,
+        total: result.total,
+        page: result.page,
+        pageSize: result.pageSize,
+        filters: result.filters,
+        note:
+          reviewStatusFilter || riskLevelFilter
+            ? 'reviewStatus/riskLevel filters are applied after pagination.'
+            : '',
+      },
+    });
+  })
+);
+
+router.get(
+  '/messages/detail',
+  asyncRoute(async (req, res) => {
+    const messageId = sanitizeText(req.query?.id, 160);
+    if (!messageId) {
+      res.status(400).json({ success: false, message: 'Message id is required.' });
+      return;
+    }
+    const [message, reviews] = await Promise.all([
+      findMessageByIdForAdmin(messageId),
+      readMessageReviewsCached(),
+    ]);
+    if (!message) {
+      res.status(404).json({ success: false, message: 'Message not found.' });
+      return;
+    }
+    res.json({
+      success: true,
+      data: attachMessageAudit(message, reviews.records),
+    });
+  })
+);
+
+router.post(
+  '/messages/review',
+  asyncRoute(async (req, res) => {
+    const payload = req.body || {};
+    const messageId = sanitizeText(payload.id, 160);
+    if (!messageId) {
+      res.status(400).json({ success: false, message: 'Message id is required.' });
+      return;
+    }
+    const message = await findMessageByIdForAdmin(messageId);
+    if (!message) {
+      res.status(404).json({ success: false, message: 'Message not found.' });
+      return;
+    }
+
+    const status = normalizeMessageReviewStatus(payload.status);
+    if (!status) {
+      res.status(400).json({ success: false, message: 'Invalid review status.' });
+      return;
+    }
+    const inspection = inspectMessageRisk(message);
+    const riskLevel =
+      normalizeMessageReviewRiskLevel(payload.riskLevel) || inspection.autoRiskLevel || 'low';
+    const reason = sanitizeText(payload.reason, MAX_MESSAGE_REVIEW_NOTE_LEN);
+    const tags = normalizeMessageReviewTags(payload.tags);
+    const reviewer = sanitizeText(payload.reviewer || req.headers['x-admin-user'], 64);
+    const reviewedAt = new Date().toISOString();
+
+    const mutation = await mutateMessageReviews(
+      (working) => {
+        const records = working.records && typeof working.records === 'object' ? working.records : {};
+        const current = normalizeMessageReviewRecord(messageId, records[messageId]) || null;
+        const next = buildMessageReviewRecord({
+          current,
+          messageId,
+          status,
+          riskLevel,
+          reason,
+          tags,
+          reviewer,
+          reviewedAt,
+        });
+        records[messageId] = next;
+        working.records = records;
+        return { changed: true, result: next };
+      },
+      { defaultChanged: false }
+    );
+
+    res.json({
+      success: true,
+      data: {
+        review: mutation.result,
+        message: attachMessageAudit(message, { [messageId]: mutation.result }),
+      },
+    });
+  })
+);
+
+router.post(
+  '/messages/delete',
+  asyncRoute(async (req, res) => {
+    const payload = req.body || {};
+    const messageId = sanitizeText(payload.id, 160);
+    if (!messageId) {
+      res.status(400).json({ success: false, message: 'Message id is required.' });
+      return;
+    }
+    const deletedMessage = await deleteMessageByIdForAdmin(messageId);
+    if (!deletedMessage) {
+      res.status(404).json({ success: false, message: 'Message not found.' });
+      return;
+    }
+
+    const reason = sanitizeText(payload.reason, MAX_MESSAGE_REVIEW_NOTE_LEN) || 'Deleted by admin';
+    const reviewer = sanitizeText(payload.reviewer || req.headers['x-admin-user'], 64);
+    const reviewedAt = new Date().toISOString();
+    const inspection = inspectMessageRisk(deletedMessage);
+    const riskLevel = inspection.autoRiskLevel || 'low';
+
+    const mutation = await mutateMessageReviews(
+      (working) => {
+        const records = working.records && typeof working.records === 'object' ? working.records : {};
+        const current = normalizeMessageReviewRecord(messageId, records[messageId]) || null;
+        const next = buildMessageReviewRecord({
+          current,
+          messageId,
+          status: 'deleted',
+          riskLevel,
+          reason,
+          tags: normalizeMessageReviewTags(payload.tags),
+          reviewer,
+          reviewedAt,
+        });
+        records[messageId] = next;
+        working.records = records;
+        return { changed: true, result: next };
+      },
+      { defaultChanged: false }
+    );
+
+    res.json({
+      success: true,
+      data: {
+        deleted: deletedMessage,
+        review: mutation.result,
+      },
+    });
+  })
+);
+
 router.get(
   '/bottlenecks',
   asyncRoute(async (req, res) => {
