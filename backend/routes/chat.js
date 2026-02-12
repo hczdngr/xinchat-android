@@ -27,6 +27,7 @@ import {
 import { appendRiskAppeal, upsertRiskIgnore } from '../risk/stateStore.js';
 import { buildOverviewInlineSummary } from '../summary/service.js';
 import { decideConversationRanking, recordRecoFeedback } from '../reco/index.js';
+import { buildSharedContextFeatures } from '../reco/featureBuilder.js';
 import { atomicWriteFile } from '../utils/filePersistence.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -77,6 +78,7 @@ const chatRiskAppealLimiter = createMemoryRateLimiter({
   windowMs: Number.parseInt(String(process.env.RISK_APPEAL_RATE_WINDOW_MS || '60000'), 10) || 60_000,
   max: Number.parseInt(String(process.env.RISK_APPEAL_RATE_MAX || '20'), 10) || 20,
 });
+const CHAT_REALTIME_RISK_MAX_TEXT_CHARS = 600;
 
 const trackRouteEvent = (req, payload) => {
   void trackEventSafe(
@@ -1715,6 +1717,7 @@ router.post('/send', authenticate, async (req, res) => {
       res.status(403).json({ success: false, message: 'Request failed.' });
       return;
     }
+    const riskGuardEnabled = isFeatureEnabled('riskGuard');
 
     const access = await verifyChatTargetAccess({ user, users, targetType, targetUid });
     if (!access.ok) {
@@ -1741,6 +1744,7 @@ router.post('/send', authenticate, async (req, res) => {
         ? recoFeedbackActionRaw.trim().toLowerCase().slice(0, 32)
         : 'reply';
     const messageData = { ...data };
+    let realtimeRiskText = '';
     const baseUrl = `${req.protocol}://${req.get('host')}`;
     if (type === 'text') {
       const contentRaw =
@@ -1763,6 +1767,7 @@ router.post('/send', authenticate, async (req, res) => {
         return;
       }
       messageData.content = content;
+      realtimeRiskText = content.slice(0, CHAT_REALTIME_RISK_MAX_TEXT_CHARS);
       delete messageData.text;
     }
     if (type === 'image') {
@@ -1991,17 +1996,80 @@ router.post('/send', authenticate, async (req, res) => {
       },
     });
 
-    if (recoDecisionId && isFeatureEnabled('recoVw')) {
+    if (isFeatureEnabled('recoVw')) {
+      const inferredCandidateId = recoCandidateId || `${targetType}:${targetUid}`;
+      const hourOfDay = new Date(createdAtMs).getHours();
+      const sharedFeatures = buildSharedContextFeatures({ uid: senderUid, hourOfDay });
+      const actionFeatures = {
+        isGroup: targetType === 'group' ? 1 : 0,
+        isPrivate: targetType === 'private' ? 1 : 0,
+        sentText: type === 'text' ? 1 : 0,
+        sentMedia: type === 'text' ? 0 : 1,
+      };
       void recordRecoFeedback({
         uid: senderUid,
         decisionId: recoDecisionId,
         action: recoFeedbackAction || 'reply',
-        candidateId: recoCandidateId || `${targetType}:${targetUid}`,
+        candidateId: inferredCandidateId,
         metadata: {
-          source: 'chat_send',
+          source: recoDecisionId ? 'chat_send_reco' : 'chat_send_implicit',
           messageId: entry.id,
+          vwSharedFeatures: sharedFeatures,
+          vwActionFeatures: actionFeatures,
         },
       }).catch(() => undefined);
+    }
+
+    if (riskGuardEnabled && type === 'text' && realtimeRiskText) {
+      const riskText = realtimeRiskText;
+      const riskMessageId = String(entry.id || '');
+      const riskTimestampMs = Number(createdAtMs) || Date.now();
+      void (async () => {
+        try {
+          const risk = await assessOutgoingTextRisk({
+            database,
+            senderUid,
+            targetUid,
+            targetType,
+            text: riskText,
+            nowMs: riskTimestampMs,
+          });
+          if (!risk || typeof risk !== 'object') return;
+          const safeTags = Array.isArray(risk.tags) ? risk.tags.filter(Boolean) : [];
+          if (safeTags.length === 0 && risk.level !== 'medium' && risk.level !== 'high') {
+            return;
+          }
+          if (risk.level === 'medium' || risk.level === 'high') {
+            trackRouteEvent(req, {
+              eventType: 'risk_hit',
+              targetUid,
+              targetType,
+              tags: ['chat_send_realtime', String(risk.level || 'low'), ...safeTags],
+              reason: String(risk.summary || '').slice(0, 120),
+              metadata: {
+                riskScore: Number(risk.score) || 0,
+                riskTags: safeTags,
+                messageId: riskMessageId,
+              },
+            });
+          }
+          await recordRiskDecision({
+            channel: 'chat_send_realtime',
+            actorUid: senderUid,
+            subjectUid: senderUid,
+            targetUid,
+            targetType,
+            risk,
+            includeLow: safeTags.length > 0,
+            metadata: {
+              messageId: riskMessageId,
+              textLength: riskText.length,
+            },
+          });
+        } catch (riskError) {
+          console.error('Chat send realtime risk error:', riskError);
+        }
+      })();
     }
 
     const responsePayload = { success: true, data: entry };

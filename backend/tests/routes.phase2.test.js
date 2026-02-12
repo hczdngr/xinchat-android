@@ -60,6 +60,23 @@ const jsonFetch = async (url, { method = 'GET', body, token } = {}) => {
   return { response, payload };
 };
 
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+const waitFor = async (probe, { timeoutMs = 2500, intervalMs = 80 } = {}) => {
+  const startedAt = Date.now();
+  let lastError = null;
+  while (Date.now() - startedAt <= timeoutMs) {
+    try {
+      const result = await probe();
+      if (result) return result;
+    } catch (error) {
+      lastError = error;
+    }
+    await sleep(intervalMs);
+  }
+  throw lastError || new Error('wait_for_timeout');
+};
+
 const registerAndLogin = async (baseUrl, label) => {
   const seed = `${Math.random().toString(36).slice(2, 8)}${Date.now().toString(36).slice(-3)}`;
   const username = `p2_${String(label || 'u').slice(0, 8)}_${seed}`.toLowerCase();
@@ -131,6 +148,26 @@ test('Phase2: risk evaluation is decoupled from chat/send and available via dedi
         assert.equal(sendResult.payload.success, true);
         assert.equal(typeof sendResult.payload.data?.id, 'string');
         assert.equal(Object.prototype.hasOwnProperty.call(sendResult.payload, 'risk'), false);
+
+        const realtimeRiskOverview = await waitFor(async () => {
+          const overview = await jsonFetch(`${baseUrl}/api/admin/risk/overview`);
+          if (overview.response.status !== 200 || overview.payload?.success !== true) return null;
+          const byChannel = overview.payload?.data?.counts?.byChannel || {};
+          const byTag = overview.payload?.data?.counts?.byTag || {};
+          if (Number(byChannel.chat_send_realtime || 0) < 1) return null;
+          if (Number(byTag.malicious_link || 0) < 1) return null;
+          return overview;
+        });
+        assert.equal(realtimeRiskOverview.response.status, 200);
+        assert.equal(realtimeRiskOverview.payload.success, true);
+        assert.equal(
+          Number(realtimeRiskOverview.payload?.data?.counts?.byChannel?.chat_send_realtime || 0) >= 1,
+          true
+        );
+        assert.equal(
+          Number(realtimeRiskOverview.payload?.data?.counts?.byTag?.malicious_link || 0) >= 1,
+          true
+        );
 
         const evaluateResult = await jsonFetch(`${baseUrl}/api/chat/risk/evaluate`, {
           method: 'POST',

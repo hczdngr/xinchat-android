@@ -1073,10 +1073,13 @@ const recordRiskDecision = async ({
   targetType = 'private',
   risk = null,
   metadata = {},
+  includeLow = false,
 } = {}) => {
   if (!risk || typeof risk !== 'object') return null;
   const safeRiskLevel = String(risk.level || '').toLowerCase();
-  if (safeRiskLevel !== 'medium' && safeRiskLevel !== 'high') return null;
+  if (safeRiskLevel !== 'medium' && safeRiskLevel !== 'high' && !(includeLow && safeRiskLevel === 'low')) {
+    return null;
+  }
   return appendRiskDecision({
     channel: sanitizeText(String(channel || ''), 40).toLowerCase() || 'unknown',
     actorUid: toUid(actorUid),

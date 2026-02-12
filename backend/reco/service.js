@@ -19,6 +19,7 @@ import {
   buildCandidateFeatures,
   buildCandidateId,
   buildSharedContextFeatures,
+  buildVwLine,
 } from './featureBuilder.js';
 import {
   appendRecoDecision,
@@ -31,7 +32,7 @@ import {
   listRecoUserProfiles,
   upsertRecoUserProfile,
 } from './stateStore.js';
-import { getVwClientStatus, scoreCandidatesWithVw } from './vwClient.js';
+import { getVwClientStatus, scoreCandidatesWithVw, trainVwModelWithLine } from './vwClient.js';
 
 const ACTION_REWARD = Object.freeze({
   click: 0.35,
@@ -200,6 +201,16 @@ const makeDecisionLogRecord = (payload = {}) => ({
   metadata: payload.metadata && typeof payload.metadata === 'object' ? payload.metadata : {},
 });
 
+const buildFallbackActionFeatures = (candidateId = '') => {
+  const normalized = sanitizeText(candidateId, 120).toLowerCase();
+  const targetType = normalized.startsWith('group:') ? 'group' : 'private';
+  return {
+    fallback_candidate: 1,
+    isGroup: targetType === 'group' ? 1 : 0,
+    isPrivate: targetType === 'private' ? 1 : 0,
+  };
+};
+
 const decideConversationRanking = async ({
   uid = 0,
   candidates = [],
@@ -290,6 +301,10 @@ const decideConversationRanking = async ({
       score: preVwScore,
       provider: 'heuristic',
     };
+  });
+  const vwCandidateFeatures = {};
+  scored.forEach((item) => {
+    vwCandidateFeatures[item.candidateId] = item.features;
   });
 
   let provider = 'heuristic';
@@ -388,6 +403,8 @@ const decideConversationRanking = async ({
       vwUsed,
       vwReason,
       hourOfDay,
+      vwSharedFeatures: sharedFeatures,
+      vwCandidateFeatures,
     },
   });
 
@@ -529,6 +546,63 @@ const recordRecoFeedback = async ({
         return next;
       });
       metrics.incCounter('reco_feedback_online_update_total', 1, { action: safeAction });
+
+      const decisionMetadata =
+        decision?.metadata && typeof decision.metadata === 'object' ? decision.metadata : {};
+      const feedbackMetadata = metadata && typeof metadata === 'object' ? metadata : {};
+      const sharedFromDecision =
+        decisionMetadata.vwSharedFeatures && typeof decisionMetadata.vwSharedFeatures === 'object'
+          ? decisionMetadata.vwSharedFeatures
+          : {};
+      const sharedFromFeedback =
+        feedbackMetadata.vwSharedFeatures && typeof feedbackMetadata.vwSharedFeatures === 'object'
+          ? feedbackMetadata.vwSharedFeatures
+          : {};
+      const candidateFeaturesFromDecision =
+        decisionMetadata.vwCandidateFeatures && typeof decisionMetadata.vwCandidateFeatures === 'object'
+          ? decisionMetadata.vwCandidateFeatures
+          : {};
+      const candidateFeaturesFromFeedback =
+        feedbackMetadata.vwCandidateFeatures && typeof feedbackMetadata.vwCandidateFeatures === 'object'
+          ? feedbackMetadata.vwCandidateFeatures
+          : {};
+      const actionFeaturesFromFeedback =
+        feedbackMetadata.vwActionFeatures && typeof feedbackMetadata.vwActionFeatures === 'object'
+          ? feedbackMetadata.vwActionFeatures
+          : {};
+      const sharedFeatures =
+        Object.keys(sharedFromDecision).length > 0
+          ? sharedFromDecision
+          : Object.keys(sharedFromFeedback).length > 0
+            ? sharedFromFeedback
+          : buildSharedContextFeatures({
+              uid: safeUid,
+              hourOfDay: new Date(createdAtMs).getHours(),
+            });
+      const actionFeatures =
+        candidateFeaturesFromDecision[resolvedCandidateId] &&
+        typeof candidateFeaturesFromDecision[resolvedCandidateId] === 'object'
+          ? candidateFeaturesFromDecision[resolvedCandidateId]
+          : candidateFeaturesFromFeedback[resolvedCandidateId] &&
+              typeof candidateFeaturesFromFeedback[resolvedCandidateId] === 'object'
+            ? candidateFeaturesFromFeedback[resolvedCandidateId]
+            : Object.keys(actionFeaturesFromFeedback).length > 0
+              ? actionFeaturesFromFeedback
+          : buildFallbackActionFeatures(resolvedCandidateId);
+      const trainLine = buildVwLine({
+        shared: sharedFeatures,
+        action: actionFeatures,
+        label: clampNumber(resolvedReward, -2, 2, 0),
+      });
+      const trainResult = await trainVwModelWithLine({
+        line: trainLine,
+        timeoutMs: config.vwTimeoutMs,
+        learningRate,
+        config,
+      });
+      metrics.incCounter('reco_feedback_vw_train_total', 1, {
+        status: trainResult.available ? 'ok' : 'fallback',
+      });
     }
   } catch (error) {
     RECO_RUNTIME.feedbackFailed += 1;
@@ -708,4 +782,3 @@ export {
   recordRecoFeedback,
   updateRecoAdminConfig,
 };
-

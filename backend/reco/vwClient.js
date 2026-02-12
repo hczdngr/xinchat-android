@@ -28,15 +28,13 @@ const parsePredictionFile = async (predictionPath) => {
   });
 };
 
-const runVwProcess = async ({ binaryPath, modelPath, lines, timeoutMs = 1500 }) => {
-  const predictionPath = path.join(
-    os.tmpdir(),
-    `xinchat_vw_pred_${process.pid}_${Date.now()}_${Math.random().toString(16).slice(2)}.txt`
-  );
-  const args = ['--quiet', '-t', '-i', modelPath, '-p', predictionPath];
+const runVwProcess = async ({ binaryPath, args = [], lines = [], timeoutMs = 1500 }) => {
+  const useNodeShim = /\.(mjs|cjs|js)$/i.test(String(binaryPath || '').trim());
+  const spawnCommand = useNodeShim ? process.execPath : binaryPath;
+  const spawnArgs = useNodeShim ? [binaryPath, ...args] : args;
 
   return await new Promise((resolve) => {
-    const child = spawn(binaryPath, args, {
+    const child = spawn(spawnCommand, spawnArgs, {
       stdio: ['pipe', 'pipe', 'pipe'],
       windowsHide: true,
     });
@@ -53,7 +51,6 @@ const runVwProcess = async ({ binaryPath, modelPath, lines, timeoutMs = 1500 }) 
         signal: 'SIGKILL',
         stdout: stdoutText,
         stderr: 'vw_timeout',
-        predictionPath,
       });
     }, Math.max(200, Math.floor(timeoutMs)));
 
@@ -73,7 +70,6 @@ const runVwProcess = async ({ binaryPath, modelPath, lines, timeoutMs = 1500 }) 
         signal: 'spawn_error',
         stdout: stdoutText,
         stderr: String(error?.message || 'vw_spawn_error'),
-        predictionPath,
       });
     });
     child.on('close', (code, signal) => {
@@ -86,13 +82,30 @@ const runVwProcess = async ({ binaryPath, modelPath, lines, timeoutMs = 1500 }) 
         signal: signal || '',
         stdout: stdoutText,
         stderr: stderrText,
-        predictionPath,
       });
     });
 
     child.stdin.on('error', () => undefined);
     child.stdin.end(lines.join('\n') + '\n');
   });
+};
+
+const runVwPrediction = async ({ binaryPath, modelPath, lines, timeoutMs = 1500 }) => {
+  const predictionPath = path.join(
+    os.tmpdir(),
+    `xinchat_vw_pred_${process.pid}_${Date.now()}_${Math.random().toString(16).slice(2)}.txt`
+  );
+  const args = ['--quiet', '-t', '-i', modelPath, '-p', predictionPath];
+  const result = await runVwProcess({
+    binaryPath,
+    args,
+    lines,
+    timeoutMs,
+  });
+  return {
+    ...result,
+    predictionPath,
+  };
 };
 
 const getVwClientStatus = (config = {}) => {
@@ -142,7 +155,7 @@ const scoreCandidatesWithVw = async ({
     })
   );
 
-  const result = await runVwProcess({
+  const result = await runVwPrediction({
     binaryPath: status.binaryPath,
     modelPath: status.modelPath,
     lines,
@@ -173,5 +186,48 @@ const scoreCandidatesWithVw = async ({
   }
 };
 
-export { getVwClientStatus, scoreCandidatesWithVw };
+const trainVwModelWithLine = async ({
+  line = '',
+  timeoutMs = 1500,
+  learningRate = null,
+  config = {},
+} = {}) => {
+  const status = getVwClientStatus(config);
+  const sample = String(line || '').trim();
+  if (!status.ready) {
+    return {
+      available: false,
+      provider: 'vw_cli',
+      reason: 'vw_not_ready',
+      status,
+    };
+  }
+  if (!sample) {
+    return {
+      available: false,
+      provider: 'vw_cli',
+      reason: 'empty_train_line',
+      status,
+    };
+  }
+  const args = ['--quiet', '-i', status.modelPath, '-f', status.modelPath];
+  if (Number.isFinite(Number(learningRate))) {
+    args.push('-l', String(toFiniteNumber(learningRate, 0.08)));
+  }
+  const result = await runVwProcess({
+    binaryPath: status.binaryPath,
+    args,
+    lines: [sample],
+    timeoutMs: toFiniteNumber(timeoutMs, 1500),
+  });
+  return {
+    available: result.ok,
+    provider: 'vw_cli',
+    reason: result.ok ? 'ok' : String(result?.stderr || 'vw_train_failed').slice(0, 240),
+    status,
+    stderr: String(result?.stderr || '').slice(0, 500),
+    code: result.code,
+  };
+};
 
+export { getVwClientStatus, scoreCandidatesWithVw, trainVwModelWithLine };
