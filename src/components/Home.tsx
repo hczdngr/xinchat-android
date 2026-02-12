@@ -219,6 +219,139 @@ type PreparedForwardMessage = {
   localData: Record<string, any>;
   payload: Record<string, any>;
 };
+type ReplySuggestStyle = 'polite' | 'concise' | 'formal';
+type ReplySuggestionEntry = {
+  id: string;
+  text: string;
+  style: ReplySuggestStyle;
+  confidence: number;
+  reason: string;
+};
+type ReplySuggestionPanel = {
+  model: string;
+  styleMode: string;
+  intent: string;
+  generatedAt: string;
+  degraded: boolean;
+  reason: string;
+  suggestions: ReplySuggestionEntry[];
+};
+type AssistantProfileSnapshot = {
+  translateStyle: string;
+  explanationLevel: string;
+  replyStyle: ReplySuggestStyle;
+};
+type ChatRiskEvidence = {
+  rule: string;
+  type: string;
+  description: string;
+  snippet: string;
+};
+type ChatRiskProfile = {
+  enabled: boolean;
+  available: boolean;
+  source: string;
+  score: number;
+  level: 'low' | 'medium' | 'high';
+  tags: string[];
+  evidence: ChatRiskEvidence[];
+  summary: string;
+  ignored: boolean;
+  generatedAt: string;
+  targetUid?: number;
+  targetType?: ChatTargetType;
+};
+type RelationshipOpsEntry = {
+  targetUid: number;
+  targetType: ChatTargetType;
+  title: string;
+  memberCount: number;
+  score: number;
+  lastInteractionAt: string;
+  metrics: {
+    recent7d: number;
+    prev7d: number;
+    recent30d: number;
+    prev30d: number;
+    decline7d: number;
+    decline30d: number;
+    declineRate7d: number;
+    declineRate30d: number;
+  };
+  recommendation: {
+    action: 'message' | 'greet';
+    label: string;
+    reason: string;
+  };
+  tags: string[];
+};
+type RelationshipOpsSnapshot = {
+  enabled: boolean;
+  available: boolean;
+  generatedAt: string;
+  scope: 'all' | 'private' | 'group';
+  windowDays: 7 | 30;
+  summary: {
+    totalCandidates: number;
+    totalDeclined: number;
+    inactive7d: number;
+    privateCount: number;
+    groupCount: number;
+  };
+  items: RelationshipOpsEntry[];
+};
+type SummaryCenterHighlight = {
+  targetUid: number;
+  targetType: ChatTargetType;
+  title: string;
+  unread: number;
+  lastMessageAt: string;
+  lastMessagePreview: string;
+  reason: string;
+};
+type SummaryCenterTodo = {
+  targetUid: number;
+  targetType: ChatTargetType;
+  title: string;
+  action: 'reply' | 'check_group';
+  reason: string;
+  lastIncomingAt: string;
+  unread: number;
+};
+type SummaryCenterLatest = {
+  id: string;
+  userUid: number;
+  generatedAt: string;
+  timeBucket: string;
+  source: string;
+  reason: string;
+  unreadTotal: number;
+  unreadConversations: number;
+  totalConversations: number;
+  summaryText: string;
+  highlights: SummaryCenterHighlight[];
+  todos: SummaryCenterTodo[];
+  readAt: string;
+  archivedAt: string;
+};
+type SummaryCenterSnapshot = {
+  enabled: boolean;
+  available: boolean;
+  generatedAt: string;
+  latest: SummaryCenterLatest | null;
+  history: SummaryCenterLatest[];
+  badges: {
+    hasLatest: boolean;
+    unreadHistory: number;
+    unreadTotal: number;
+  };
+  stats: {
+    generatedTotal: number;
+    manualRefreshTotal: number;
+    archivedTotal: number;
+    lastError: string;
+  };
+};
 type PendingSingleDelete = { chatUid: number; messageId: string } | null;
 type PendingMultiDelete = { chatUid: number; messageIds: string[] } | null;
 
@@ -244,6 +377,306 @@ const decodeChatUid = (chatUid: number): { targetUid: number; targetType: ChatTa
     return { targetUid: normalizedUid - GROUP_CHAT_UID_OFFSET, targetType: 'group' };
   }
   return { targetUid: normalizedUid, targetType: 'private' };
+};
+const REPLY_STYLE_OPTIONS: ReadonlyArray<ReplySuggestStyle> = ['polite', 'concise', 'formal'];
+const REPLY_STYLE_LABEL_MAP: Record<ReplySuggestStyle, string> = {
+  polite: '礼貌',
+  concise: '简洁',
+  formal: '正式',
+};
+const normalizeReplySuggestStyle = (value: unknown): ReplySuggestStyle => {
+  const raw = String(value || '').trim().toLowerCase();
+  if (raw === 'concise') return 'concise';
+  if (raw === 'formal') return 'formal';
+  return 'polite';
+};
+const normalizeReplySuggestionPanel = (value: any): ReplySuggestionPanel | null => {
+  const source = value && typeof value === 'object' ? value : {};
+  const listSource = Array.isArray(source.replySuggestions)
+    ? source.replySuggestions
+    : Array.isArray(source.suggestions)
+      ? source.suggestions
+      : [];
+  const suggestions = listSource
+    .map((item: any, index: number) => {
+      const text = String(item?.text || '').replace(/\s+/g, ' ').trim().slice(0, 120);
+      if (!text) return null;
+      const style = normalizeReplySuggestStyle(item?.style);
+      const confidenceRaw = Number(item?.confidence);
+      const confidence = Number.isFinite(confidenceRaw)
+        ? Math.max(0, Math.min(1, confidenceRaw))
+        : 0.5;
+      return {
+        id: String(item?.id || `${style}-${index + 1}`),
+        text,
+        style,
+        confidence,
+        reason: String(item?.reason || '').replace(/\s+/g, ' ').trim().slice(0, 200),
+      };
+    })
+    .filter(Boolean)
+    .slice(0, 3) as ReplySuggestionEntry[];
+  if (!suggestions.length) return null;
+  return {
+    model: String(source.model || ''),
+    styleMode: String(source.styleMode || ''),
+    intent: String(source.intent || ''),
+    generatedAt: String(source.generatedAt || ''),
+    degraded: source.degraded === true,
+    reason: String(source.reason || ''),
+    suggestions,
+  };
+};
+const normalizeRiskLevel = (value: any): 'low' | 'medium' | 'high' => {
+  const raw = String(value || '').trim().toLowerCase();
+  if (raw === 'high') return 'high';
+  if (raw === 'medium') return 'medium';
+  return 'low';
+};
+const normalizeChatRiskProfile = (value: any): ChatRiskProfile | null => {
+  const source = value && typeof value === 'object' ? value : {};
+  const enabled = source.enabled !== false;
+  const scoreRaw = Number(source.score);
+  const score = Number.isFinite(scoreRaw) ? Math.max(0, Math.min(100, scoreRaw)) : 0;
+  const level = normalizeRiskLevel(source.level);
+  const tags = Array.from(
+    new Set(
+      (Array.isArray(source.tags) ? source.tags : [])
+        .map((item: any) => String(item || '').trim())
+        .filter(Boolean)
+    )
+  ).slice(0, 12) as string[];
+  const evidence = (Array.isArray(source.evidence) ? source.evidence : [])
+    .map((item: any) => {
+      const rule = String(item?.rule || '').trim();
+      const type = String(item?.type || '').trim();
+      const description = String(item?.description || '').trim();
+      const snippet = String(item?.snippet || '').trim();
+      if (!rule && !description) return null;
+      return {
+        rule: rule || 'unknown',
+        type: type || 'rule',
+        description: description.slice(0, 200),
+        snippet: snippet.slice(0, 160),
+      };
+    })
+    .filter(Boolean)
+    .slice(0, 8) as ChatRiskEvidence[];
+  const summary =
+    String(source.summary || '').replace(/\s+/g, ' ').trim().slice(0, 220) ||
+    evidence[0]?.description ||
+    '';
+  if (!enabled && !summary && level === 'low' && score <= 0) {
+    return {
+      enabled: false,
+      available: true,
+      source: String(source.source || 'chat_profile'),
+      score: 0,
+      level: 'low',
+      tags: [],
+      evidence: [],
+      summary: 'risk guard is disabled.',
+      ignored: false,
+      generatedAt: String(source.generatedAt || ''),
+      targetUid: Number(source.targetUid) || 0,
+      targetType: source.targetType === 'group' ? 'group' : 'private',
+    };
+  }
+  return {
+    enabled,
+    available: source.available !== false,
+    source: String(source.source || 'chat_profile'),
+    score,
+    level,
+    tags,
+    evidence,
+    summary,
+    ignored: source.ignored === true,
+    generatedAt: String(source.generatedAt || ''),
+    targetUid: Number(source.targetUid) || 0,
+    targetType: source.targetType === 'group' ? 'group' : 'private',
+  };
+};
+const normalizeRelationshipScope = (value: unknown): 'all' | 'private' | 'group' => {
+  const raw = String(value || '').trim().toLowerCase();
+  if (raw === 'private' || raw === 'friend' || raw === 'friends') return 'private';
+  if (raw === 'group' || raw === 'groups') return 'group';
+  return 'all';
+};
+const normalizeRelationshipWindowDays = (value: unknown): 7 | 30 => {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed >= 30 ? 30 : 7;
+};
+const normalizeRelationshipOpsSnapshot = (value: any): RelationshipOpsSnapshot => {
+  const source = value && typeof value === 'object' ? value : {};
+  const items = (Array.isArray(source.items) ? source.items : [])
+    .map((item: any) => {
+      const targetUid = Number(item?.targetUid);
+      if (!Number.isInteger(targetUid) || targetUid <= 0) return null;
+      const targetType: ChatTargetType = item?.targetType === 'group' ? 'group' : 'private';
+      const metricsSource = item?.metrics && typeof item.metrics === 'object' ? item.metrics : {};
+      const recent7d = Math.max(0, Number(metricsSource.recent7d) || 0);
+      const prev7d = Math.max(0, Number(metricsSource.prev7d) || 0);
+      const recent30d = Math.max(0, Number(metricsSource.recent30d) || 0);
+      const prev30d = Math.max(0, Number(metricsSource.prev30d) || 0);
+      const decline7d = Math.max(0, Number(metricsSource.decline7d) || 0);
+      const decline30d = Math.max(0, Number(metricsSource.decline30d) || 0);
+      const declineRate7d = Math.max(0, Math.min(100, Number(metricsSource.declineRate7d) || 0));
+      const declineRate30d = Math.max(0, Math.min(100, Number(metricsSource.declineRate30d) || 0));
+      const tags = Array.from(
+        new Set(
+          (Array.isArray(item?.tags) ? item.tags : [])
+            .map((entry: any) => String(entry || '').trim())
+            .filter(Boolean)
+        )
+      ).slice(0, 8) as string[];
+      const recommendationSource =
+        item?.recommendation && typeof item.recommendation === 'object'
+          ? item.recommendation
+          : {};
+      const recommendationAction =
+        recommendationSource.action === 'message' ? 'message' : 'greet';
+      return {
+        targetUid,
+        targetType,
+        title: String(item?.title || '').trim().slice(0, 80) || (targetType === 'group' ? `群聊${targetUid}` : `用户${targetUid}`),
+        memberCount: Math.max(0, Number(item?.memberCount) || 0),
+        score: Math.max(0, Number(item?.score) || 0),
+        lastInteractionAt: String(item?.lastInteractionAt || ''),
+        metrics: {
+          recent7d,
+          prev7d,
+          recent30d,
+          prev30d,
+          decline7d,
+          decline30d,
+          declineRate7d,
+          declineRate30d,
+        },
+        recommendation: {
+          action: recommendationAction,
+          label:
+            String(recommendationSource.label || '').trim() ||
+            (targetType === 'group'
+              ? recommendationAction === 'message'
+                ? '发群消息'
+                : '群里打招呼'
+              : recommendationAction === 'message'
+                ? '发消息'
+                : '打招呼'),
+          reason: String(recommendationSource.reason || '')
+            .replace(/\s+/g, ' ')
+            .trim()
+            .slice(0, 200),
+        },
+        tags,
+      };
+    })
+    .filter(Boolean) as RelationshipOpsEntry[];
+
+  return {
+    enabled: source.enabled !== false,
+    available: source.available !== false,
+    generatedAt: String(source.generatedAt || ''),
+    scope: normalizeRelationshipScope(source.scope),
+    windowDays: normalizeRelationshipWindowDays(source.windowDays),
+    summary: {
+      totalCandidates: Math.max(0, Number(source?.summary?.totalCandidates) || 0),
+      totalDeclined: Math.max(0, Number(source?.summary?.totalDeclined) || 0),
+      inactive7d: Math.max(0, Number(source?.summary?.inactive7d) || 0),
+      privateCount: Math.max(0, Number(source?.summary?.privateCount) || 0),
+      groupCount: Math.max(0, Number(source?.summary?.groupCount) || 0),
+    },
+    items,
+  };
+};
+const normalizeSummaryCenterSnapshot = (value: any): SummaryCenterSnapshot => {
+  const source = value && typeof value === 'object' ? value : {};
+  const normalizeHighlight = (item: any): SummaryCenterHighlight | null => {
+    const targetUid = Number(item?.targetUid);
+    if (!Number.isInteger(targetUid) || targetUid <= 0) return null;
+    const targetType: ChatTargetType = item?.targetType === 'group' ? 'group' : 'private';
+    return {
+      targetUid,
+      targetType,
+      title:
+        String(item?.title || '').replace(/\s+/g, ' ').trim().slice(0, 80) ||
+        (targetType === 'group' ? `群聊${targetUid}` : `用户${targetUid}`),
+      unread: Math.max(0, Number(item?.unread) || 0),
+      lastMessageAt: String(item?.lastMessageAt || ''),
+      lastMessagePreview: String(item?.lastMessagePreview || '')
+        .replace(/\s+/g, ' ')
+        .trim()
+        .slice(0, 140),
+      reason: String(item?.reason || '').replace(/\s+/g, ' ').trim().slice(0, 200),
+    };
+  };
+  const normalizeTodo = (item: any): SummaryCenterTodo | null => {
+    const targetUid = Number(item?.targetUid);
+    if (!Number.isInteger(targetUid) || targetUid <= 0) return null;
+    const targetType: ChatTargetType = item?.targetType === 'group' ? 'group' : 'private';
+    return {
+      targetUid,
+      targetType,
+      title:
+        String(item?.title || '').replace(/\s+/g, ' ').trim().slice(0, 80) ||
+        (targetType === 'group' ? `群聊${targetUid}` : `用户${targetUid}`),
+      action: item?.action === 'check_group' ? 'check_group' : 'reply',
+      reason: String(item?.reason || '').replace(/\s+/g, ' ').trim().slice(0, 200),
+      lastIncomingAt: String(item?.lastIncomingAt || ''),
+      unread: Math.max(0, Number(item?.unread) || 0),
+    };
+  };
+  const normalizeLatest = (item: any): SummaryCenterLatest | null => {
+    const latest = item && typeof item === 'object' ? item : {};
+    const id = String(latest?.id || '').trim();
+    if (!id) return null;
+    return {
+      id,
+      userUid: Math.max(0, Number(latest?.userUid) || 0),
+      generatedAt: String(latest?.generatedAt || ''),
+      timeBucket: String(latest?.timeBucket || ''),
+      source: String(latest?.source || ''),
+      reason: String(latest?.reason || '').replace(/\s+/g, ' ').trim().slice(0, 120),
+      unreadTotal: Math.max(0, Number(latest?.unreadTotal) || 0),
+      unreadConversations: Math.max(0, Number(latest?.unreadConversations) || 0),
+      totalConversations: Math.max(0, Number(latest?.totalConversations) || 0),
+      summaryText: String(latest?.summaryText || '').replace(/\s+/g, ' ').trim().slice(0, 280),
+      highlights: (Array.isArray(latest?.highlights) ? latest.highlights : [])
+        .map((entry: any) => normalizeHighlight(entry))
+        .filter(Boolean)
+        .slice(0, 8) as SummaryCenterHighlight[],
+      todos: (Array.isArray(latest?.todos) ? latest.todos : [])
+        .map((entry: any) => normalizeTodo(entry))
+        .filter(Boolean)
+        .slice(0, 12) as SummaryCenterTodo[],
+      readAt: String(latest?.readAt || ''),
+      archivedAt: String(latest?.archivedAt || ''),
+    };
+  };
+  const latest = normalizeLatest(source?.latest);
+  const history = (Array.isArray(source?.history) ? source.history : [])
+    .map((entry: any) => normalizeLatest(entry))
+    .filter(Boolean)
+    .slice(0, 40) as SummaryCenterLatest[];
+  return {
+    enabled: source.enabled !== false,
+    available: source.available !== false,
+    generatedAt: String(source.generatedAt || ''),
+    latest,
+    history,
+    badges: {
+      hasLatest: source?.badges?.hasLatest === true || Boolean(latest),
+      unreadHistory: Math.max(0, Number(source?.badges?.unreadHistory) || 0),
+      unreadTotal: Math.max(0, Number(source?.badges?.unreadTotal) || Number(latest?.unreadTotal) || 0),
+    },
+    stats: {
+      generatedTotal: Math.max(0, Number(source?.stats?.generatedTotal) || 0),
+      manualRefreshTotal: Math.max(0, Number(source?.stats?.manualRefreshTotal) || 0),
+      archivedTotal: Math.max(0, Number(source?.stats?.archivedTotal) || 0),
+      lastError: String(source?.stats?.lastError || '').replace(/\s+/g, ' ').trim().slice(0, 220),
+    },
+  };
 };
 const HEARTBEAT_MS = 20000;
 const RECONNECT_BASE_MS = 1500;
@@ -1581,7 +2014,15 @@ const ChatMessageRow = React.memo(
                       </Text>
                     </Pressable>
                   ) : (
-                    <Text style={[styles.messageText, isSelf && styles.selfText]}>{message.content}</Text>
+                    <Text
+                      style={[
+                        styles.messageText,
+                        Platform.OS === 'web' && styles.messageTextWebWrap,
+                        isSelf && styles.selfText,
+                      ]}
+                    >
+                      {message.content}
+                    </Text>
                   )}
                 </View>
               </Pressable>
@@ -1696,6 +2137,17 @@ export default function Home({
 
   const [activeChatUid, setActiveChatUid] = useState<number | null>(null);
   const [draftMessage, setDraftMessage] = useState('');
+  const [replySuggestStyle, setReplySuggestStyle] = useState<ReplySuggestStyle>('polite');
+  const [replySuggestUseProfile, setReplySuggestUseProfile] = useState(true);
+  const [replySuggestTapSend, setReplySuggestTapSend] = useState(false);
+  const [replySuggestLoading, setReplySuggestLoading] = useState(false);
+  const [replySuggestionPanelByUid, setReplySuggestionPanelByUid] = useState<
+    Record<number, ReplySuggestionPanel>
+  >({});
+  const [chatRiskByUid, setChatRiskByUid] = useState<Record<number, ChatRiskProfile>>({});
+  const [chatRiskLoadingByUid, setChatRiskLoadingByUid] = useState<Record<number, boolean>>({});
+  const [assistantProfileSnapshot, setAssistantProfileSnapshot] =
+    useState<AssistantProfileSnapshot | null>(null);
   const [emojiPanelVisible, setEmojiPanelVisible] = useState(false);
   const [emojiActiveCategory, setEmojiActiveCategory] = useState<EmojiCategoryKey>('recent');
   const [recentEmojis, setRecentEmojis] = useState<string[]>(DEFAULT_RECENT_EMOJIS);
@@ -1722,7 +2174,22 @@ export default function Home({
   );
   const [friendsRefreshKey, setFriendsRefreshKey] = useState(0);
   const [pendingRequestCount, setPendingRequestCount] = useState(0);
-  const [homeTab, setHomeTab] = useState<'messages' | 'contacts'>('messages');
+  const [homeTab, setHomeTab] = useState<'messages' | 'contacts' | 'relationship' | 'summary'>(
+    'messages'
+  );
+  const [relationshipScope, setRelationshipScope] = useState<'all' | 'private' | 'group'>('all');
+  const [relationshipWindowDays, setRelationshipWindowDays] = useState<7 | 30>(7);
+  const [relationshipOpsSnapshot, setRelationshipOpsSnapshot] =
+    useState<RelationshipOpsSnapshot | null>(null);
+  const [relationshipOpsLoading, setRelationshipOpsLoading] = useState(false);
+  const [relationshipOpsError, setRelationshipOpsError] = useState('');
+  const [summaryCenterSnapshot, setSummaryCenterSnapshot] = useState<SummaryCenterSnapshot | null>(
+    null
+  );
+  const [summaryCenterLoading, setSummaryCenterLoading] = useState(false);
+  const [summaryCenterError, setSummaryCenterError] = useState('');
+  const [summaryCenterRefreshLoading, setSummaryCenterRefreshLoading] = useState(false);
+  const [summaryCenterArchiveLoading, setSummaryCenterArchiveLoading] = useState(false);
   const [tourStepIndex, setTourStepIndex] = useState(0);
   const [tourVisible, setTourVisible] = useState(false);
   const [tourSeenLoaded, setTourSeenLoaded] = useState(false);
@@ -2347,6 +2814,14 @@ export default function Home({
       }
     };
     loadReadAt().catch(() => undefined);
+  }, []);
+
+  useEffect(() => {
+    const loadReplySuggestTapSend = async () => {
+      const raw = String((await storage.getString(STORAGE_KEYS.replySuggestTapSend)) || '').trim();
+      setReplySuggestTapSend(raw === '1');
+    };
+    loadReplySuggestTapSend().catch(() => undefined);
   }, []);
 
   useEffect(() => {
@@ -2997,6 +3472,38 @@ export default function Home({
     return date.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' });
   }, []);
 
+  const formatRelationshipLastInteraction = useCallback((value?: string) => {
+    const timestamp = Number.isFinite(Date.parse(String(value || '')))
+      ? Date.parse(String(value || ''))
+      : 0;
+    if (!timestamp || timestamp <= 0) return '暂无互动记录';
+    const deltaMs = Date.now() - timestamp;
+    if (!Number.isFinite(deltaMs)) return '暂无互动记录';
+    if (deltaMs < 60 * 1000) return '刚刚';
+    if (deltaMs < 60 * 60 * 1000) return `${Math.max(1, Math.floor(deltaMs / 60000))} 分钟前`;
+    if (deltaMs < 24 * 60 * 60 * 1000) return `${Math.max(1, Math.floor(deltaMs / 3600000))} 小时前`;
+    if (deltaMs < 7 * 24 * 60 * 60 * 1000) return `${Math.max(1, Math.floor(deltaMs / 86400000))} 天前`;
+    const date = new Date(timestamp);
+    return date.toLocaleDateString('zh-CN', { month: '2-digit', day: '2-digit' });
+  }, []);
+
+  const formatSummaryGeneratedAt = useCallback((value?: string) => {
+    const timestamp = Number.isFinite(Date.parse(String(value || '')))
+      ? Date.parse(String(value || ''))
+      : 0;
+    if (!timestamp || timestamp <= 0) return '刚刚';
+    const deltaMs = Date.now() - timestamp;
+    if (!Number.isFinite(deltaMs)) return '刚刚';
+    if (deltaMs < 60 * 1000) return '刚刚';
+    if (deltaMs < 60 * 60 * 1000) return `${Math.max(1, Math.floor(deltaMs / 60000))} 分钟前`;
+    if (deltaMs < 24 * 60 * 60 * 1000) return `${Math.max(1, Math.floor(deltaMs / 3600000))} 小时前`;
+    const date = new Date(timestamp);
+    return `${date.toLocaleDateString('zh-CN')} ${date.toLocaleTimeString('zh-CN', {
+      hour: '2-digit',
+      minute: '2-digit',
+    })}`;
+  }, []);
+
   const ensureMessageBucket = useCallback((uid: number) => {
     if (!uid) return;
     setMessagesByUid((prev) => (prev[uid] ? prev : { ...prev, [uid]: [] }));
@@ -3510,11 +4017,21 @@ export default function Home({
       payload: Record<string, any>;
     }) => {
       if (!selfUid || !chatUid || !localMessageId || !clientMessageId || !payload) return false;
+      const safeType = String(payload?.type || '').toLowerCase();
+      const payloadToSend =
+        safeType === 'text'
+          ? {
+              ...payload,
+              replySuggest: payload?.replySuggest ?? true,
+              replyStyle: String(payload?.replyStyle || replySuggestStyle).trim() || replySuggestStyle,
+              replySuggestUseProfile: payload?.replySuggestUseProfile ?? replySuggestUseProfile,
+            }
+          : payload;
       try {
         const response = await fetch(`${API_BASE}/api/chat/send`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json', ...authHeaders() },
-          body: JSON.stringify(payload),
+          body: JSON.stringify(payloadToSend),
         });
         const data = await response.json().catch(() => ({}));
         if (response.ok && data?.success && data?.data) {
@@ -3530,13 +4047,29 @@ export default function Home({
               withOutgoingEnterAnimation(data.data, { clientMessageId, appearAtMs: Date.now() }),
             ]);
           }
+          const replyPanel = normalizeReplySuggestionPanel(data?.assistant);
+          if (replyPanel && chatUid > 0) {
+            setReplySuggestionPanelByUid((prev) => ({ ...prev, [chatUid]: replyPanel }));
+          }
+          const riskProfile = normalizeChatRiskProfile(data?.risk);
+          if (riskProfile && chatUid > 0) {
+            setChatRiskByUid((prev) => ({ ...prev, [chatUid]: riskProfile }));
+          }
           return true;
         }
       } catch {}
       markMessageAsFailed(chatUid, localMessageId);
       return false;
     },
-    [authHeaders, insertMessages, markMessageAsFailed, resolvePendingMessageByServerEntry, selfUid]
+    [
+      authHeaders,
+      insertMessages,
+      markMessageAsFailed,
+      replySuggestStyle,
+      replySuggestUseProfile,
+      resolvePendingMessageByServerEntry,
+      selfUid,
+    ]
   );
 
   const loadPendingRequestCount = useCallback(async () => {
@@ -3556,6 +4089,205 @@ export default function Home({
       setPendingRequestCount(Math.max(0, pending.length));
     } catch {}
   }, [authHeaders, handleAuthFailure]);
+
+  const loadAssistantProfile = useCallback(async () => {
+    if (!tokenRef.current) return;
+    try {
+      const response = await fetch(`${API_BASE}/api/translate/profile`, {
+        headers: { ...authHeaders() },
+      });
+      const data = await response.json().catch(() => ({}));
+      if (await handleAuthFailure(response, data)) return;
+      if (!response.ok || !data?.success || !data?.data?.profile) return;
+      const profile = data.data.profile;
+      const snapshot: AssistantProfileSnapshot = {
+        translateStyle: String(profile?.translateStyle || 'formal'),
+        explanationLevel: String(profile?.explanationLevel || 'short'),
+        replyStyle: normalizeReplySuggestStyle(profile?.replyStyle),
+      };
+      setAssistantProfileSnapshot(snapshot);
+      if (replySuggestUseProfile) {
+        setReplySuggestStyle(snapshot.replyStyle);
+      }
+    } catch {}
+  }, [authHeaders, handleAuthFailure, replySuggestUseProfile]);
+
+  useEffect(() => {
+    if (!tokenReady || !tokenRef.current) return;
+    loadAssistantProfile().catch(() => undefined);
+  }, [loadAssistantProfile, tokenReady]);
+
+  const loadChatRiskProfile = useCallback(
+    async (chatUid: number, { silent = true }: { silent?: boolean } = {}) => {
+      if (!tokenRef.current || !chatUid) return;
+      const { targetUid, targetType } = decodeChatUid(chatUid);
+      if (!Number.isInteger(targetUid) || targetUid <= 0) return;
+      if (!silent) {
+        setChatRiskLoadingByUid((prev) => ({ ...prev, [chatUid]: true }));
+      }
+      try {
+        const params = new URLSearchParams({
+          targetUid: String(targetUid),
+          targetType,
+        });
+        const response = await fetch(`${API_BASE}/api/chat/risk?${params.toString()}`, {
+          headers: { ...authHeaders() },
+        });
+        const data = await response.json().catch(() => ({}));
+        if (await handleAuthFailure(response, data)) return;
+        if (!response.ok || !data?.success) return;
+        const normalized = normalizeChatRiskProfile(data?.data);
+        if (!normalized) return;
+        setChatRiskByUid((prev) => ({ ...prev, [chatUid]: normalized }));
+      } catch {}
+      finally {
+        if (!silent) {
+          setChatRiskLoadingByUid((prev) => ({ ...prev, [chatUid]: false }));
+        }
+      }
+    },
+    [authHeaders, handleAuthFailure]
+  );
+
+  useEffect(() => {
+    if (!activeChatUid || !tokenReady || !tokenRef.current) return;
+    loadChatRiskProfile(activeChatUid).catch(() => undefined);
+  }, [activeChatUid, loadChatRiskProfile, tokenReady]);
+
+  const loadRelationshipOps = useCallback(
+    async ({ silent = false }: { silent?: boolean } = {}) => {
+      if (!tokenRef.current) return;
+      if (!silent) {
+        setRelationshipOpsLoading(true);
+      }
+      try {
+        const params = new URLSearchParams({
+          scope: relationshipScope,
+          windowDays: String(relationshipWindowDays),
+          limit: '20',
+        });
+        const response = await fetch(`${API_BASE}/api/ops/relationship?${params.toString()}`, {
+          headers: { ...authHeaders() },
+        });
+        const payload = await response.json().catch(() => ({}));
+        if (await handleAuthFailure(response, payload)) return;
+        if (!response.ok || !payload?.success) {
+          setRelationshipOpsError('关系运营数据加载失败');
+          return;
+        }
+        const normalized = normalizeRelationshipOpsSnapshot(payload?.data);
+        setRelationshipOpsSnapshot(normalized);
+        setRelationshipOpsError('');
+      } catch {
+        setRelationshipOpsError('关系运营服务暂不可用');
+      } finally {
+        if (!silent) {
+          setRelationshipOpsLoading(false);
+        }
+      }
+    },
+    [authHeaders, handleAuthFailure, relationshipScope, relationshipWindowDays]
+  );
+
+  useEffect(() => {
+    if (homeTab !== 'relationship' || !tokenReady || !tokenRef.current) return;
+    loadRelationshipOps().catch(() => undefined);
+  }, [homeTab, loadRelationshipOps, tokenReady]);
+
+  const loadSummaryCenter = useCallback(
+    async ({
+      silent = false,
+      ensureLatest = true,
+    }: { silent?: boolean; ensureLatest?: boolean } = {}) => {
+      if (!tokenRef.current) return;
+      if (!silent) {
+        setSummaryCenterLoading(true);
+      }
+      try {
+        const params = new URLSearchParams({
+          limit: '20',
+          ensureLatest: ensureLatest ? '1' : '0',
+        });
+        const response = await fetch(`${API_BASE}/api/summary?${params.toString()}`, {
+          headers: { ...authHeaders() },
+        });
+        const payload = await response.json().catch(() => ({}));
+        if (await handleAuthFailure(response, payload)) return;
+        if (!response.ok || !payload?.success) {
+          setSummaryCenterError('摘要中心数据加载失败');
+          return;
+        }
+        const normalized = normalizeSummaryCenterSnapshot(payload?.data);
+        setSummaryCenterSnapshot(normalized);
+        setSummaryCenterError('');
+      } catch {
+        setSummaryCenterError('摘要中心服务暂不可用');
+      } finally {
+        if (!silent) {
+          setSummaryCenterLoading(false);
+        }
+      }
+    },
+    [authHeaders, handleAuthFailure]
+  );
+
+  const refreshSummaryCenter = useCallback(async () => {
+    if (!tokenRef.current) return;
+    setSummaryCenterRefreshLoading(true);
+    try {
+      const response = await fetch(`${API_BASE}/api/summary/refresh`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...authHeaders() },
+        body: JSON.stringify({}),
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (await handleAuthFailure(response, payload)) return;
+      if (!response.ok || !payload?.success) {
+        setSummaryCenterError('手动刷新摘要失败');
+        return;
+      }
+      const normalized = normalizeSummaryCenterSnapshot(payload?.data);
+      setSummaryCenterSnapshot(normalized);
+      setSummaryCenterError('');
+    } catch {
+      setSummaryCenterError('手动刷新摘要失败');
+    } finally {
+      setSummaryCenterRefreshLoading(false);
+    }
+  }, [authHeaders, handleAuthFailure]);
+
+  const archiveSummaryCenter = useCallback(
+    async (summaryId = '') => {
+      if (!tokenRef.current) return;
+      setSummaryCenterArchiveLoading(true);
+      try {
+        const response = await fetch(`${API_BASE}/api/summary/archive`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', ...authHeaders() },
+          body: JSON.stringify(summaryId ? { summaryId } : {}),
+        });
+        const payload = await response.json().catch(() => ({}));
+        if (await handleAuthFailure(response, payload)) return;
+        if (!response.ok || !payload?.success) {
+          setSummaryCenterError(String(payload?.message || '归档摘要失败'));
+          return;
+        }
+        const normalized = normalizeSummaryCenterSnapshot(payload?.data);
+        setSummaryCenterSnapshot(normalized);
+        setSummaryCenterError('');
+      } catch {
+        setSummaryCenterError('归档摘要失败');
+      } finally {
+        setSummaryCenterArchiveLoading(false);
+      }
+    },
+    [authHeaders, handleAuthFailure]
+  );
+
+  useEffect(() => {
+    if (homeTab !== 'summary' || !tokenReady || !tokenRef.current) return;
+    loadSummaryCenter({ ensureLatest: true }).catch(() => undefined);
+  }, [homeTab, loadSummaryCenter, tokenReady]);
 
   const loadGroups = useCallback(async () => {
     if (!tokenRef.current) return;
@@ -3617,7 +4349,7 @@ export default function Home({
       const response = await fetch(`${API_BASE}/api/chat/overview`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', ...authHeaders() },
-        body: JSON.stringify({ readAt: serverReadAt, deleteCutoffs }),
+        body: JSON.stringify({ readAt: serverReadAt, deleteCutoffs, includeSummary: true }),
       });
       const data = await response.json().catch(() => ({}));
       if (await handleAuthFailure(response, data)) {
@@ -3679,6 +4411,78 @@ export default function Home({
       if (Object.keys(latestPatch).length > 0) {
         setLatestMap((prev) => ({ ...prev, ...latestPatch }));
       }
+      const inlineSummary =
+        data?.summaryCenter && typeof data.summaryCenter === 'object' ? data.summaryCenter : null;
+      if (inlineSummary) {
+        const unreadTotal = Math.max(0, Number(inlineSummary?.unreadTotal) || 0);
+        const unreadConversations = Math.max(0, Number(inlineSummary?.unreadConversations) || 0);
+        const inlineHighlights = (Array.isArray(inlineSummary?.highlights) ? inlineSummary.highlights : [])
+          .map((item: any) => {
+            const targetUid = Number(item?.targetUid);
+            if (!Number.isInteger(targetUid) || targetUid <= 0) return null;
+            const targetType: ChatTargetType = item?.targetType === 'group' ? 'group' : 'private';
+            return {
+              targetUid,
+              targetType,
+              title:
+                (targetType === 'group' ? `群聊${targetUid}` : `用户${targetUid}`),
+              unread: Math.max(0, Number(item?.unread) || 0),
+              lastMessageAt: '',
+              lastMessagePreview: String(item?.preview || '')
+                .replace(/\s+/g, ' ')
+                .trim()
+                .slice(0, 140),
+              reason: 'overview',
+            };
+          })
+          .filter(Boolean)
+          .slice(0, 5) as SummaryCenterHighlight[];
+        setSummaryCenterSnapshot((prev) => {
+          if (!prev) {
+            return normalizeSummaryCenterSnapshot({
+              enabled: inlineSummary.enabled !== false,
+              available: inlineSummary.available !== false,
+              generatedAt: String(inlineSummary.generatedAt || new Date().toISOString()),
+              latest: null,
+              history: [],
+              badges: {
+                hasLatest: false,
+                unreadHistory: 0,
+                unreadTotal,
+              },
+              stats: {
+                generatedTotal: 0,
+                manualRefreshTotal: 0,
+                archivedTotal: 0,
+                lastError: '',
+              },
+            });
+          }
+          const nextLatest = prev.latest
+            ? {
+                ...prev.latest,
+                unreadTotal,
+                unreadConversations,
+                summaryText:
+                  String(inlineSummary?.summaryText || '').replace(/\s+/g, ' ').trim().slice(0, 240) ||
+                  prev.latest.summaryText,
+                highlights:
+                  prev.latest.highlights.length > 0
+                    ? prev.latest.highlights
+                    : inlineHighlights,
+              }
+            : prev.latest;
+          return {
+            ...prev,
+            generatedAt: String(inlineSummary.generatedAt || prev.generatedAt || ''),
+            latest: nextLatest,
+            badges: {
+              ...prev.badges,
+              unreadTotal,
+            },
+          };
+        });
+      }
     } catch {}
   }, [
     authHeaders,
@@ -3690,6 +4494,7 @@ export default function Home({
     isMessageDeletedLocally,
     normalizeMessage,
     selfUid,
+    setSummaryCenterSnapshot,
     unhideChat,
     handleAuthFailure,
   ]);
@@ -4030,6 +4835,66 @@ export default function Home({
       navigation.navigate('FriendProfile', { uid: friend.uid, friend });
     },
     [navigation]
+  );
+
+  const runRelationshipAction = useCallback(
+    (item: RelationshipOpsEntry) => {
+      if (!item || !Number.isInteger(item.targetUid) || item.targetUid <= 0) return;
+      if (item.targetType === 'group') {
+        const targetGroup = groups.find((group) => group.id === item.targetUid);
+        openChatFromPayload(item.targetUid, undefined, {
+          targetType: 'group',
+          group: targetGroup || {
+            id: item.targetUid,
+            name: item.title,
+            memberUids: [],
+            members: [],
+          },
+        });
+      } else {
+        const targetFriend = friends.find((friend) => friend.uid === item.targetUid);
+        if (targetFriend) {
+          openChat(targetFriend);
+        } else {
+          openChatFromPayload(item.targetUid, {
+            uid: item.targetUid,
+            nickname: item.title,
+          });
+        }
+      }
+      setHomeTab('messages');
+    },
+    [friends, groups, openChat, openChatFromPayload]
+  );
+
+  const openSummaryConversation = useCallback(
+    (targetUid: number, targetType: ChatTargetType, title = '') => {
+      if (!Number.isInteger(targetUid) || targetUid <= 0) return;
+      if (targetType === 'group') {
+        const group = groups.find((item) => item.id === targetUid);
+        openChatFromPayload(targetUid, undefined, {
+          targetType: 'group',
+          group: group || {
+            id: targetUid,
+            name: title || `群聊${targetUid}`,
+            memberUids: [],
+            members: [],
+          },
+        });
+      } else {
+        const friend = friends.find((item) => item.uid === targetUid);
+        if (friend) {
+          openChat(friend);
+        } else {
+          openChatFromPayload(targetUid, {
+            uid: targetUid,
+            nickname: title || `用户${targetUid}`,
+          });
+        }
+      }
+      setHomeTab('messages');
+    },
+    [friends, groups, openChat, openChatFromPayload]
   );
 
   const openUserCenter = useCallback(() => {
@@ -5004,67 +5869,147 @@ export default function Home({
     submitTextMessageWithLocalId,
   ]);
 
-  const sendText = useCallback(async () => {
-    if (!canSend || !activeChatUidRef.current || !selfUid) return;
-    const content = draftMessage.trim().slice(0, CHAT_INPUT_MAX_LENGTH);
-    if (!content) return;
-    const chatUid = Number(activeChatUidRef.current);
-    const { targetUid, targetType } = decodeChatUid(chatUid);
-    if (!Number.isInteger(targetUid) || targetUid <= 0) return;
-    const clientMessageId = createClientMessageId();
-    const localMessageId = `local:${clientMessageId}`;
-    const localCreatedAtMs = Date.now();
-    const localCreatedAt = new Date(localCreatedAtMs).toISOString();
+  const sendTextContent = useCallback(
+    async (
+      rawContent: string,
+      { clearDraft = false, focusInput = true }: { clearDraft?: boolean; focusInput?: boolean } = {}
+    ) => {
+      if (!activeChatUidRef.current || !selfUid) return false;
+      const content = String(rawContent || '').trim().slice(0, CHAT_INPUT_MAX_LENGTH);
+      if (!content) return false;
+      const chatUid = Number(activeChatUidRef.current);
+      const { targetUid, targetType } = decodeChatUid(chatUid);
+      if (!Number.isInteger(targetUid) || targetUid <= 0) return false;
+      const clientMessageId = createClientMessageId();
+      const localMessageId = `local:${clientMessageId}`;
+      const localCreatedAtMs = Date.now();
+      const localCreatedAt = new Date(localCreatedAtMs).toISOString();
 
-    focusChatInput();
-    setDraftMessage('');
-    insertMessages(chatUid, [
-      {
-        id: localMessageId,
-        type: 'text',
-        senderUid: selfUid,
-        targetUid,
-        targetType,
-        data: {
-          content,
-          clientMessageId,
-          clientPending: true,
-          clientFailed: false,
-          clientAnimateIn: true,
-          clientAppearAtMs: localCreatedAtMs,
-        },
-        createdAt: localCreatedAt,
-        createdAtMs: localCreatedAtMs,
-      },
-    ]);
-    scrollToBottom();
-
-    try {
-      await submitTextMessageWithLocalId({
-        chatUid,
-        localMessageId,
-        clientMessageId,
-        payload: {
+      if (focusInput) {
+        focusChatInput();
+      }
+      if (clearDraft) {
+        setDraftMessage('');
+      }
+      insertMessages(chatUid, [
+        {
+          id: localMessageId,
+          type: 'text',
           senderUid: selfUid,
           targetUid,
           targetType,
-          type: 'text',
-          content,
-          clientMessageId,
+          data: {
+            content,
+            clientMessageId,
+            clientPending: true,
+            clientFailed: false,
+            clientAnimateIn: true,
+            clientAppearAtMs: localCreatedAtMs,
+          },
+          createdAt: localCreatedAt,
+          createdAtMs: localCreatedAtMs,
         },
+      ]);
+      scrollToBottom();
+
+      try {
+        await submitTextMessageWithLocalId({
+          chatUid,
+          localMessageId,
+          clientMessageId,
+          payload: {
+            senderUid: selfUid,
+            targetUid,
+            targetType,
+            type: 'text',
+            content,
+            clientMessageId,
+          },
+        });
+        return true;
+      } catch {
+        // no-op; submitTextMessageWithLocalId has marked local message as failed.
+        return false;
+      }
+    },
+    [
+      createClientMessageId,
+      focusChatInput,
+      insertMessages,
+      scrollToBottom,
+      selfUid,
+      submitTextMessageWithLocalId,
+    ]
+  );
+
+  const sendText = useCallback(async () => {
+    if (!canSend) return;
+    await sendTextContent(draftMessage, { clearDraft: true, focusInput: true });
+  }, [canSend, draftMessage, sendTextContent]);
+
+  const requestReplySuggestions = useCallback(async () => {
+    if (replySuggestLoading) return;
+    if (!tokenRef.current || !activeChatUid || !selfUid) return;
+    const chatUid = Number(activeChatUid);
+    if (!chatUid) return;
+    const { targetUid, targetType } = decodeChatUid(chatUid);
+    if (!Number.isInteger(targetUid) || targetUid <= 0) return;
+
+    const draftText = String(draftMessage || '').trim();
+    const latestIncomingText = [...activeChatMessages]
+      .reverse()
+      .find(
+        (item) =>
+          String(item?.type || '').toLowerCase() === 'text' &&
+          Number(item?.senderUid) !== Number(selfUid) &&
+          String(item?.content || '').trim()
+      )?.content;
+    const text = String(draftText || latestIncomingText || '').trim().slice(0, 300);
+    if (!text) {
+      Alert.alert('暂无可生成内容', '请输入文本或等待对方消息后再试。');
+      return;
+    }
+
+    setReplySuggestLoading(true);
+    try {
+      const response = await fetch(`${API_BASE}/api/chat/reply-suggest`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...authHeaders() },
+        body: JSON.stringify({
+          targetUid,
+          targetType,
+          text,
+          style: replySuggestStyle,
+          useProfile: replySuggestUseProfile,
+        }),
       });
+      const data = await response.json().catch(() => ({}));
+      if (await handleAuthFailure(response, data)) return;
+      if (!response.ok || !data?.success) {
+        Alert.alert('生成失败', String(data?.message || '请稍后重试。'));
+        return;
+      }
+      const panel = normalizeReplySuggestionPanel(data?.data);
+      if (!panel) {
+        Alert.alert('暂无建议', '当前内容未生成可用建议。');
+        return;
+      }
+      setReplySuggestionPanelByUid((prev) => ({ ...prev, [chatUid]: panel }));
     } catch {
-      // no-op; submitTextMessageWithLocalId has marked local message as failed.
+      Alert.alert('网络异常', '建议生成失败，请稍后重试。');
+    } finally {
+      setReplySuggestLoading(false);
     }
   }, [
-    canSend,
-    createClientMessageId,
+    activeChatMessages,
+    activeChatUid,
+    authHeaders,
     draftMessage,
-    focusChatInput,
-    insertMessages,
-    scrollToBottom,
+    handleAuthFailure,
+    replySuggestLoading,
+    replySuggestStyle,
+    replySuggestUseProfile,
     selfUid,
-    submitTextMessageWithLocalId,
   ]);
 
   const clearVoiceTicker = useCallback(() => {
@@ -6085,6 +7030,10 @@ export default function Home({
         }
         return;
       }
+      if (payload.type === 'summary_center') {
+        loadSummaryCenter({ silent: true, ensureLatest: false }).catch(() => undefined);
+        return;
+      }
       if (payload.type === 'friends') {
         requestFriendsRefresh();
         return;
@@ -6130,6 +7079,7 @@ export default function Home({
       buildNotificationContent,
       insertMessages,
       loadGroups,
+      loadSummaryCenter,
       loadPendingRequestCount,
       markChatRead,
       normalizeMessage,
@@ -7141,12 +8091,8 @@ export default function Home({
         Alert.alert('无法翻译', '该消息没有可翻译内容。');
         return;
       }
-      const url = `https://translate.google.com/?sl=auto&tl=zh-CN&text=${encodeURIComponent(
-        text.slice(0, 1200)
-      )}&op=translate`;
-      navigation.navigate('InAppBrowser', {
-        title: '翻译',
-        url,
+      navigation.navigate('Translation', {
+        textToTranslate: text.slice(0, 1200),
       });
     },
     [messageMenuSourceText, navigation]
@@ -7426,6 +8372,82 @@ export default function Home({
     setDeleteChatPromptUid(uid);
   }, [chatMenuTargetUid, closeChatMenu]);
 
+  const activeReplySuggestionPanel = useMemo(() => {
+    if (!activeChatUid) return null;
+    return replySuggestionPanelByUid[activeChatUid] || null;
+  }, [activeChatUid, replySuggestionPanelByUid]);
+  const activeChatRisk = useMemo(() => {
+    if (!activeChatUid) return null;
+    return chatRiskByUid[activeChatUid] || null;
+  }, [activeChatUid, chatRiskByUid]);
+  const activeChatRiskLoading = useMemo(() => {
+    if (!activeChatUid) return false;
+    return chatRiskLoadingByUid[activeChatUid] === true;
+  }, [activeChatUid, chatRiskLoadingByUid]);
+
+  const ignoreActiveChatRisk = useCallback(async () => {
+    if (!activeChatUid || !tokenRef.current) return;
+    const { targetUid, targetType } = decodeChatUid(activeChatUid);
+    if (!Number.isInteger(targetUid) || targetUid <= 0) return;
+    try {
+      const response = await fetch(`${API_BASE}/api/chat/risk/ignore`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...authHeaders() },
+        body: JSON.stringify({
+          targetUid,
+          targetType,
+          reason: 'ignored_from_chat_header',
+          ttlHours: 24 * 7,
+        }),
+      });
+      const data = await response.json().catch(() => ({}));
+      if (await handleAuthFailure(response, data)) return;
+      if (!response.ok || !data?.success) {
+        Alert.alert('操作失败', String(data?.message || '忽略失败，请稍后重试。'));
+        return;
+      }
+      setChatRiskByUid((prev) => {
+        const current = prev[activeChatUid];
+        if (!current) return prev;
+        return {
+          ...prev,
+          [activeChatUid]: {
+            ...current,
+            ignored: true,
+          },
+        };
+      });
+    } catch {
+      Alert.alert('网络异常', '忽略失败，请稍后重试。');
+    }
+  }, [activeChatUid, authHeaders, handleAuthFailure]);
+
+  const appealActiveChatRisk = useCallback(async () => {
+    if (!activeChatUid || !tokenRef.current) return;
+    const { targetUid, targetType } = decodeChatUid(activeChatUid);
+    if (!Number.isInteger(targetUid) || targetUid <= 0) return;
+    try {
+      const response = await fetch(`${API_BASE}/api/chat/risk/appeal`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...authHeaders() },
+        body: JSON.stringify({
+          targetUid,
+          targetType,
+          reason: 'possible_false_positive_from_chat_header',
+        }),
+      });
+      const data = await response.json().catch(() => ({}));
+      if (await handleAuthFailure(response, data)) return;
+      if (!response.ok || !data?.success) {
+        Alert.alert('提交失败', String(data?.message || '申诉提交失败，请稍后重试。'));
+        return;
+      }
+      Alert.alert('已提交', '误报申诉已提交，我们会尽快处理。');
+    } catch {
+      Alert.alert('网络异常', '申诉提交失败，请稍后重试。');
+    }
+  }, [activeChatUid, authHeaders, handleAuthFailure]);
+
   const renderedActiveChatMessages = useMemo(() => {
     if (!activeChatUid) return [];
     const keySeen = new Set<string>();
@@ -7576,6 +8598,42 @@ export default function Home({
             </Pressable>
           </View>
 
+          {activeChatRisk && activeChatRisk.enabled && activeChatRisk.level !== 'low' && !activeChatRisk.ignored ? (
+            <View
+              style={[
+                styles.chatRiskBanner,
+                activeChatRisk.level === 'high' ? styles.chatRiskBannerHigh : styles.chatRiskBannerMedium,
+              ]}
+            >
+              <View style={styles.chatRiskBannerTop}>
+                <Text style={styles.chatRiskBannerTitle}>对方存在风险</Text>
+                <Text style={styles.chatRiskBannerScore}>风险分 {Math.round(activeChatRisk.score)}</Text>
+              </View>
+              <Text style={styles.chatRiskBannerSummary} numberOfLines={2}>
+                {activeChatRisk.summary || '检测到异常行为，请谨慎互动。'}
+              </Text>
+              <View style={styles.chatRiskBannerActions}>
+                <Pressable
+                  style={styles.chatRiskActionBtn}
+                  onPress={() => {
+                    if (!activeChatUid) return;
+                    loadChatRiskProfile(activeChatUid, { silent: false }).catch(() => undefined);
+                  }}
+                >
+                  <Text style={styles.chatRiskActionText}>
+                    {activeChatRiskLoading ? '刷新中...' : '刷新'}
+                  </Text>
+                </Pressable>
+                <Pressable style={styles.chatRiskActionBtn} onPress={ignoreActiveChatRisk}>
+                  <Text style={styles.chatRiskActionText}>忽略</Text>
+                </Pressable>
+                <Pressable style={styles.chatRiskActionBtn} onPress={appealActiveChatRisk}>
+                  <Text style={styles.chatRiskActionText}>误报申诉</Text>
+                </Pressable>
+              </View>
+            </View>
+          ) : null}
+
           <ScrollView
             ref={messageListRef}
             style={[styles.chatBody, { backgroundColor: activeChatBackgroundColor }]}
@@ -7662,6 +8720,144 @@ export default function Home({
               { paddingBottom: 8 + insets.bottom, marginBottom: chatComposerBottomInset },
             ]}
           >
+            <View style={styles.replyAssistControlRow}>
+              <View style={styles.replyAssistControlTop}>
+                <Text style={styles.replyAssistControlLabel}>
+                  回复风格
+                  {assistantProfileSnapshot
+                    ? ` (默认: ${REPLY_STYLE_LABEL_MAP[assistantProfileSnapshot.replyStyle]})`
+                    : ''}
+                </Text>
+                <Pressable
+                  style={[
+                    styles.replyAssistRefreshBtn,
+                    replySuggestLoading && styles.replyAssistRefreshBtnDisabled,
+                  ]}
+                  onPress={requestReplySuggestions}
+                  disabled={replySuggestLoading}
+                >
+                  <Text style={styles.replyAssistRefreshBtnText}>
+                    {replySuggestLoading ? '生成中...' : '生成建议'}
+                  </Text>
+                </Pressable>
+              </View>
+              <View style={styles.replyAssistStyleChips}>
+                {REPLY_STYLE_OPTIONS.map((styleOption) => {
+                  const active = replySuggestStyle === styleOption;
+                  return (
+                    <Pressable
+                      key={`reply-style-${styleOption}`}
+                      style={[
+                        styles.replyAssistStyleChip,
+                        active && styles.replyAssistStyleChipActive,
+                      ]}
+                      onPress={() => {
+                        setReplySuggestStyle(styleOption);
+                        setReplySuggestUseProfile(false);
+                      }}
+                    >
+                      <Text
+                        style={[
+                          styles.replyAssistStyleChipText,
+                          active && styles.replyAssistStyleChipTextActive,
+                        ]}
+                      >
+                        {REPLY_STYLE_LABEL_MAP[styleOption]}
+                      </Text>
+                    </Pressable>
+                  );
+                })}
+              </View>
+              <View style={styles.replyAssistToggleRow}>
+                <Pressable
+                  style={[
+                    styles.replyAssistProfileBtn,
+                    replySuggestUseProfile && styles.replyAssistProfileBtnActive,
+                  ]}
+                  onPress={() => {
+                    const next = !replySuggestUseProfile;
+                    setReplySuggestUseProfile(next);
+                    if (next && assistantProfileSnapshot) {
+                      setReplySuggestStyle(assistantProfileSnapshot.replyStyle);
+                    }
+                  }}
+                >
+                  <Text
+                    style={[
+                      styles.replyAssistProfileBtnText,
+                      replySuggestUseProfile && styles.replyAssistProfileBtnTextActive,
+                    ]}
+                  >
+                    {replySuggestUseProfile ? '跟随偏好' : '手动风格'}
+                  </Text>
+                </Pressable>
+                <Pressable
+                  style={[
+                    styles.replyAssistProfileBtn,
+                    replySuggestTapSend && styles.replyAssistProfileBtnActive,
+                  ]}
+                  onPress={() => {
+                    const next = !replySuggestTapSend;
+                    setReplySuggestTapSend(next);
+                    storage
+                      .setString(STORAGE_KEYS.replySuggestTapSend, next ? '1' : '0')
+                      .catch(() => undefined);
+                  }}
+                >
+                  <Text
+                    style={[
+                      styles.replyAssistProfileBtnText,
+                      replySuggestTapSend && styles.replyAssistProfileBtnTextActive,
+                    ]}
+                  >
+                    {replySuggestTapSend ? '点击即发送: 开' : '点击即发送: 关'}
+                  </Text>
+                </Pressable>
+              </View>
+            </View>
+
+            {activeReplySuggestionPanel?.suggestions?.length ? (
+              <View style={styles.replySuggestPanel}>
+                <View style={styles.replySuggestHeader}>
+                  <Text style={styles.replySuggestTitle}>回复建议</Text>
+                  <Text style={styles.replySuggestMeta}>
+                    {activeReplySuggestionPanel.intent || 'general'}
+                    {activeReplySuggestionPanel.model ? ` · ${activeReplySuggestionPanel.model}` : ''}
+                  </Text>
+                </View>
+                <ScrollView
+                  horizontal
+                  showsHorizontalScrollIndicator={false}
+                  contentContainerStyle={styles.replySuggestList}
+                >
+                  {activeReplySuggestionPanel.suggestions.map((entry) => (
+                    <Pressable
+                      key={`reply-suggest-${entry.id}`}
+                      style={styles.replySuggestItem}
+                      onPress={() => {
+                        if (replySuggestTapSend) {
+                          void sendTextContent(entry.text, { clearDraft: false, focusInput: false });
+                          return;
+                        }
+                        setDraftMessage(entry.text);
+                        focusChatInput();
+                      }}
+                    >
+                      <Text style={styles.replySuggestText}>{entry.text}</Text>
+                      <Text style={styles.replySuggestSubText}>
+                        {REPLY_STYLE_LABEL_MAP[entry.style]} · {Math.round(entry.confidence * 100)}%
+                      </Text>
+                    </Pressable>
+                  ))}
+                </ScrollView>
+                {activeReplySuggestionPanel.suggestions[0]?.reason ? (
+                  <Text style={styles.replySuggestReason} numberOfLines={1}>
+                    {activeReplySuggestionPanel.suggestions[0].reason}
+                  </Text>
+                ) : null}
+              </View>
+            ) : null}
+
             <View style={styles.chatInputRow}>
               <TextInput
                 ref={chatInputRef}
@@ -8019,7 +9215,7 @@ export default function Home({
                   );
                 })}
             </ScrollView>
-          ) : (
+          ) : homeTab === 'contacts' ? (
             <ScrollView style={styles.content} contentContainerStyle={styles.contentInner}>
               {loadingFriends ? <Text style={styles.empty}>正在加载联系人...</Text> : null}
               {!loadingFriends && friends.length === 0 ? (
@@ -8071,6 +9267,280 @@ export default function Home({
                   ))
                 : null}
             </ScrollView>
+          ) : homeTab === 'relationship' ? (
+            <ScrollView style={styles.content} contentContainerStyle={styles.contentInner}>
+              <View style={styles.relationshipHeaderCard}>
+                <View style={styles.relationshipHeaderTop}>
+                  <Text style={styles.relationshipHeaderTitle}>关系运营</Text>
+                  <Pressable
+                    style={styles.relationshipRefreshBtn}
+                    onPress={() => loadRelationshipOps().catch(() => undefined)}
+                  >
+                    <Text style={styles.relationshipRefreshText}>
+                      {relationshipOpsLoading ? '刷新中...' : '刷新'}
+                    </Text>
+                  </Pressable>
+                </View>
+                <Text style={styles.relationshipHeaderSub}>
+                  识别互动下降的好友与群，建议轻提醒动作。
+                </Text>
+                <View style={styles.relationshipFilterRow}>
+                  {(['all', 'private', 'group'] as const).map((scope) => (
+                    <Pressable
+                      key={`relationship-scope-${scope}`}
+                      style={[
+                        styles.relationshipFilterChip,
+                        relationshipScope === scope && styles.relationshipFilterChipActive,
+                      ]}
+                      onPress={() => setRelationshipScope(scope)}
+                    >
+                      <Text
+                        style={[
+                          styles.relationshipFilterChipText,
+                          relationshipScope === scope && styles.relationshipFilterChipTextActive,
+                        ]}
+                      >
+                        {scope === 'all' ? '全部' : scope === 'private' ? '好友' : '群聊'}
+                      </Text>
+                    </Pressable>
+                  ))}
+                </View>
+                <View style={styles.relationshipFilterRow}>
+                  {([7, 30] as const).map((days) => (
+                    <Pressable
+                      key={`relationship-window-${days}`}
+                      style={[
+                        styles.relationshipFilterChip,
+                        relationshipWindowDays === days && styles.relationshipFilterChipActive,
+                      ]}
+                      onPress={() => setRelationshipWindowDays(days)}
+                    >
+                      <Text
+                        style={[
+                          styles.relationshipFilterChipText,
+                          relationshipWindowDays === days && styles.relationshipFilterChipTextActive,
+                        ]}
+                      >
+                        {days}天趋势
+                      </Text>
+                    </Pressable>
+                  ))}
+                </View>
+                {relationshipOpsSnapshot ? (
+                  <Text style={styles.relationshipHeaderMeta}>
+                    候选 {relationshipOpsSnapshot.summary.totalCandidates} · 下降
+                    {` ${relationshipOpsSnapshot.summary.totalDeclined} `}
+                    · 7天未互动 {relationshipOpsSnapshot.summary.inactive7d}
+                  </Text>
+                ) : null}
+              </View>
+
+              {relationshipOpsError ? (
+                <Text style={styles.relationshipErrorText}>{relationshipOpsError}</Text>
+              ) : null}
+
+              {relationshipOpsSnapshot && !relationshipOpsSnapshot.enabled ? (
+                <Text style={styles.empty}>关系运营功能未开启</Text>
+              ) : null}
+
+              {relationshipOpsLoading && !relationshipOpsSnapshot ? (
+                <Text style={styles.empty}>正在分析关系互动...</Text>
+              ) : null}
+
+              {relationshipOpsSnapshot &&
+              relationshipOpsSnapshot.enabled &&
+              relationshipOpsSnapshot.items.length === 0 &&
+              !relationshipOpsLoading ? (
+                <Text style={styles.empty}>近期互动稳定，暂无需要提醒的对象</Text>
+              ) : null}
+
+              {relationshipOpsSnapshot &&
+              relationshipOpsSnapshot.enabled &&
+              relationshipOpsSnapshot.items.length > 0
+                ? relationshipOpsSnapshot.items.map((item) => (
+                    <View
+                      key={`relationship-item-${item.targetType}-${item.targetUid}`}
+                      style={styles.relationshipItemCard}
+                    >
+                      <View style={styles.relationshipItemTop}>
+                        <View style={styles.relationshipItemTitleWrap}>
+                          <Text style={styles.relationshipItemTitle} numberOfLines={1}>
+                            {item.title}
+                          </Text>
+                          <Text style={styles.relationshipItemTypeTag}>
+                            {item.targetType === 'group' ? '群聊' : '好友'}
+                          </Text>
+                        </View>
+                        <Text style={styles.relationshipItemScore}>
+                          下降指数 {Math.round(item.score)}
+                        </Text>
+                      </View>
+                      <Text style={styles.relationshipItemMeta}>
+                        最近互动: {formatRelationshipLastInteraction(item.lastInteractionAt)}
+                        {item.memberCount > 0 ? ` · 成员 ${item.memberCount}` : ''}
+                      </Text>
+                      <Text style={styles.relationshipItemTrend}>
+                        7天: {item.metrics.prev7d} → {item.metrics.recent7d}（下降
+                        {item.metrics.decline7d} / {item.metrics.declineRate7d}%）
+                      </Text>
+                      <Text style={styles.relationshipItemTrend}>
+                        30天: {item.metrics.prev30d} → {item.metrics.recent30d}（下降
+                        {item.metrics.decline30d} / {item.metrics.declineRate30d}%）
+                      </Text>
+                      <Text style={styles.relationshipItemReason} numberOfLines={2}>
+                        {item.recommendation.reason || '建议进行轻量触达，避免关系继续降温。'}
+                      </Text>
+                      <View style={styles.relationshipItemActions}>
+                        <Pressable
+                          style={styles.relationshipActionBtn}
+                          onPress={() => runRelationshipAction(item)}
+                        >
+                          <Text style={styles.relationshipActionBtnText}>{item.recommendation.label}</Text>
+                        </Pressable>
+                      </View>
+                    </View>
+                  ))
+                : null}
+            </ScrollView>
+          ) : (
+            <ScrollView style={styles.content} contentContainerStyle={styles.contentInner}>
+              <View style={styles.summaryHeaderCard}>
+                <View style={styles.summaryHeaderTop}>
+                  <Text style={styles.summaryHeaderTitle}>摘要中心</Text>
+                  <View style={styles.summaryHeaderActions}>
+                    <Pressable
+                      style={[
+                        styles.summaryActionBtn,
+                        summaryCenterArchiveLoading && styles.summaryActionBtnDisabled,
+                      ]}
+                      disabled={summaryCenterArchiveLoading}
+                      onPress={() =>
+                        archiveSummaryCenter(summaryCenterSnapshot?.latest?.id || '').catch(() => undefined)
+                      }
+                    >
+                      <Text style={styles.summaryActionBtnText}>
+                        {summaryCenterArchiveLoading ? '归档中...' : '已读归档'}
+                      </Text>
+                    </Pressable>
+                    <Pressable
+                      style={[
+                        styles.summaryActionBtn,
+                        summaryCenterRefreshLoading && styles.summaryActionBtnDisabled,
+                      ]}
+                      disabled={summaryCenterRefreshLoading}
+                      onPress={() => refreshSummaryCenter().catch(() => undefined)}
+                    >
+                      <Text style={styles.summaryActionBtnText}>
+                        {summaryCenterRefreshLoading ? '刷新中...' : '手动刷新'}
+                      </Text>
+                    </Pressable>
+                  </View>
+                </View>
+                <Text style={styles.summaryHeaderSub}>
+                  汇总未读压力、重点会话和待回复事项，支持定时推送与手动刷新。
+                </Text>
+                {summaryCenterSnapshot ? (
+                  <Text style={styles.summaryHeaderMeta}>
+                    {summaryCenterSnapshot.enabled ? '功能开启' : '功能关闭'} · 未读
+                    {` ${summaryCenterSnapshot.badges.unreadTotal} `}
+                    · 历史未读 {summaryCenterSnapshot.badges.unreadHistory} · 最近更新
+                    {` ${formatSummaryGeneratedAt(summaryCenterSnapshot.latest?.generatedAt || summaryCenterSnapshot.generatedAt)}`}
+                  </Text>
+                ) : null}
+              </View>
+
+              {summaryCenterError ? <Text style={styles.relationshipErrorText}>{summaryCenterError}</Text> : null}
+
+              {summaryCenterLoading && !summaryCenterSnapshot ? (
+                <Text style={styles.empty}>正在生成摘要...</Text>
+              ) : null}
+
+              {summaryCenterSnapshot && !summaryCenterSnapshot.enabled ? (
+                <Text style={styles.empty}>摘要中心功能未开启</Text>
+              ) : null}
+
+              {summaryCenterSnapshot &&
+              summaryCenterSnapshot.enabled &&
+              summaryCenterSnapshot.latest ? (
+                <View style={styles.summaryLatestCard}>
+                  <Text style={styles.summaryLatestTitle}>当前摘要</Text>
+                  <Text style={styles.summaryLatestText}>
+                    {summaryCenterSnapshot.latest.summaryText || '暂无摘要内容'}
+                  </Text>
+                  <Text style={styles.summaryLatestMeta}>
+                    未读 {summaryCenterSnapshot.latest.unreadTotal} · 会话
+                    {` ${summaryCenterSnapshot.latest.unreadConversations} `}
+                    · 生成于 {formatSummaryGeneratedAt(summaryCenterSnapshot.latest.generatedAt)}
+                  </Text>
+                </View>
+              ) : null}
+
+              {summaryCenterSnapshot &&
+              summaryCenterSnapshot.enabled &&
+              summaryCenterSnapshot.latest &&
+              summaryCenterSnapshot.latest.highlights.length > 0 ? (
+                <View style={styles.summarySectionCard}>
+                  <Text style={styles.summarySectionTitle}>重点会话</Text>
+                  {summaryCenterSnapshot.latest.highlights.map((item) => (
+                    <Pressable
+                      key={`summary-highlight-${item.targetType}-${item.targetUid}`}
+                      style={styles.summaryItemCard}
+                      onPress={() => openSummaryConversation(item.targetUid, item.targetType, item.title)}
+                    >
+                      <View style={styles.summaryItemTop}>
+                        <Text style={styles.summaryItemTitle} numberOfLines={1}>
+                          {item.title}
+                        </Text>
+                        <Text style={styles.summaryItemBadge}>
+                          {item.targetType === 'group' ? '群聊' : '好友'} · 未读 {item.unread}
+                        </Text>
+                      </View>
+                      <Text style={styles.summaryItemPreview} numberOfLines={1}>
+                        {item.lastMessagePreview || '暂无预览'}
+                      </Text>
+                      <Text style={styles.summaryItemMeta} numberOfLines={2}>
+                        {item.reason || '建议优先查看该会话'} · {formatSummaryGeneratedAt(item.lastMessageAt)}
+                      </Text>
+                    </Pressable>
+                  ))}
+                </View>
+              ) : null}
+
+              {summaryCenterSnapshot &&
+              summaryCenterSnapshot.enabled &&
+              summaryCenterSnapshot.latest &&
+              summaryCenterSnapshot.latest.todos.length > 0 ? (
+                <View style={styles.summarySectionCard}>
+                  <Text style={styles.summarySectionTitle}>待回复事项</Text>
+                  {summaryCenterSnapshot.latest.todos.map((item) => (
+                    <Pressable
+                      key={`summary-todo-${item.targetType}-${item.targetUid}`}
+                      style={styles.summaryItemCard}
+                      onPress={() => openSummaryConversation(item.targetUid, item.targetType, item.title)}
+                    >
+                      <View style={styles.summaryItemTop}>
+                        <Text style={styles.summaryItemTitle} numberOfLines={1}>
+                          {item.title}
+                        </Text>
+                        <Text style={styles.summaryItemBadge}>
+                          {item.action === 'check_group' ? '查看群消息' : '待回复'}
+                        </Text>
+                      </View>
+                      <Text style={styles.summaryItemMeta} numberOfLines={2}>
+                        {item.reason || '建议尽快处理'} · {formatSummaryGeneratedAt(item.lastIncomingAt)}
+                      </Text>
+                    </Pressable>
+                  ))}
+                </View>
+              ) : null}
+
+              {summaryCenterSnapshot &&
+              summaryCenterSnapshot.enabled &&
+              !summaryCenterSnapshot.latest &&
+              !summaryCenterLoading ? (
+                <Text style={styles.empty}>暂无最新摘要，点击“手动刷新”立即生成</Text>
+              ) : null}
+            </ScrollView>
           )}
 
           <View
@@ -8120,6 +9590,47 @@ export default function Home({
                 ) : null}
               </View>
               <Text style={[styles.navText, homeTab === 'contacts' && styles.navTextActive]}>联系人</Text>
+            </Pressable>
+            <Pressable
+              style={[
+                styles.navItem,
+                homeTab === 'relationship' && styles.navItemActive,
+              ]}
+              onPress={() => setHomeTab('relationship')}
+            >
+              <View style={styles.navIconWrap}>
+                <Svg viewBox="0 0 24 24" width={28} height={28} fill={homeTab === 'relationship' ? '#0099ff' : '#7d7d7d'}>
+                  <Path d="M4 18h3V10H4v8zm6 0h3V6h-3v12zm6 0h3v-4h-3v4z" />
+                </Svg>
+              </View>
+              <Text style={[styles.navText, homeTab === 'relationship' && styles.navTextActive]}>
+                关系运营
+              </Text>
+            </Pressable>
+            <Pressable
+              style={[
+                styles.navItem,
+                homeTab === 'summary' && styles.navItemActive,
+              ]}
+              onPress={() => setHomeTab('summary')}
+            >
+              <View style={styles.navIconWrap}>
+                <Svg viewBox="0 0 24 24" width={28} height={28} fill={homeTab === 'summary' ? '#0099ff' : '#7d7d7d'}>
+                  <Path d="M6 4h12a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2zm2 4h8v2H8V8zm0 4h8v2H8v-2z" />
+                </Svg>
+                {(summaryCenterSnapshot?.badges?.unreadTotal || 0) > 0 ? (
+                  <View style={styles.navBadge}>
+                    <Text style={styles.navBadgeText}>
+                      {(summaryCenterSnapshot?.badges?.unreadTotal || 0) > 99
+                        ? '99+'
+                        : summaryCenterSnapshot?.badges?.unreadTotal}
+                    </Text>
+                  </View>
+                ) : null}
+              </View>
+              <Text style={[styles.navText, homeTab === 'summary' && styles.navTextActive]}>
+                摘要中心
+              </Text>
             </Pressable>
           </View>
         </View>
@@ -9086,6 +10597,283 @@ const styles = StyleSheet.create({
     fontSize: 12,
     color: '#8a8a8a',
   },
+  relationshipHeaderCard: {
+    backgroundColor: '#ffffff',
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: '#e5ecf4',
+    paddingHorizontal: 12,
+    paddingVertical: 12,
+    marginBottom: 10,
+    marginTop: 2,
+    gap: 8,
+  },
+  relationshipHeaderTop: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+  relationshipHeaderTitle: {
+    fontSize: 16,
+    fontWeight: '700',
+    color: '#18324a',
+  },
+  relationshipHeaderSub: {
+    fontSize: 12,
+    color: '#67809b',
+  },
+  relationshipHeaderMeta: {
+    fontSize: 12,
+    color: '#44698e',
+  },
+  relationshipRefreshBtn: {
+    minHeight: 28,
+    borderRadius: 14,
+    backgroundColor: '#eff6ff',
+    paddingHorizontal: 10,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  relationshipRefreshText: {
+    fontSize: 12,
+    color: '#2d6bc2',
+    fontWeight: '600',
+  },
+  relationshipFilterRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 8,
+  },
+  relationshipFilterChip: {
+    minHeight: 28,
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: '#d8e4f1',
+    backgroundColor: '#f8fbff',
+    paddingHorizontal: 10,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  relationshipFilterChipActive: {
+    borderColor: '#2f7fd8',
+    backgroundColor: '#eaf3ff',
+  },
+  relationshipFilterChipText: {
+    fontSize: 12,
+    color: '#67809b',
+    fontWeight: '600',
+  },
+  relationshipFilterChipTextActive: {
+    color: '#2f7fd8',
+  },
+  relationshipErrorText: {
+    color: '#b94747',
+    fontSize: 12,
+    paddingHorizontal: 4,
+    paddingVertical: 6,
+  },
+  relationshipItemCard: {
+    backgroundColor: '#ffffff',
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: '#e5ecf4',
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    marginBottom: 10,
+    gap: 6,
+  },
+  relationshipItemTop: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 8,
+  },
+  relationshipItemTitleWrap: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    flex: 1,
+    gap: 6,
+    minWidth: 0,
+  },
+  relationshipItemTitle: {
+    flexShrink: 1,
+    fontSize: 15,
+    fontWeight: '700',
+    color: '#1f3348',
+  },
+  relationshipItemTypeTag: {
+    fontSize: 11,
+    color: '#50759a',
+    backgroundColor: '#edf4fc',
+    borderRadius: 9,
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    overflow: 'hidden',
+  },
+  relationshipItemScore: {
+    fontSize: 11,
+    color: '#5f7793',
+  },
+  relationshipItemMeta: {
+    fontSize: 12,
+    color: '#56738f',
+  },
+  relationshipItemTrend: {
+    fontSize: 12,
+    color: '#2e5a84',
+  },
+  relationshipItemReason: {
+    fontSize: 12,
+    color: '#4d6882',
+    lineHeight: 18,
+  },
+  relationshipItemActions: {
+    flexDirection: 'row',
+    justifyContent: 'flex-end',
+  },
+  relationshipActionBtn: {
+    minHeight: 30,
+    borderRadius: 15,
+    backgroundColor: '#2f7fd8',
+    paddingHorizontal: 14,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  relationshipActionBtnText: {
+    color: '#ffffff',
+    fontSize: 12,
+    fontWeight: '600',
+  },
+  summaryHeaderCard: {
+    backgroundColor: '#ffffff',
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: '#e5ecf4',
+    paddingHorizontal: 12,
+    paddingVertical: 12,
+    marginBottom: 10,
+    marginTop: 2,
+    gap: 8,
+  },
+  summaryHeaderTop: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 8,
+  },
+  summaryHeaderTitle: {
+    fontSize: 16,
+    fontWeight: '700',
+    color: '#18324a',
+  },
+  summaryHeaderActions: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  summaryActionBtn: {
+    minHeight: 28,
+    borderRadius: 14,
+    backgroundColor: '#eff6ff',
+    paddingHorizontal: 10,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  summaryActionBtnDisabled: {
+    opacity: 0.55,
+  },
+  summaryActionBtnText: {
+    fontSize: 12,
+    color: '#2d6bc2',
+    fontWeight: '600',
+  },
+  summaryHeaderSub: {
+    fontSize: 12,
+    color: '#67809b',
+  },
+  summaryHeaderMeta: {
+    fontSize: 12,
+    color: '#44698e',
+  },
+  summaryLatestCard: {
+    backgroundColor: '#ffffff',
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: '#e5ecf4',
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    marginBottom: 10,
+    gap: 6,
+  },
+  summaryLatestTitle: {
+    fontSize: 14,
+    fontWeight: '700',
+    color: '#223a54',
+  },
+  summaryLatestText: {
+    fontSize: 13,
+    color: '#2f4b66',
+    lineHeight: 19,
+  },
+  summaryLatestMeta: {
+    fontSize: 11,
+    color: '#637f99',
+  },
+  summarySectionCard: {
+    backgroundColor: '#ffffff',
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: '#e5ecf4',
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    marginBottom: 10,
+    gap: 8,
+  },
+  summarySectionTitle: {
+    fontSize: 14,
+    fontWeight: '700',
+    color: '#223a54',
+  },
+  summaryItemCard: {
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: '#e6edf6',
+    backgroundColor: '#f9fbff',
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+    gap: 4,
+  },
+  summaryItemTop: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 8,
+  },
+  summaryItemTitle: {
+    flex: 1,
+    minWidth: 0,
+    fontSize: 14,
+    fontWeight: '600',
+    color: '#1f3348',
+  },
+  summaryItemBadge: {
+    fontSize: 11,
+    color: '#4f7195',
+    backgroundColor: '#eaf1f9',
+    borderRadius: 9,
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    overflow: 'hidden',
+  },
+  summaryItemPreview: {
+    fontSize: 12,
+    color: '#47627f',
+  },
+  summaryItemMeta: {
+    fontSize: 11,
+    color: '#67809b',
+    lineHeight: 16,
+  },
   empty: {
     textAlign: 'center',
     color: '#9a9a9a',
@@ -9393,6 +11181,63 @@ const styles = StyleSheet.create({
   chatOnline: {
     color: '#30c67c',
   },
+  chatRiskBanner: {
+    marginHorizontal: 12,
+    marginTop: 8,
+    marginBottom: 6,
+    borderRadius: 10,
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+    borderWidth: 1,
+  },
+  chatRiskBannerHigh: {
+    backgroundColor: '#fff2f2',
+    borderColor: '#ffc7c7',
+  },
+  chatRiskBannerMedium: {
+    backgroundColor: '#fff8ef',
+    borderColor: '#ffd9a7',
+  },
+  chatRiskBannerTop: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: 4,
+  },
+  chatRiskBannerTitle: {
+    fontSize: 13,
+    fontWeight: '700',
+    color: '#8f2f2f',
+  },
+  chatRiskBannerScore: {
+    fontSize: 12,
+    color: '#8f2f2f',
+    fontWeight: '600',
+  },
+  chatRiskBannerSummary: {
+    fontSize: 12,
+    color: '#6f3a3a',
+    lineHeight: 17,
+  },
+  chatRiskBannerActions: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    marginTop: 6,
+  },
+  chatRiskActionBtn: {
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 7,
+    backgroundColor: 'rgba(255,255,255,0.75)',
+    borderWidth: 1,
+    borderColor: 'rgba(0,0,0,0.08)',
+  },
+  chatRiskActionText: {
+    fontSize: 11,
+    color: '#80433d',
+    fontWeight: '600',
+  },
   chatBody: {
     flex: 1,
     backgroundColor: '#f5f6fa',
@@ -9481,6 +11326,7 @@ const styles = StyleSheet.create({
   bubbleWrap: {
     maxWidth: '78%',
     minWidth: 44,
+    flexShrink: 1,
     alignItems: 'flex-start',
     gap: 3,
   },
@@ -9491,6 +11337,9 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     gap: 6,
+    minWidth: 0,
+    maxWidth: '100%',
+    flexShrink: 1,
   },
   selfBubbleSelectRow: {
     flexDirection: 'row-reverse',
@@ -9551,6 +11400,9 @@ const styles = StyleSheet.create({
   bubblePressable: {
     borderRadius: 14,
     alignSelf: 'flex-start',
+    minWidth: 0,
+    maxWidth: '100%',
+    flexShrink: 1,
   },
   bubblePressing: {
     opacity: 0.9,
@@ -9566,6 +11418,8 @@ const styles = StyleSheet.create({
   },
   bubble: {
     maxWidth: '100%',
+    minWidth: 0,
+    flexShrink: 1,
     backgroundColor: '#fff',
     borderRadius: 14,
     paddingHorizontal: 12,
@@ -9644,7 +11498,17 @@ const styles = StyleSheet.create({
     color: '#1a1a1a',
     lineHeight: 20,
     textAlign: 'left',
+    flexShrink: 1,
     includeFontPadding: false,
+  },
+  messageTextWebWrap: {
+    ...(Platform.OS === 'web'
+      ? ({
+          whiteSpace: 'pre-wrap',
+          overflowWrap: 'anywhere',
+          wordBreak: 'break-word',
+        } as any)
+      : null),
   },
   failedRetryBadge: {
     width: 20,
@@ -9838,6 +11702,160 @@ const styles = StyleSheet.create({
     backgroundColor: '#ffffff',
     paddingHorizontal: 10,
     paddingTop: 8,
+  },
+  replyAssistControlRow: {
+    borderWidth: 1,
+    borderColor: '#e8edf6',
+    borderRadius: 10,
+    backgroundColor: '#f8fbff',
+    paddingHorizontal: 10,
+    paddingTop: 8,
+    paddingBottom: 8,
+    marginBottom: 8,
+  },
+  replyAssistControlTop: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: 6,
+    gap: 8,
+  },
+  replyAssistControlLabel: {
+    fontSize: 12,
+    color: '#4a5e78',
+    flex: 1,
+  },
+  replyAssistRefreshBtn: {
+    height: 24,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: '#c8d7ec',
+    backgroundColor: '#ffffff',
+    paddingHorizontal: 9,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  replyAssistRefreshBtnDisabled: {
+    opacity: 0.65,
+  },
+  replyAssistRefreshBtnText: {
+    fontSize: 11,
+    color: '#3e6087',
+    fontWeight: '600',
+  },
+  replyAssistStyleChips: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+  },
+  replyAssistToggleRow: {
+    marginTop: 8,
+    flexDirection: 'row',
+    alignItems: 'center',
+    flexWrap: 'wrap',
+    gap: 8,
+  },
+  replyAssistStyleChip: {
+    height: 30,
+    minWidth: 56,
+    borderRadius: 15,
+    borderWidth: 1,
+    borderColor: '#d5dfed',
+    backgroundColor: '#ffffff',
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 10,
+  },
+  replyAssistStyleChipActive: {
+    borderColor: '#4b9bff',
+    backgroundColor: '#e8f2ff',
+  },
+  replyAssistStyleChipText: {
+    fontSize: 12,
+    color: '#47607b',
+    fontWeight: '500',
+  },
+  replyAssistStyleChipTextActive: {
+    color: '#236ed1',
+    fontWeight: '700',
+  },
+  replyAssistProfileBtn: {
+    alignSelf: 'flex-start',
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: '#d5dfed',
+    backgroundColor: '#ffffff',
+    paddingHorizontal: 9,
+    height: 24,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  replyAssistProfileBtnActive: {
+    borderColor: '#56b07f',
+    backgroundColor: '#edf9f2',
+  },
+  replyAssistProfileBtnText: {
+    fontSize: 11,
+    color: '#4f6074',
+    fontWeight: '500',
+  },
+  replyAssistProfileBtnTextActive: {
+    color: '#2f8b5c',
+    fontWeight: '700',
+  },
+  replySuggestPanel: {
+    borderWidth: 1,
+    borderColor: '#dfe9f7',
+    borderRadius: 10,
+    backgroundColor: '#f8fbff',
+    paddingHorizontal: 10,
+    paddingTop: 8,
+    paddingBottom: 8,
+    marginBottom: 8,
+  },
+  replySuggestHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: 6,
+  },
+  replySuggestTitle: {
+    fontSize: 13,
+    color: '#27405d',
+    fontWeight: '700',
+  },
+  replySuggestMeta: {
+    fontSize: 11,
+    color: '#6c8099',
+  },
+  replySuggestList: {
+    gap: 8,
+    paddingRight: 2,
+  },
+  replySuggestItem: {
+    width: 208,
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: '#d7e3f2',
+    backgroundColor: '#ffffff',
+    paddingHorizontal: 9,
+    paddingTop: 8,
+    paddingBottom: 8,
+  },
+  replySuggestText: {
+    fontSize: 13,
+    color: '#1e2f45',
+    lineHeight: 18,
+  },
+  replySuggestSubText: {
+    marginTop: 6,
+    fontSize: 11,
+    color: '#6d7f95',
+  },
+  replySuggestReason: {
+    marginTop: 7,
+    fontSize: 11,
+    color: '#6b8099',
   },
   chatInputRow: {
     flexDirection: 'row',

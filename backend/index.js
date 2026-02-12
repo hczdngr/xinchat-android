@@ -5,6 +5,7 @@
 
 import express from 'express';
 import http from 'http';
+import fs from 'fs';
 import path from 'path';
 import { fileURLToPath, pathToFileURL } from 'url';
 import { WebSocket, WebSocketServer } from 'ws';
@@ -26,9 +27,16 @@ import groupsRouter, {
 } from './routes/groups.js';
 import voiceRouter from './routes/voice.js';
 import voiceTranscribeRouter from './routes/voiceTranscribe.js';
+import eventsRouter from './routes/events.js';
+import translateRouter from './routes/translate.js';
+import opsRouter from './routes/ops.js';
+import summaryRouter from './routes/summary.js';
+import recoRouter from './routes/reco.js';
 import insightApiRouter, { prewarmWarmTipCache } from './routes/insightApi.js';
+import adminAuthRouter from './routes/adminAuth.js';
 import adminRouter from './routes/admin.js';
 import { startInsightWorker } from './routes/insight.js';
+import { runSummaryAutoTick, setSummaryNotifier } from './summary/service.js';
 import { getTokenId, onTokenRevoked } from './tokenRevocation.js';
 import {
   markDisconnected,
@@ -50,6 +58,14 @@ import {
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
+const ADMIN_PRO_DIST_DIR = path.join(__dirname, 'admin-pro-umi', 'dist');
+const ADMIN_PRO_INDEX_PATH = path.join(ADMIN_PRO_DIST_DIR, 'index.html');
+const ADMIN_PRO_BUILD_READY = fs.existsSync(ADMIN_PRO_INDEX_PATH);
+const ADMIN_PANEL_BASE_PATH = '/admin';
+const ADMIN_PANEL_ENTRY_PATH = `${ADMIN_PANEL_BASE_PATH}/`;
+const ADMIN_PANEL_ROUTE_REGEXP = /^\/admin(?:\/.*)?$/;
+const ADMIN_PANEL_BUILD_MISSING_MESSAGE =
+  'Admin panel dist not found. Please build backend/admin-pro-umi first.';
 const PORT = process.env.PORT || 3001;
 const NODE_ENV = process.env.NODE_ENV || 'development';
 const ROUTE_INSPECTOR_ENABLED =
@@ -246,24 +262,20 @@ app.use((req, res, next) => {
   next();
 });
 
-app.get('/', (_, res) => {
-  res.sendFile(path.join(__dirname, 'index.html', 'index.html'));
-});
-
 const routeMeta = [
   {
     method: 'GET',
     path: '/',
     label: 'Root',
-    note: 'Service root path that returns the admin index page.',
-    templates: [{ name: 'Open root', body: null, hint: 'No body' }],
+    note: 'Service root path. Redirects to /admin/.',
+    templates: [{ name: 'Open root', body: null, hint: 'Expect 302 redirect' }],
   },
   {
     method: 'GET',
-    path: '/admin',
+    path: '/admin/*',
     label: 'Admin',
-    note: 'Backend admin page.',
-    templates: [{ name: 'Open admin', body: null, hint: 'No body' }],
+    note: 'Backend admin SPA entry and static assets.',
+    templates: [{ name: 'Open admin', body: null, hint: 'Serve admin-pro-umi build' }],
   },
   {
     method: 'GET',
@@ -302,6 +314,45 @@ const routeMeta = [
         name: 'Standard login',
         body: { username: 'demo_user', password: 'demo_pass_123' },
         hint: 'Username is lowercased',
+      },
+    ],
+  },
+  {
+    method: 'POST',
+    path: '/api/admin/auth/login',
+    label: 'Admin login',
+    note: 'Login with dedicated admin account from admin-users store.',
+    templates: [
+      {
+        name: 'Admin login',
+        body: { username: 'ops_admin', password: 'StrongPassw0rd!' },
+        hint: 'Not shared with /api/login user database',
+      },
+    ],
+  },
+  {
+    method: 'GET',
+    path: '/api/admin/auth/me',
+    label: 'Admin profile',
+    note: 'Get current admin principal from admin token.',
+    templates: [
+      {
+        name: 'Read admin profile',
+        body: null,
+        hint: 'X-Admin-Token or Authorization: Bearer <admin_token>',
+      },
+    ],
+  },
+  {
+    method: 'POST',
+    path: '/api/admin/auth/logout',
+    label: 'Admin logout',
+    note: 'Revoke current admin token session.',
+    templates: [
+      {
+        name: 'Admin logout',
+        body: null,
+        hint: 'X-Admin-Token or Authorization: Bearer <admin_token>',
       },
     ],
   },
@@ -387,6 +438,116 @@ const routeMeta = [
       {
         name: 'Overview with read map',
         body: { readAt: { 100000001: 1736458200000 } },
+        hint: 'Authorization: Bearer <token>',
+      },
+    ],
+  },
+  {
+    method: 'GET',
+    path: '/api/ops/relationship',
+    label: 'Relationship ops',
+    note: 'Rank friends/groups by recent interaction decline and action suggestions.',
+    templates: [
+      {
+        name: 'Top declines (7d)',
+        body: { scope: 'all', windowDays: 7, limit: 20 },
+        hint: 'Authorization: Bearer <token>',
+      },
+      {
+        name: 'Group only (30d)',
+        body: { scope: 'group', windowDays: 30, limit: 15 },
+        hint: 'Authorization: Bearer <token>',
+      },
+    ],
+  },
+  {
+    method: 'GET',
+    path: '/api/summary',
+    label: 'Summary center',
+    note: 'Read latest unread summary, key conversations, and reply todo list.',
+    templates: [
+      {
+        name: 'Read summary center',
+        body: null,
+        hint: 'Authorization: Bearer <token>',
+      },
+    ],
+  },
+  {
+    method: 'POST',
+    path: '/api/summary/refresh',
+    label: 'Refresh summary',
+    note: 'Manually regenerate summary snapshot and push websocket card.',
+    templates: [
+      {
+        name: 'Manual refresh',
+        body: {},
+        hint: 'Authorization: Bearer <token>',
+      },
+    ],
+  },
+  {
+    method: 'POST',
+    path: '/api/summary/archive',
+    label: 'Archive summary',
+    note: 'Mark summary as handled/read and move to history archive.',
+    templates: [
+      {
+        name: 'Archive latest',
+        body: {},
+        hint: 'Authorization: Bearer <token>',
+      },
+    ],
+  },
+  {
+    method: 'GET',
+    path: '/api/chat/risk',
+    label: 'Chat risk profile',
+    note: 'Fetch conversation risk profile for warning bubble.',
+    templates: [
+      {
+        name: 'Private chat risk',
+        body: { targetType: 'private', targetUid: 100000001 },
+        hint: 'Authorization: Bearer <token>',
+      },
+      {
+        name: 'Group chat risk',
+        body: { targetType: 'group', targetUid: 2000000001 },
+        hint: 'Authorization: Bearer <token>',
+      },
+    ],
+  },
+  {
+    method: 'POST',
+    path: '/api/chat/risk/ignore',
+    label: 'Ignore chat risk',
+    note: 'Ignore risk warning for current conversation.',
+    templates: [
+      {
+        name: 'Ignore for 7 days',
+        body: {
+          targetType: 'private',
+          targetUid: 100000001,
+          reason: 'manual_ignore',
+          ttlHours: 168,
+        },
+        hint: 'Authorization: Bearer <token>',
+      },
+    ],
+  },
+  {
+    method: 'POST',
+    path: '/api/chat/risk/appeal',
+    label: 'Appeal chat risk',
+    note: 'Submit false-positive appeal for chat risk judgement.',
+    templates: [
+      {
+        name: 'Submit appeal',
+        body: {
+          targetType: 'private',
+          targetUid: 100000001,
+          reason: 'possible_false_positive',
+        },
         hint: 'Authorization: Bearer <token>',
       },
     ],
@@ -647,6 +808,13 @@ const routeMeta = [
   },
   {
     method: 'GET',
+    path: '/api/admin/phase4/overview',
+    label: 'Phase4 overview',
+    note: 'Return summary center runtime snapshot, request volume and response distribution.',
+    templates: [{ name: 'Phase4 summary', body: null, hint: 'X-Admin-Token or adminToken' }],
+  },
+  {
+    method: 'GET',
     path: '/api/admin/users',
     label: 'Users list',
     note: 'List users with pagination and keyword/status filters.',
@@ -669,6 +837,33 @@ const routeMeta = [
         name: 'Read user',
         body: null,
         path: '/api/admin/users/detail?uid=100000000',
+        hint: 'X-Admin-Token or adminToken',
+      },
+    ],
+  },
+  {
+    method: 'GET',
+    path: '/api/admin/social/overview',
+    label: 'Social overview',
+    note: 'Return global social graph statistics for users/friends/groups.',
+    templates: [
+      {
+        name: 'Social overview',
+        body: null,
+        hint: 'X-Admin-Token or adminToken',
+      },
+    ],
+  },
+  {
+    method: 'GET',
+    path: '/api/admin/social/tree',
+    label: 'Social tree',
+    note: 'Return personal social tree (friends and optional groups) by uid.',
+    templates: [
+      {
+        name: 'User tree depth 2',
+        body: null,
+        path: '/api/admin/social/tree?uid=100000000&depth=2&includeGroups=1',
         hint: 'X-Admin-Token or adminToken',
       },
     ],
@@ -1098,7 +1293,47 @@ app.use(
     immutable: true,
   })
 );
-app.use('/admin', express.static(path.join(__dirname, 'index.html')));
+
+app.get('/', (_, res) => {
+  if (ADMIN_PRO_BUILD_READY) {
+    res.redirect(302, ADMIN_PANEL_ENTRY_PATH);
+    return;
+  }
+  res.status(503).json({
+    success: false,
+    message: ADMIN_PANEL_BUILD_MISSING_MESSAGE,
+  });
+});
+
+if (ADMIN_PRO_BUILD_READY) {
+  app.use(
+    ADMIN_PANEL_BASE_PATH,
+    express.static(ADMIN_PRO_DIST_DIR, {
+      maxAge: '30m',
+      etag: true,
+      immutable: false,
+    })
+  );
+  app.get(ADMIN_PANEL_ROUTE_REGEXP, (req, res, next) => {
+    if (req.method !== 'GET') {
+      next();
+      return;
+    }
+    const requestPath = String(req.path || '');
+    if (path.extname(requestPath)) {
+      next();
+      return;
+    }
+    res.sendFile(ADMIN_PRO_INDEX_PATH);
+  });
+} else {
+  app.get(ADMIN_PANEL_ROUTE_REGEXP, (req, res) => {
+    res.status(503).json({
+      success: false,
+      message: ADMIN_PANEL_BUILD_MISSING_MESSAGE,
+    });
+  });
+}
 
 app.use('/api', authRouter);
 app.use('/api/chat', chatRouter);
@@ -1106,7 +1341,13 @@ app.use('/api/friends', friendsRouter);
 app.use('/api/groups', groupsRouter);
 app.use('/api/voice', voiceRouter);
 app.use('/api/chat/voice', voiceTranscribeRouter);
+app.use('/api/events', eventsRouter);
+app.use('/api/translate', translateRouter);
+app.use('/api/ops', opsRouter);
+app.use('/api/summary', summaryRouter);
+app.use('/api/reco', recoRouter);
 app.use('/api/insight', insightApiRouter);
+app.use('/api/admin/auth', adminAuthRouter);
 app.use('/api/admin', adminRouter);
 
 app.use((err, req, res, next) => {
@@ -1144,7 +1385,10 @@ export function startServer(port = PORT) {
     clientTracking: false,
     maxPayload: WS_MAX_PAYLOAD_BYTES,
   });
-  const insightWorker = startInsightWorker({ logger });
+  const insightWorker = startInsightWorker({
+    logger,
+    onTick: () => runSummaryAutoTick({ reason: 'insight_worker' }),
+  });
   server.on('close', () => {
     insightWorker.stop();
   });
@@ -1592,6 +1836,13 @@ export function startServer(port = PORT) {
         });
     }
   });
+  setSummaryNotifier((uid, payload) => {
+    if (!uid || !payload) return;
+    sendToUid(Number(uid), payload);
+  });
+  server.on('close', () => {
+    setSummaryNotifier(null);
+  });
   setFriendsNotifier((uids, payload) => {
     uids.forEach((uid) => sendToUid(uid, payload));
   });
@@ -1619,6 +1870,7 @@ export function startServer(port = PORT) {
         host: '0.0.0.0',
         port,
         adminMetricsEnabled: ADMIN_METRICS_ENABLED,
+        adminPanelSource: ADMIN_PRO_BUILD_READY ? 'admin-pro-umi/dist' : 'missing-dist',
       });
     }
   );

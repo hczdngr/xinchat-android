@@ -7,22 +7,55 @@
     <link rel="stylesheet" href="https://unpkg.com/antd@5.27.0/dist/reset.css" />
     <style>
       html, body, #root { height: 100%; }
+      :root {
+        --admin-bg: radial-gradient(circle at 10% 10%, #edf7ff 0%, #f4fbf5 45%, #ffffff 100%);
+        --admin-text: #0f172a;
+        --admin-glass-bg: linear-gradient(135deg, rgba(255,255,255,0.88), rgba(244,250,255,0.95));
+        --admin-resp-bg: #0b1020;
+        --admin-resp-color: #dbeafe;
+        --graph-bg: linear-gradient(180deg,#f8fbff 0%,#ffffff 100%);
+        --graph-border: #e2e8f0;
+        --graph-divider: #eef2f7;
+      }
       body {
         margin: 0;
-        background: radial-gradient(circle at 10% 10%, #edf7ff 0%, #f4fbf5 45%, #ffffff 100%);
+        background: var(--admin-bg);
+        color: var(--admin-text);
         font-family: 'PingFang SC', 'Microsoft YaHei', sans-serif;
+        transition: background 220ms ease, color 220ms ease;
+      }
+      body.theme-light {
+        --admin-bg: radial-gradient(circle at 10% 10%, #edf7ff 0%, #f4fbf5 45%, #ffffff 100%);
+        --admin-text: #0f172a;
+        --admin-glass-bg: linear-gradient(135deg, rgba(255,255,255,0.88), rgba(244,250,255,0.95));
+        --admin-resp-bg: #0b1020;
+        --admin-resp-color: #dbeafe;
+        --graph-bg: linear-gradient(180deg,#f8fbff 0%,#ffffff 100%);
+        --graph-border: #e2e8f0;
+        --graph-divider: #eef2f7;
+      }
+      body.theme-dark {
+        --admin-bg: radial-gradient(circle at 16% 14%, #1a2233 0%, #0f172a 42%, #0a0f1d 100%);
+        --admin-text: #e2e8f0;
+        --admin-glass-bg: linear-gradient(135deg, rgba(18,25,40,0.88), rgba(9,14,24,0.94));
+        --admin-resp-bg: #050916;
+        --admin-resp-color: #d2e7ff;
+        --graph-bg: linear-gradient(180deg,#0e1728 0%,#0a1322 100%);
+        --graph-border: #1e293b;
+        --graph-divider: #1f2a3d;
       }
       .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Courier New', monospace; }
-      .glass { background: linear-gradient(135deg, rgba(255,255,255,0.88), rgba(244,250,255,0.95)); backdrop-filter: blur(5px); }
+      .glass { background: var(--admin-glass-bg); backdrop-filter: blur(5px); transition: background 220ms ease; }
       .resp {
         white-space: pre-wrap;
         word-break: break-word;
-        background: #0b1020;
-        color: #dbeafe;
+        background: var(--admin-resp-bg);
+        color: var(--admin-resp-color);
         border-radius: 10px;
         padding: 12px;
         max-height: 420px;
         overflow: auto;
+        transition: background 220ms ease, color 220ms ease;
       }
     </style>
   </head>
@@ -35,6 +68,8 @@
     <script>if (!window.ReactDOM) { document.write('<script src="https://cdn.jsdelivr.net/npm/react-dom@18/umd/react-dom.production.min.js"><\\/script>'); }</script>
     <script src="https://unpkg.com/dayjs@1/dayjs.min.js"></script>
     <script>if (!window.dayjs) { document.write('<script src="https://cdn.jsdelivr.net/npm/dayjs@1/dayjs.min.js"><\\/script>'); }</script>
+    <script src="https://unpkg.com/d3@7.9.0/dist/d3.min.js"></script>
+    <script>if (!window.d3) { document.write('<script src="https://cdn.jsdelivr.net/npm/d3@7.9.0/dist/d3.min.js"><\\/script>'); }</script>
     <script src="https://unpkg.com/antd@5.27.0/dist/antd.min.js"></script>
     <script>if (!window.antd) { document.write('<script src="https://cdn.jsdelivr.net/npm/antd@5.27.0/dist/antd.min.js"><\\/script>'); }</script>
     <script src="https://unpkg.com/@ant-design/icons@5.6.1/dist/index.umd.js"></script>
@@ -44,7 +79,7 @@
     <script src="https://unpkg.com/@babel/standalone@7.28.5/babel.min.js"></script>
 
     <script type="text/babel" data-presets="env,react">
-      if (!window.React || !window.ReactDOM || !window.antd || !window.ProComponents || !window.icons) {
+      if (!window.React || !window.ReactDOM || !window.antd || !window.ProComponents || !window.icons || !window.d3) {
         const root = document.getElementById('root');
         if (root) {
           root.innerHTML = '<div style="padding:24px;font-family:Segoe UI,Microsoft YaHei,sans-serif;color:#b91c1c;">后台依赖加载失败，请刷新页面或关闭会注入脚本的浏览器扩展后重试。</div>';
@@ -59,7 +94,7 @@
       const { useState, useEffect, useMemo, useRef, useCallback } = React;
       const { ConfigProvider, Card, Row, Col, Space, Tag, Button, Input, InputNumber, Select, Form, Modal, Drawer, Alert, Popconfirm, Typography } = antd;
       const { ProLayout, PageContainer, ProTable, ProDescriptions } = ProComponents;
-      const { DashboardOutlined, TeamOutlined, MessageOutlined, ApiOutlined, ReloadOutlined, EditOutlined, DeleteOutlined, EyeOutlined, StopOutlined } = icons;
+      const { DashboardOutlined, TeamOutlined, MessageOutlined, ApiOutlined, ReloadOutlined, EditOutlined, DeleteOutlined, EyeOutlined, StopOutlined, DeploymentUnitOutlined } = icons;
       const { Text, Paragraph } = Typography;
 
       const types = ['text','image','video','voice','gif','file','card','call'];
@@ -70,12 +105,199 @@
       const fmtTime = (v)=>{ const d=new Date(v||''); return Number.isNaN(d.getTime())?'-':d.toLocaleString('zh-CN',{hour12:false}); };
       const fmtDur = (ms)=>{ const s=Math.max(0,Math.floor(Number(ms||0)/1000)); const h=Math.floor(s/3600); const m=Math.floor((s%3600)/60); const r=s%60; return h>0?`${h}h ${m}m ${r}s`:`${m}m ${r}s`; };
       const toTs = (v)=>{ if(!v) return ''; if(typeof v==='number') return String(v); if(typeof v==='string') return v; if(typeof v.valueOf==='function'){ const n=Number(v.valueOf()); return Number.isFinite(n)&&n>0?String(n):'';} return ''; };
+      const nodeColor = (node,rootUid)=>{
+        if(String(node?.id||'')===`u:${rootUid}`) return '#e11d48';
+        if(node?.type==='group') return '#0891b2';
+        if(node?.online===true) return '#16a34a';
+        return '#2563eb';
+      };
+      const nodeRadius = (node,rootUid)=>{
+        if(String(node?.id||'')===`u:${rootUid}`) return 12;
+        if(node?.type==='group') return 10;
+        return 8;
+      };
+
+      function SocialForceGraph({ tree, height=520, themeMode='light' }){
+        const wrapRef = useRef(null);
+        const svgRef = useRef(null);
+        const [width,setWidth] = useState(980);
+
+        useEffect(()=>{
+          const target = wrapRef.current;
+          if(!target) return;
+          const update = ()=> setWidth(Math.max(480,Math.floor(target.clientWidth||980)));
+          update();
+          if(typeof ResizeObserver==='function'){
+            const ro = new ResizeObserver(update);
+            ro.observe(target);
+            return ()=>ro.disconnect();
+          }
+          window.addEventListener('resize',update);
+          return ()=>window.removeEventListener('resize',update);
+        },[]);
+
+        useEffect(()=>{
+          const d3 = window.d3;
+          if(!d3 || !svgRef.current || !tree) return;
+          const svg = d3.select(svgRef.current);
+          svg.selectAll('*').remove();
+
+          const nodesRaw = Array.isArray(tree?.nodes) ? tree.nodes : [];
+          const linksRaw = Array.isArray(tree?.edges) ? tree.edges : [];
+          const isDark = themeMode === 'dark';
+          const colorSet = {
+            emptyText: isDark ? '#94a3b8' : '#64748b',
+            label: isDark ? '#cbd5e1' : '#334155',
+            linkFriend: isDark ? '#64748b' : '#6b7280',
+            linkGroup: isDark ? '#c084fc' : '#9d4edd',
+            nodeStroke: isDark ? '#0b1220' : '#ffffff',
+          };
+          if(nodesRaw.length===0){
+            svg.append('text')
+              .attr('x',18)
+              .attr('y',28)
+              .attr('fill',colorSet.emptyText)
+              .attr('font-size',13)
+              .text('暂无可渲染的社交树节点');
+            return;
+          }
+
+          const nodes = nodesRaw.map((n)=>({ ...n }));
+          const links = linksRaw
+            .map((e)=>({
+              ...e,
+              source: e?.from,
+              target: e?.to,
+            }))
+            .filter((e)=>String(e?.source||'') && String(e?.target||''));
+
+          const root = svg.append('g').attr('class','social-force-root');
+          const linkLayer = root.append('g').attr('class','link-layer');
+          const nodeLayer = root.append('g').attr('class','node-layer');
+          const labelLayer = root.append('g').attr('class','label-layer');
+
+          const link = linkLayer
+            .selectAll('line')
+            .data(links)
+            .join('line')
+            .attr('stroke', (d)=>d?.type==='group_member' ? colorSet.linkGroup : colorSet.linkFriend)
+            .attr('stroke-opacity', 0.45)
+            .attr('stroke-width', (d)=>d?.type==='group_member' ? 1.2 : 1.8);
+
+          const node = nodeLayer
+            .selectAll('circle')
+            .data(nodes)
+            .join('circle')
+            .attr('r', (d)=>nodeRadius(d,tree?.rootUid))
+            .attr('fill', (d)=>nodeColor(d,tree?.rootUid))
+            .attr('stroke', colorSet.nodeStroke)
+            .attr('stroke-width', 1.5)
+            .style('cursor', 'grab');
+
+          node.append('title').text((d)=>`${d?.label||d?.id||'-'}\n${d?.id||''}`);
+
+          const label = labelLayer
+            .selectAll('text')
+            .data(nodes)
+            .join('text')
+            .text((d)=>String(d?.label||d?.id||'').slice(0,20))
+            .attr('font-size', 11)
+            .attr('fill', colorSet.label)
+            .attr('dx', 10)
+            .attr('dy', 4)
+            .attr('pointer-events', 'none')
+            .style('user-select', 'none');
+
+          const simulation = d3.forceSimulation(nodes)
+            .force(
+              'link',
+              d3.forceLink(links)
+                .id((d)=>d.id)
+                .distance((d)=>d?.type==='group_member' ? 92 : 64)
+                .strength((d)=>d?.type==='group_member' ? 0.42 : 0.7)
+            )
+            .force('charge', d3.forceManyBody().strength(-260))
+            .force('center', d3.forceCenter(width/2,height/2))
+            .force('collide', d3.forceCollide().radius((d)=>nodeRadius(d,tree?.rootUid)+6))
+            .alphaDecay(0.035);
+
+          const zoom = d3.zoom()
+            .scaleExtent([0.15, 4])
+            .on('zoom', (event)=>{
+              root.attr('transform', event.transform);
+            });
+          svg.call(zoom);
+          svg.call(zoom.transform, d3.zoomIdentity.translate(0,0).scale(1));
+
+          const drag = d3.drag()
+            .on('start', (event, d)=>{
+              if(!event.active) simulation.alphaTarget(0.25).restart();
+              d.fx = d.x;
+              d.fy = d.y;
+              d3.select(event.sourceEvent?.target).style('cursor','grabbing');
+            })
+            .on('drag', (event, d)=>{
+              d.fx = event.x;
+              d.fy = event.y;
+            })
+            .on('end', (event, d)=>{
+              if(!event.active) simulation.alphaTarget(0);
+              d.fx = null;
+              d.fy = null;
+              d3.select(event.sourceEvent?.target).style('cursor','grab');
+            });
+          node.call(drag);
+
+          simulation.on('tick', ()=>{
+            link
+              .attr('x1', (d)=>d.source?.x || 0)
+              .attr('y1', (d)=>d.source?.y || 0)
+              .attr('x2', (d)=>d.target?.x || 0)
+              .attr('y2', (d)=>d.target?.y || 0);
+            node
+              .attr('cx', (d)=>d.x || 0)
+              .attr('cy', (d)=>d.y || 0);
+            label
+              .attr('x', (d)=>d.x || 0)
+              .attr('y', (d)=>d.y || 0);
+          });
+
+          return ()=>{
+            simulation.stop();
+            svg.on('.zoom', null);
+            svg.selectAll('*').remove();
+          };
+        },[tree,width,height,themeMode]);
+
+        return (
+          <div ref={wrapRef} style={{width:'100%',minHeight:height,border:'1px solid var(--graph-border)',borderRadius:10,background:'var(--graph-bg)',transition:'background 220ms ease, border-color 220ms ease'}}>
+            <svg ref={svgRef} width='100%' height={height} />
+            <div style={{padding:'8px 10px',borderTop:'1px solid var(--graph-divider)',display:'flex',gap:10,flexWrap:'wrap',transition:'border-color 220ms ease'}}>
+              <Tag color='red'>Root 用户</Tag>
+              <Tag color='blue'>普通用户</Tag>
+              <Tag color='green'>在线用户</Tag>
+              <Tag color='cyan'>群节点</Tag>
+              <Tag color='purple'>群成员边</Tag>
+              <Text type='secondary'>提示：滚轮缩放，拖拽空白平移，拖拽节点可调整位置</Text>
+            </div>
+          </div>
+        );
+      }
 
       function App(){
         const [path,setPath] = useState('/dashboard');
+        const [themeMode,setThemeMode] = useState(()=>{
+          const saved = localStorage.getItem('xinchat_admin_theme');
+          if(saved==='dark' || saved==='light') return saved;
+          const prefersDark = typeof window.matchMedia==='function' && window.matchMedia('(prefers-color-scheme: dark)').matches;
+          return prefersDark ? 'dark' : 'light';
+        });
+        const [adminUsername,setAdminUsername] = useState(localStorage.getItem('xinchat_admin_username')||'');
+        const [adminPassword,setAdminPassword] = useState('');
+        const [adminLoginLoading,setAdminLoginLoading] = useState(false);
+        const [adminProfile,setAdminProfile] = useState(null);
         const [adminToken,setAdminToken] = useState(localStorage.getItem('xinchat_admin_token')||'');
         const [authToken,setAuthToken] = useState(localStorage.getItem('xinchat_auth_token')||'');
-        const [refreshSec,setRefreshSec] = useState(Number(localStorage.getItem('xinchat_admin_refresh_seconds')||15));
 
         const [dash,setDash] = useState(null);
         const [dashLoading,setDashLoading] = useState(false);
@@ -85,8 +307,15 @@
         const [userDetail,setUserDetail] = useState(null);
 
         const [msgSummary,setMsgSummary] = useState(null);
+        const [riskOverview,setRiskOverview] = useState(null);
+        const [socialOverview,setSocialOverview] = useState(null);
         const [msgOpen,setMsgOpen] = useState(false);
         const [msgDetail,setMsgDetail] = useState(null);
+        const [socialTreeUid,setSocialTreeUid] = useState('');
+        const [socialTreeDepth,setSocialTreeDepth] = useState(2);
+        const [socialTreeIncludeGroups,setSocialTreeIncludeGroups] = useState(true);
+        const [socialTree,setSocialTree] = useState(null);
+        const [socialTreeLoading,setSocialTreeLoading] = useState(false);
 
         const [routes,setRoutes] = useState([]);
         const [routeId,setRouteId] = useState('');
@@ -97,12 +326,40 @@
 
         const userRef = useRef();
         const msgRef = useRef();
+        const pollTimerRef = useRef(null);
+        const pollInFlightRef = useRef(false);
+        const pollFailureRef = useRef(0);
         const [userForm] = Form.useForm();
         const [msgForm] = Form.useForm();
+        const hasAdminToken = Boolean(String(adminToken||'').trim());
+        const layoutConfig = useMemo(()=>({
+          navTheme: themeMode==='dark' ? 'dark' : 'light',
+          primaryColor: '#0f766e',
+          layout: 'mix',
+          contentWidth: 'Fluid',
+          fixedHeader: true,
+          fixSiderbar: true,
+          splitMenus: true,
+          title: 'XinChat Admin Pro',
+          pwa: false,
+        }),[themeMode]);
+        const isDarkMode = layoutConfig.navTheme === 'dark';
 
+        useEffect(()=>{
+          const mode = layoutConfig.navTheme === 'dark' ? 'dark' : 'light';
+          localStorage.setItem('xinchat_admin_theme',mode);
+          if(document?.body){
+            document.body.classList.remove('theme-light','theme-dark');
+            document.body.classList.add(`theme-${mode}`);
+            document.body.setAttribute('data-nav-theme', mode);
+          }
+          if(document?.documentElement){
+            document.documentElement.style.colorScheme = mode;
+          }
+        },[layoutConfig.navTheme]);
+        useEffect(()=>{ localStorage.setItem('xinchat_admin_username',adminUsername||''); },[adminUsername]);
         useEffect(()=>{ localStorage.setItem('xinchat_admin_token',adminToken||''); },[adminToken]);
         useEffect(()=>{ localStorage.setItem('xinchat_auth_token',authToken||''); },[authToken]);
-        useEffect(()=>{ if(Number(refreshSec)>0) localStorage.setItem('xinchat_admin_refresh_seconds',String(refreshSec)); },[refreshSec]);
 
         const api = useCallback(async (url,{method='GET',body,admin=false,auth=false}={})=>{
           const headers={};
@@ -116,20 +373,85 @@
           return json.data;
         },[adminToken,authToken]);
 
-        const loadDash = useCallback(async ()=>{
+        const loadAdminProfile = useCallback(async ()=>{
+          if(!adminToken.trim()){
+            setAdminProfile(null);
+            return null;
+          }
+          try{
+            const data = await api('/api/admin/auth/me',{admin:true});
+            setAdminProfile(data||null);
+            return data||null;
+          }catch{
+            setAdminProfile(null);
+            return null;
+          }
+        },[api,adminToken]);
+
+        const adminLogin = useCallback(async ()=>{
+          const username = String(adminUsername||'').trim();
+          const password = String(adminPassword||'');
+          if(!username || !password){
+            antd.message.warning('请输入管理员用户名与密码');
+            return;
+          }
+          setAdminLoginLoading(true);
+          try{
+            const data = await api('/api/admin/auth/login',{method:'POST',body:{username,password}});
+            const token = String(data?.token||'').trim();
+            if(!token){
+              throw new Error('管理员登录成功但未返回令牌');
+            }
+            setAdminToken(token);
+            setAdminProfile(data?.admin||null);
+            setAdminPassword('');
+            antd.message.success('管理员登录成功');
+          }catch(e){
+            antd.message.error(e.message);
+          }finally{
+            setAdminLoginLoading(false);
+          }
+        },[adminUsername,adminPassword,api]);
+
+        const adminLogout = useCallback(async ()=>{
+          try{
+            if(adminToken.trim()){
+              await api('/api/admin/auth/logout',{method:'POST',admin:true});
+            }
+          }catch{}
+          setAdminToken('');
+          setAdminProfile(null);
+          setAdminPassword('');
+          setDash(null);
+          setMsgSummary(null);
+          setRiskOverview(null);
+          setSocialOverview(null);
+          setSocialTree(null);
+          antd.message.success('管理员已退出');
+        },[api,adminToken]);
+
+        const loadDash = useCallback(async ({silent=false}={})=>{
+          if(!adminToken.trim()){
+            setDash(null);
+            return;
+          }
           setDashLoading(true);
           try{
-            const [metrics,users,bottlenecks,messages]=await Promise.all([
+            const [metrics,users,bottlenecks,messages,risk,social]=await Promise.all([
               api('/api/admin/metrics'),
               api('/api/admin/users/summary',{admin:true}),
               api('/api/admin/bottlenecks',{admin:true}),
               api('/api/admin/messages/summary',{admin:true}),
+              api('/api/admin/risk/overview',{admin:true}),
+              api('/api/admin/social/overview',{admin:true}),
             ]);
-            setDash({metrics,users,bottlenecks,messages});
+            setDash({metrics,users,bottlenecks,messages,risk,social});
             setMsgSummary(messages);
-          }catch(e){ antd.message.error(e.message); }
+            setRiskOverview(risk);
+            setSocialOverview(social);
+          }catch(e){ if(!silent) antd.message.error(e.message); }
           finally{ setDashLoading(false); }
-        },[api]);
+        },[api,adminToken]);
 
         const loadRoutes = useCallback(async ()=>{
           try{
@@ -146,22 +468,183 @@
           }catch(e){ antd.message.error(e.message); }
         },[api]);
 
-        useEffect(()=>{ loadDash(); },[loadDash]);
-        useEffect(()=>{ if(path==='/lab' && routes.length===0) loadRoutes(); if(path==='/messages') api('/api/admin/messages/summary',{admin:true}).then(setMsgSummary).catch(()=>{}); },[path]);
+        const loadSocialOverview = useCallback(async ({silent=false}={})=>{
+          try{
+            const data = await api('/api/admin/social/overview',{admin:true});
+            setSocialOverview(data);
+            return data;
+          }catch(e){
+            if(!silent) antd.message.error(e.message);
+            return null;
+          }
+        },[api]);
+
+        const loadSocialTree = useCallback(async ()=>{
+          const uid = Number(String(socialTreeUid||'').trim());
+          if(!Number.isInteger(uid) || uid<=0){
+            antd.message.warning('请输入有效 UID');
+            return;
+          }
+          const depth = Math.max(1,Math.min(4,Number(socialTreeDepth)||2));
+          setSocialTreeLoading(true);
+          try{
+            const q = new URLSearchParams();
+            q.set('uid',String(uid));
+            q.set('depth',String(depth));
+            q.set('includeGroups',socialTreeIncludeGroups?'1':'0');
+            const data = await api(`/api/admin/social/tree?${q.toString()}`,{admin:true});
+            setSocialTree(data);
+          }catch(e){
+            antd.message.error(e.message);
+          }finally{
+            setSocialTreeLoading(false);
+          }
+        },[api,socialTreeUid,socialTreeDepth,socialTreeIncludeGroups]);
 
         useEffect(()=>{
-          const sec=Math.max(5,Number(refreshSec)||15);
-          const t=setInterval(()=>{
-            if(path==='/dashboard') loadDash();
-            if(path==='/users') userRef.current?.reload();
-            if(path==='/messages'){ msgRef.current?.reload(); api('/api/admin/messages/summary',{admin:true}).then(setMsgSummary).catch(()=>{}); }
-          },sec*1000);
-          return ()=>clearInterval(t);
-        },[path,refreshSec,loadDash,api]);
+          if(!hasAdminToken){
+            setAdminProfile(null);
+            return;
+          }
+          loadAdminProfile();
+        },[hasAdminToken,loadAdminProfile]);
+        useEffect(()=>{
+          if(!hasAdminToken){
+            setDash(null);
+            return;
+          }
+          loadDash();
+        },[hasAdminToken,loadDash]);
+        useEffect(()=>{
+          if(path==='/lab' && routes.length===0) loadRoutes();
+          if(!hasAdminToken) return;
+          if(path==='/messages') api('/api/admin/messages/summary',{admin:true}).then(setMsgSummary).catch(()=>{});
+          if(path==='/social' && !socialOverview) loadSocialOverview();
+        },[path,hasAdminToken,routes.length,loadRoutes,api,loadSocialOverview,socialOverview]);
+
+        useEffect(()=>{
+          if(pollTimerRef.current){
+            clearTimeout(pollTimerRef.current);
+            pollTimerRef.current = null;
+          }
+          if(!hasAdminToken){
+            pollFailureRef.current = 0;
+            pollInFlightRef.current = false;
+            return;
+          }
+          let cancelled = false;
+          const baseMapVisible = {
+            '/dashboard': 2600,
+            '/messages': 3200,
+            '/users': 6500,
+            '/social': 8500,
+            '/lab': 0,
+          };
+          const baseMapHidden = {
+            '/dashboard': 14000,
+            '/messages': 17000,
+            '/users': 22000,
+            '/social': 24000,
+            '/lab': 0,
+          };
+          const offlineMs = 30000;
+          const maxBackoffMs = 60000;
+          const jitterMs = 500;
+
+          const resolveBaseMs = ()=>{
+            const isVisible = typeof document==='undefined' ? true : document.visibilityState==='visible';
+            const isOnline = typeof navigator==='undefined' ? true : navigator.onLine!==false;
+            if(!isOnline) return offlineMs;
+            const map = isVisible ? baseMapVisible : baseMapHidden;
+            return Number(map[path] || 8000);
+          };
+
+          const schedule = (ms)=>{
+            if(cancelled) return;
+            const waitMs = Math.max(240,Number(ms)||240);
+            if(pollTimerRef.current){
+              clearTimeout(pollTimerRef.current);
+              pollTimerRef.current = null;
+            }
+            pollTimerRef.current = setTimeout(runTick,waitMs);
+          };
+
+          const runTick = async ()=>{
+            if(cancelled) return;
+            const baseMs = resolveBaseMs();
+            if(baseMs<=0){
+              schedule(5000);
+              return;
+            }
+            if(pollInFlightRef.current){
+              schedule(Math.max(900,Math.floor(baseMs*0.6)));
+              return;
+            }
+            pollInFlightRef.current = true;
+            let success = true;
+            try{
+              if(path==='/dashboard'){
+                await loadDash({silent:true});
+              }else if(path==='/users'){
+                await Promise.resolve(userRef.current?.reload?.());
+              }else if(path==='/messages'){
+                await Promise.all([
+                  Promise.resolve(msgRef.current?.reload?.()),
+                  api('/api/admin/messages/summary',{admin:true}).then(setMsgSummary).catch(()=>{}),
+                ]);
+              }else if(path==='/social'){
+                await loadSocialOverview({silent:true});
+              }
+            }catch{
+              success = false;
+            }finally{
+              pollInFlightRef.current = false;
+            }
+
+            if(success){
+              pollFailureRef.current = 0;
+            }else{
+              pollFailureRef.current = Math.min(6,pollFailureRef.current + 1);
+            }
+            const failFactor = pollFailureRef.current<=0 ? 1 : Math.min(8,2 ** pollFailureRef.current);
+            const nextMs = Math.min(maxBackoffMs,Math.floor(resolveBaseMs() * failFactor));
+            schedule(nextMs + Math.floor(Math.random()*jitterMs));
+          };
+
+          const onEnvChanged = ()=>{
+            pollFailureRef.current = Math.min(pollFailureRef.current,1);
+            schedule(320);
+          };
+
+          if(typeof document!=='undefined'){
+            document.addEventListener('visibilitychange',onEnvChanged);
+          }
+          if(typeof window!=='undefined'){
+            window.addEventListener('online',onEnvChanged);
+            window.addEventListener('offline',onEnvChanged);
+          }
+          schedule(320);
+
+          return ()=>{
+            cancelled = true;
+            if(typeof document!=='undefined'){
+              document.removeEventListener('visibilitychange',onEnvChanged);
+            }
+            if(typeof window!=='undefined'){
+              window.removeEventListener('online',onEnvChanged);
+              window.removeEventListener('offline',onEnvChanged);
+            }
+            if(pollTimerRef.current){
+              clearTimeout(pollTimerRef.current);
+              pollTimerRef.current = null;
+            }
+          };
+        },[path,loadDash,api,loadSocialOverview,hasAdminToken]);
         const openUser = async(uid)=>{
           try{
             const d=await api(`/api/admin/users/detail?uid=${encodeURIComponent(uid)}`,{admin:true});
             setUserDetail(d);
+            setSocialTreeUid(String(uid));
             userForm.setFieldsValue({ uid:d.uid,nickname:d.nickname||'',signature:d.signature||'',domain:d.domain||'',status:d.status||'active',gender:d.gender||'',birthday:d.birthday||'',country:d.country||'',province:d.province||'',region:d.region||'' });
             setUserOpen(true);
           }catch(e){ antd.message.error(e.message); }
@@ -232,8 +715,20 @@
           { path:'/dashboard', name:'运行概览', icon:<DashboardOutlined/> },
           { path:'/users', name:'用户管理', icon:<TeamOutlined/> },
           { path:'/messages', name:'消息审查', icon:<MessageOutlined/> },
+          { path:'/social', name:'社交图谱', icon:<DeploymentUnitOutlined/> },
           { path:'/lab', name:'扩展中心', icon:<ApiOutlined/> },
         ],[]);
+        const providerTheme = useMemo(()=>{
+          const themeApi = antd.theme || {};
+          const algorithm = isDarkMode ? themeApi.darkAlgorithm : themeApi.defaultAlgorithm;
+          return {
+            ...(algorithm ? { algorithm } : {}),
+            token: {
+              colorPrimary: layoutConfig.primaryColor,
+              borderRadius: 10,
+            },
+          };
+        },[isDarkMode,layoutConfig.primaryColor]);
 
         const userCols = [
           { title:'UID', dataIndex:'uid', search:false, width:110 },
@@ -271,6 +766,7 @@
             <Popconfirm key='rm' title='确认删除该消息？' onConfirm={()=>delMsg(r.id)}><Button size='small' danger icon={<DeleteOutlined/>}>删除</Button></Popconfirm>
           ] }
         ];
+        const socialSnapshot = dash?.social || socialOverview;
         const dashboardView = (
           <Space direction='vertical' size={16} style={{width:'100%'}}>
             <Row gutter={[16,16]}>
@@ -278,6 +774,8 @@
               <Col xs={24} sm={12} md={8} lg={6}><Card className='glass' loading={dashLoading}><Text type='secondary'>在线用户</Text><div style={{fontSize:24,fontWeight:600}}>{fmtNum(dash?.users?.online||0)}</div></Card></Col>
               <Col xs={24} sm={12} md={8} lg={6}><Card className='glass' loading={dashLoading}><Text type='secondary'>用户总量</Text><div style={{fontSize:24,fontWeight:600}}>{fmtNum(dash?.users?.total||0)}</div></Card></Col>
               <Col xs={24} sm={12} md={8} lg={6}><Card className='glass' loading={dashLoading}><Text type='secondary'>消息总量</Text><div style={{fontSize:24,fontWeight:600}}>{fmtNum(dash?.messages?.messages?.total||0)}</div></Card></Col>
+              <Col xs={24} sm={12} md={8} lg={6}><Card className='glass' loading={dashLoading}><Text type='secondary'>互好友边数</Text><div style={{fontSize:24,fontWeight:600}}>{fmtNum(socialSnapshot?.totals?.mutualFriendEdges||0)}</div></Card></Col>
+              <Col xs={24} sm={12} md={8} lg={6}><Card className='glass' loading={dashLoading}><Text type='secondary'>群组数量</Text><div style={{fontSize:24,fontWeight:600}}>{fmtNum(socialSnapshot?.totals?.groups||0)}</div></Card></Col>
             </Row>
             <Card className='glass' title='消息审查汇总'>
               <Space wrap>
@@ -285,6 +783,43 @@
                 <Tag color='cyan'>窗口消息 {fmtNum(msgSummary?.messages?.inWindow||0)}</Tag>
                 <Tag color='orange'>flagged {fmtNum(msgSummary?.reviews?.byStatus?.flagged||0)}</Tag>
                 <Tag color='red'>blocked {fmtNum(msgSummary?.reviews?.byStatus?.blocked||0)}</Tag>
+              </Space>
+            </Card>
+            <Card className='glass' title='风险监控'>
+              <Space wrap style={{marginBottom:8}}>
+                <Tag color='red'>high {fmtNum(riskOverview?.counts?.byLevel?.high||0)}</Tag>
+                <Tag color='orange'>medium {fmtNum(riskOverview?.counts?.byLevel?.medium||0)}</Tag>
+                <Tag>决策 {fmtNum(riskOverview?.counts?.decisions||0)}</Tag>
+                <Tag color='blue'>申诉 {fmtNum(riskOverview?.counts?.appeals||0)}</Tag>
+                <Tag color='purple'>忽略 {fmtNum(riskOverview?.counts?.ignored||0)}</Tag>
+                <Tag color='cyan'>缓存 {fmtNum(riskOverview?.profileRuntime?.cache?.size||0)}</Tag>
+                <Tag color='gold'>队列 {fmtNum(riskOverview?.profileRuntime?.queue?.pending||0)}</Tag>
+                <Tag>命中 {fmtNum(riskOverview?.profileRuntime?.stats?.cacheHitFresh||0)}</Tag>
+                <Tag>失配 {fmtNum(riskOverview?.profileRuntime?.stats?.cacheMiss||0)}</Tag>
+              </Space>
+              {(riskOverview?.recentDecisions||[]).slice(0,5).map((item)=>(
+                <Paragraph key={item.id} style={{marginBottom:6}}>
+                  <Tag color={item.level==='high'?'red':item.level==='medium'?'orange':'green'}>{item.level||'low'}</Tag>
+                  <Text className='mono'>{item.channel||'unknown'}</Text>
+                  <Text type='secondary' style={{marginLeft:8}}>{item.summary||'-'}</Text>
+                </Paragraph>
+              ))}
+              {(!riskOverview?.recentDecisions || riskOverview.recentDecisions.length===0) && <Text type='secondary'>暂无风险命中记录</Text>}
+            </Card>
+            <Card className='glass' title='社交网络全局统计'>
+              <Space wrap style={{marginBottom:8}}>
+                <Tag color='blue'>用户 {fmtNum(socialSnapshot?.totals?.users||0)}</Tag>
+                <Tag color='cyan'>群组 {fmtNum(socialSnapshot?.totals?.groups||0)}</Tag>
+                <Tag color='green'>互好友边 {fmtNum(socialSnapshot?.totals?.mutualFriendEdges||0)}</Tag>
+                <Tag color='orange'>单向边 {fmtNum(socialSnapshot?.totals?.oneWayFriendEdges||0)}</Tag>
+                <Tag color='red'>无社交用户 {fmtNum(socialSnapshot?.totals?.noSocialUsers||0)}</Tag>
+                <Tag color='purple'>组件数 {fmtNum(socialSnapshot?.metrics?.connectedComponents||0)}</Tag>
+                <Tag>最大组件 {fmtNum(socialSnapshot?.metrics?.largestComponentSize||0)}</Tag>
+              </Space>
+              <Space wrap>
+                <Tag>人均好友 {fmtNum(socialSnapshot?.metrics?.avgFriendCount||0,2)}</Tag>
+                <Tag>好友中位数 {fmtNum(socialSnapshot?.metrics?.medianFriendCount||0,2)}</Tag>
+                <Tag>群平均规模 {fmtNum(socialSnapshot?.metrics?.avgGroupSize||0,2)}</Tag>
               </Space>
             </Card>
             <Card className='glass' title='瓶颈建议'>
@@ -355,6 +890,123 @@
           </Space>
         );
 
+        const socialView = (
+          <Space direction='vertical' style={{width:'100%'}} size={16}>
+            <Card className='glass' title='全局社交统计' extra={<Button icon={<ReloadOutlined/>} onClick={loadSocialOverview}>刷新</Button>}>
+              <Space wrap style={{marginBottom:8}}>
+                <Tag color='blue'>用户 {fmtNum(socialOverview?.totals?.users||0)}</Tag>
+                <Tag color='cyan'>群组 {fmtNum(socialOverview?.totals?.groups||0)}</Tag>
+                <Tag color='green'>互好友边 {fmtNum(socialOverview?.totals?.mutualFriendEdges||0)}</Tag>
+                <Tag color='orange'>单向边 {fmtNum(socialOverview?.totals?.oneWayFriendEdges||0)}</Tag>
+                <Tag color='red'>孤立用户 {fmtNum(socialOverview?.totals?.isolatedUsers||0)}</Tag>
+                <Tag color='magenta'>无社交用户 {fmtNum(socialOverview?.totals?.noSocialUsers||0)}</Tag>
+                <Tag color='purple'>连通分量 {fmtNum(socialOverview?.metrics?.connectedComponents||0)}</Tag>
+                <Tag>最大分量 {fmtNum(socialOverview?.metrics?.largestComponentSize||0)}</Tag>
+              </Space>
+              <Space wrap>
+                <Tag>人均好友 {fmtNum(socialOverview?.metrics?.avgFriendCount||0,2)}</Tag>
+                <Tag>好友中位数 {fmtNum(socialOverview?.metrics?.medianFriendCount||0,2)}</Tag>
+                <Tag>群平均规模 {fmtNum(socialOverview?.metrics?.avgGroupSize||0,2)}</Tag>
+                <Tag>群成员关系 {fmtNum(socialOverview?.totals?.groupMemberships||0)}</Tag>
+              </Space>
+            </Card>
+
+            <Row gutter={[16,16]}>
+              <Col xs={24} lg={12}>
+                <Card className='glass' title='好友数 Top 用户'>
+                  {(socialOverview?.topUsers||[]).slice(0,10).map((item)=>(
+                    <Paragraph key={`top-user-${item.uid}`} style={{marginBottom:6}}>
+                      <Tag color='blue'>UID {item.uid}</Tag>
+                      <Text>{item.nickname || item.username || '-'}</Text>
+                      <Text type='secondary' style={{marginLeft:8}}>好友 {fmtNum(item.friendCount||0)}</Text>
+                    </Paragraph>
+                  ))}
+                  {(!socialOverview?.topUsers || socialOverview.topUsers.length===0) && <Text type='secondary'>暂无数据</Text>}
+                </Card>
+              </Col>
+              <Col xs={24} lg={12}>
+                <Card className='glass' title='群规模 Top 群聊'>
+                  {(socialOverview?.topGroups||[]).slice(0,10).map((item)=>(
+                    <Paragraph key={`top-group-${item.id}`} style={{marginBottom:6}}>
+                      <Tag color='cyan'>GID {item.id}</Tag>
+                      <Text>{item.name || '-'}</Text>
+                      <Text type='secondary' style={{marginLeft:8}}>成员 {fmtNum(item.memberCount||0)}</Text>
+                    </Paragraph>
+                  ))}
+                  {(!socialOverview?.topGroups || socialOverview.topGroups.length===0) && <Text type='secondary'>暂无数据</Text>}
+                </Card>
+              </Col>
+            </Row>
+
+            <Card className='glass' title='个人社交树'>
+              <Space wrap style={{marginBottom:12}}>
+                <Input
+                  className='mono'
+                  placeholder='目标 UID'
+                  style={{width:180}}
+                  value={socialTreeUid}
+                  onChange={(e)=>setSocialTreeUid(e.target.value)}
+                />
+                <Space>
+                  <Text type='secondary'>深度</Text>
+                  <InputNumber min={1} max={4} value={socialTreeDepth} onChange={(v)=>setSocialTreeDepth(v||2)} />
+                </Space>
+                <Select
+                  value={socialTreeIncludeGroups?'1':'0'}
+                  onChange={(v)=>setSocialTreeIncludeGroups(v==='1')}
+                  options={[
+                    {label:'包含群关系',value:'1'},
+                    {label:'仅好友树',value:'0'},
+                  ]}
+                  style={{width:140}}
+                />
+                <Button type='primary' loading={socialTreeLoading} onClick={loadSocialTree}>查询社交树</Button>
+              </Space>
+
+              {socialTree && (
+                <Space direction='vertical' style={{width:'100%'}} size={12}>
+                  <Alert
+                    type='info'
+                    showIcon
+                    message={`Root UID ${socialTree.rootUid} · 节点 ${fmtNum(socialTree.summary?.nodes||0)} · 边 ${fmtNum(socialTree.summary?.edges||0)}${socialTree.summary?.truncated?' · 已截断':''}`}
+                  />
+                  <Card className='glass' size='small' title='力导图视图'>
+                    <SocialForceGraph tree={socialTree} height={560} themeMode={themeMode} />
+                  </Card>
+                  <Row gutter={[16,16]}>
+                    <Col xs={24} lg={12}>
+                      <Card className='glass' size='small' title='节点预览'>
+                        {(socialTree.nodes||[]).slice(0,180).map((node)=>(
+                          <Paragraph key={node.id} style={{marginBottom:6}}>
+                            <Tag color={node.type==='group'?'cyan':'blue'}>{node.type==='group'?'Group':'User'}</Tag>
+                            <Text className='mono'>{node.id}</Text>
+                            <Text style={{marginLeft:8}}>{node.label||'-'}</Text>
+                            <Text type='secondary' style={{marginLeft:8}}>L{fmtNum(node.level||0)}</Text>
+                          </Paragraph>
+                        ))}
+                        {(socialTree.nodes||[]).length>180 && <Text type='secondary'>仅展示前 180 个节点</Text>}
+                      </Card>
+                    </Col>
+                    <Col xs={24} lg={12}>
+                      <Card className='glass' size='small' title='边预览'>
+                        {(socialTree.edges||[]).slice(0,240).map((edge)=>(
+                          <Paragraph key={edge.id} style={{marginBottom:6}}>
+                            <Tag color={edge.type==='group_member'?'purple':'green'}>{edge.type}</Tag>
+                            <Text className='mono'>{edge.from}</Text>
+                            <Text type='secondary' style={{margin:'0 6px'}}>→</Text>
+                            <Text className='mono'>{edge.to}</Text>
+                          </Paragraph>
+                        ))}
+                        {(socialTree.edges||[]).length>240 && <Text type='secondary'>仅展示前 240 条边</Text>}
+                      </Card>
+                    </Col>
+                  </Row>
+                </Space>
+              )}
+            </Card>
+          </Space>
+        );
+
         const selectedRoute = routes.find((x)=>x.id===routeId) || null;
         const labView = (
           <Row gutter={[16,16]}>
@@ -387,30 +1039,53 @@
           </Row>
         );
 
-        const page = { '/dashboard':dashboardView, '/users':usersView, '/messages':messagesView, '/lab':labView }[path] || dashboardView;
+        const page = { '/dashboard':dashboardView, '/users':usersView, '/messages':messagesView, '/social':socialView, '/lab':labView }[path] || dashboardView;
+        const guardedPage = hasAdminToken
+          ? page
+          : <Alert type='warning' showIcon message='请先使用管理员账号登录，再访问管理数据与操作面板。' />;
 
         return (
-          <ConfigProvider theme={{ token:{ colorPrimary:'#0f766e', borderRadius:10 } }}>
+          <ConfigProvider theme={providerTheme}>
             <ProLayout
-              title='XinChat Admin Pro'
+              {...layoutConfig}
               logo={false}
-              layout='mix'
-              fixedHeader
-              fixSiderbar
               location={{ pathname:path }}
               route={{ path:'/', routes:menus }}
+              menu={{ locale:false }}
+              siderWidth={228}
               menuItemRender={(item,dom)=><a onClick={(e)=>{e.preventDefault();setPath(item.path||'/dashboard');}}>{dom}</a>}
-              token={{ header:{ colorBgHeader:'rgba(255,255,255,0.9)' } }}
+              token={{
+                header:{
+                  colorBgHeader:isDarkMode?'rgba(9,14,24,0.92)':'rgba(255,255,255,0.92)',
+                  colorHeaderTitle:isDarkMode?'#e2e8f0':'#0f172a',
+                  colorTextMenuSelected:layoutConfig.primaryColor,
+                },
+                sider:{
+                  colorBgMenuItemSelected:isDarkMode?'rgba(15,118,110,0.28)':'#e6fffb',
+                  colorTextMenuSelected:isDarkMode?'#5eead4':layoutConfig.primaryColor,
+                  colorTextMenu:isDarkMode?'rgba(226,232,240,0.9)':'rgba(15,23,42,0.88)',
+                },
+              }}
             >
-              <PageContainer title={menus.find((m)=>m.path===path)?.name||'Admin'} extra={[<Button key='rd' icon={<ReloadOutlined/>} onClick={loadDash}>刷新概览</Button>]}>
+              <PageContainer title={menus.find((m)=>m.path===path)?.name||'Admin'} extra={[<Button key='rd' icon={<ReloadOutlined/>} onClick={loadDash} disabled={!hasAdminToken}>刷新概览</Button>]}>
                 <Card className='glass' size='small' style={{marginBottom:16}}>
                   <Space wrap>
-                    <Input.Password className='mono' placeholder='Admin Token' value={adminToken} onChange={(e)=>setAdminToken(e.target.value)} style={{width:260}} />
+                    <Input className='mono' placeholder='Admin Username' value={adminUsername} onChange={(e)=>setAdminUsername(e.target.value)} style={{width:220}} />
+                    <Input.Password className='mono' placeholder='Admin Password' value={adminPassword} onChange={(e)=>setAdminPassword(e.target.value)} onPressEnter={adminLogin} style={{width:220}} />
+                    <Button type='primary' loading={adminLoginLoading} onClick={adminLogin}>管理员登录</Button>
+                    <Button onClick={adminLogout} disabled={!hasAdminToken}>退出登录</Button>
+                    {adminProfile
+                      ? <Tag color='green'>{`管理员 ${adminProfile.displayName || adminProfile.username || '-'}`}</Tag>
+                      : <Tag>未登录</Tag>}
+                    <Input.Password className='mono' placeholder='Admin Token (兼容旧模式，可手动覆盖)' value={adminToken} onChange={(e)=>setAdminToken(e.target.value)} style={{width:320}} />
                     <Input.Password className='mono' placeholder='Bearer Token (API Lab)' value={authToken} onChange={(e)=>setAuthToken(e.target.value)} style={{width:260}} />
-                    <Space><Text type='secondary'>自动刷新(秒)</Text><InputNumber min={5} max={300} value={refreshSec} onChange={(v)=>setRefreshSec(v||15)} /></Space>
+                    <Tag color='processing'>实时刷新（自动调度）</Tag>
+                    <Button onClick={()=>setThemeMode((prev)=>prev==='dark'?'light':'dark')}>
+                      {isDarkMode ? '切换浅色主题' : '切换深色主题'}
+                    </Button>
                   </Space>
                 </Card>
-                {page}
+                {guardedPage}
               </PageContainer>
             </ProLayout>
 

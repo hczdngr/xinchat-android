@@ -7,6 +7,9 @@ import express from 'express';
 import { hasValidToken, mutateUsers } from './auth.js';
 import { isUserOnline as isOnline } from '../online.js';
 import { createAuthenticateMiddleware } from './session.js';
+import { createRequestEvent, trackEventSafe } from '../events/eventLogger.js';
+import { isFeatureEnabled } from '../featureFlags.js';
+import { assessFriendAddRisk, recordFriendAddAttempt, recordRiskDecision } from '../risk/scorer.js';
 
 const router = express.Router();
 
@@ -26,6 +29,15 @@ const toPlainObject = (value) => (isPlainObject(value) ? value : {});
 
 let friendsNotifier = null;
 
+const trackFriendEvent = (req, payload = {}) => {
+  void trackEventSafe(
+    createRequestEvent(req, {
+      actorUid: Number(req?.auth?.user?.uid) || 0,
+      ...payload,
+    })
+  );
+};
+
 const authenticate = createAuthenticateMiddleware({ scope: 'Friends' });
 // asyncRoute?处理 asyncRoute 相关逻辑。
 const asyncRoute = (handler) => (req, res, next) => {
@@ -43,6 +55,13 @@ const resolveFriendIndex = (users, payload = {}) => {
     return users.findIndex((item) => item.username === normalized);
   }
   return -1;
+};
+
+const resolveFriendUid = (users, payload = {}) => {
+  const index = resolveFriendIndex(Array.isArray(users) ? users : [], payload);
+  if (index < 0) return 0;
+  const target = users[index];
+  return isValidUid(Number(target?.uid)) ? Number(target.uid) : 0;
 };
 
 // isUserOnline：判断条件是否成立。
@@ -100,6 +119,29 @@ const notifyUsers = (uids, payload) => {
 router.post('/add', authenticate, asyncRoute(async (req, res) => {
   const actorUid = Number(req.auth?.user?.uid);
   const payload = toPlainObject(req.body);
+  const riskGuardEnabled = isFeatureEnabled('riskGuard');
+  const targetUidForRisk = resolveFriendUid(req.auth?.users || [], payload);
+  let risk = null;
+  if (riskGuardEnabled) {
+    try {
+      risk = await assessFriendAddRisk({
+        actorUid,
+        targetUid: targetUidForRisk,
+        actorUser: req.auth?.user || null,
+      });
+    } catch {
+      risk = {
+        source: 'friends_add',
+        available: false,
+        score: 0,
+        level: 'low',
+        tags: [],
+        evidence: [],
+        summary: 'risk scorer unavailable.',
+        generatedAt: new Date().toISOString(),
+      };
+    }
+  }
 
   const mutation = await mutateUsers(
     (users) => {
@@ -246,7 +288,69 @@ router.post('/add', authenticate, asyncRoute(async (req, res) => {
   (result.notifications || []).forEach((item) => {
     notifyUsers(item.uids || [], item.payload || {});
   });
-  res.status(result.httpStatus || 200).json(result.body || { success: false });
+  if (riskGuardEnabled && isValidUid(targetUidForRisk)) {
+    const attemptStatus =
+      String(result?.body?.status || '').trim().toLowerCase() ||
+      (result?.body?.success ? 'success' : 'failed');
+    try {
+      await recordFriendAddAttempt({
+        actorUid,
+        targetUid: targetUidForRisk,
+        status: attemptStatus,
+      });
+    } catch {}
+  }
+  if (result.body?.success) {
+    let targetUid = Number(payload.friendUid);
+    if (!isValidUid(targetUid) && typeof payload.friendUsername === 'string') {
+      const normalized = normalizeUsername(payload.friendUsername);
+      const target = (req.auth?.users || []).find((item) => item.username === normalized);
+      targetUid = isValidUid(Number(target?.uid)) ? Number(target.uid) : 0;
+    }
+    trackFriendEvent(req, {
+      eventType: 'click',
+      targetUid: isValidUid(targetUid) ? targetUid : 0,
+      targetType: 'friend',
+      tags: ['friends_add', String(result.body?.status || '')],
+      metadata: {
+        status: String(result.body?.status || ''),
+      },
+    });
+  }
+  if (risk && (risk.level === 'high' || risk.level === 'medium')) {
+    trackFriendEvent(req, {
+      eventType: 'risk_hit',
+      targetUid: isValidUid(targetUidForRisk) ? targetUidForRisk : 0,
+      targetType: 'friend',
+      tags: ['friends_add', String(risk.level || 'low'), ...(Array.isArray(risk.tags) ? risk.tags : [])],
+      reason: String(risk.summary || '').slice(0, 140),
+      metadata: {
+        riskScore: Number(risk.score) || 0,
+        status: String(result?.body?.status || ''),
+      },
+    });
+    void recordRiskDecision({
+      channel: 'friends_add',
+      actorUid,
+      subjectUid: actorUid,
+      targetUid: targetUidForRisk,
+      targetType: 'private',
+      risk,
+      metadata: {
+        status: String(result?.body?.status || ''),
+      },
+    }).catch(() => undefined);
+  }
+
+  const responseBody =
+    result.body && typeof result.body === 'object' ? { ...result.body } : { success: false };
+  if (risk) {
+    responseBody.risk = {
+      enabled: true,
+      ...risk,
+    };
+  }
+  res.status(result.httpStatus || 200).json(responseBody);
 }));
 
 // 路由：DELETE /remove。

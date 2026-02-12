@@ -23,5 +23,6 @@ export const STORAGE_KEYS = {
   localDeletedMessageIdsPrefix: 'xinchat.localDeletedMessageIds.',
   groupRemarks: 'xinchat.groupRemarks',
   pendingChatSettingsAction: 'xinchat.pendingChatSettingsAction',
+  replySuggestTapSend: 'xinchat.replySuggestTapSend',
 } as const;
 

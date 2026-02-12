@@ -1,42 +1,66 @@
 /**
  * 模块说明：管理路由模块：提供用户与商品管理及瓶颈诊断接口。
  */
-
-
 import express from 'express';
 import fs from 'fs/promises';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { getUsersCacheInfo, mutateUsers, readUsersCached } from './auth.js';
+import { requireAdminAccess } from './adminAuth.js';
+import { readGroups } from './groups.js';
 import {
+  getChatDatabaseForOps,
   deleteMessageByIdForAdmin,
   findMessageByIdForAdmin,
   searchMessagesForAdmin,
   summarizeMessagesForAdmin,
 } from './chat.js';
 import { metrics } from '../observability.js';
-
+import {
+  bulkUpdateFeatureFlagOverrides,
+  FEATURE_DEFINITIONS,
+  getFeatureFlagDetails,
+  getFeatureFlagRuntimeState,
+  getFeatureFlagsSnapshot,
+  isFeatureEnabled,
+  setFeatureFlagOverride,
+} from '../featureFlags.js';
+import { createRequestEvent, getEventLoggerStats, trackEventSafe } from '../events/eventLogger.js';
+import { getRiskAdminOverview } from '../risk/stateStore.js';
+import { getRiskProfileRuntimeStats } from '../risk/scorer.js';
+import { buildRelationshipOpsSnapshot, normalizeScope, normalizeWindowDays } from '../ops/relationshipService.js';
+import { DEFAULT_ASSISTANT_PROFILE, resolveAssistantProfileFromUser } from '../assistant/preferences.js';
+import { getSummaryAdminOverview } from '../summary/service.js';
+import { getRecoAdminOverview, getRecoUserPersona, updateRecoAdminConfig } from '../reco/index.js';
+import { atomicWriteFile, createSerialQueue } from '../utils/filePersistence.js';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const DATA_DIR = path.join(__dirname, '..', 'data');
 const PRODUCTS_PATH = path.join(DATA_DIR, 'products.json');
-const PRODUCTS_PATH_TMP = path.join(DATA_DIR, 'products.json.tmp');
+const PRODUCTS_LOCK_PATH = path.join(DATA_DIR, 'products.json.lock');
 const MESSAGE_REVIEWS_PATH = path.join(DATA_DIR, 'message-reviews.json');
-const MESSAGE_REVIEWS_PATH_TMP = path.join(DATA_DIR, 'message-reviews.json.tmp');
-
-const NODE_ENV = String(process.env.NODE_ENV || 'development').trim().toLowerCase();
-const ADMIN_API_TOKEN = String(process.env.ADMIN_API_TOKEN || '').trim();
-const ADMIN_ENABLE_INSECURE =
-  String(process.env.ADMIN_ENABLE_INSECURE || NODE_ENV !== 'production')
-    .trim()
-    .toLowerCase() === 'true';
-
+const MESSAGE_REVIEWS_LOCK_PATH = path.join(DATA_DIR, 'message-reviews.json.lock');
 const PRODUCTS_CACHE_TTL_MS = Number.parseInt(String(process.env.PRODUCTS_CACHE_TTL_MS || '5000'), 10);
+const PRODUCTS_WRITE_QUEUE_MAX = Number.parseInt(
+  String(process.env.PRODUCTS_WRITE_QUEUE_MAX || '2000'),
+  10
+);
+const MESSAGE_REVIEWS_WRITE_QUEUE_MAX = Number.parseInt(
+  String(process.env.MESSAGE_REVIEWS_WRITE_QUEUE_MAX || '2000'),
+  10
+);
 const SAFE_PRODUCTS_CACHE_TTL_MS =
   Number.isInteger(PRODUCTS_CACHE_TTL_MS) && PRODUCTS_CACHE_TTL_MS >= 200
     ? PRODUCTS_CACHE_TTL_MS
     : 5000;
-
+const SAFE_PRODUCTS_WRITE_QUEUE_MAX =
+  Number.isInteger(PRODUCTS_WRITE_QUEUE_MAX) && PRODUCTS_WRITE_QUEUE_MAX >= 20
+    ? PRODUCTS_WRITE_QUEUE_MAX
+    : 2000;
+const SAFE_MESSAGE_REVIEWS_WRITE_QUEUE_MAX =
+  Number.isInteger(MESSAGE_REVIEWS_WRITE_QUEUE_MAX) && MESSAGE_REVIEWS_WRITE_QUEUE_MAX >= 20
+    ? MESSAGE_REVIEWS_WRITE_QUEUE_MAX
+    : 2000;
 const MAX_PAGE_SIZE = 100;
 const MAX_PRODUCTS = Number.parseInt(String(process.env.MAX_PRODUCTS || '5000'), 10) || 5000;
 const MAX_NICKNAME_LEN = 36;
@@ -95,28 +119,42 @@ const MESSAGE_RISK_RULES = [
 const MAX_BATCH_USERS = 200;
 const MAX_MESSAGE_REVIEW_NOTE_LEN = 300;
 const MAX_MESSAGE_REVIEW_TAGS = 12;
-
+const MAX_SOCIAL_TREE_DEPTH = 4;
+const MAX_SOCIAL_TREE_NODES = 1500;
+const MAX_SOCIAL_TREE_EDGES = 3500;
+const MAX_RELATIONSHIP_ADMIN_LIMIT = 60;
 const router = express.Router();
-
 let productsCache = null;
 let productsCacheAt = 0;
 let productsLoadInFlight = null;
-let productsWriteQueue = Promise.resolve();
+const productsWriteQueue = createSerialQueue({
+  maxPending: SAFE_PRODUCTS_WRITE_QUEUE_MAX,
+  overflowError: 'products_write_queue_overflow',
+});
 let productsVersion = 0;
 let messageReviewsCache = null;
 let messageReviewsLoadInFlight = null;
-let messageReviewsWriteQueue = Promise.resolve();
-
+const messageReviewsWriteQueue = createSerialQueue({
+  maxPending: SAFE_MESSAGE_REVIEWS_WRITE_QUEUE_MAX,
+  overflowError: 'message_reviews_write_queue_overflow',
+});
 // asyncRoute?处理 asyncRoute 相关逻辑。
 const asyncRoute = (handler) => (req, res, next) => {
   Promise.resolve(handler(req, res, next)).catch(next);
 };
-
+const trackAdminEvent = (req, payload = {}) => {
+  void trackEventSafe(
+    createRequestEvent(req, {
+      actorUid: 0,
+      source: 'admin',
+      ...payload,
+    })
+  );
+};
 // hasOwn：判断是否具备指定状态。
 const hasOwn = (obj, key) => Object.prototype.hasOwnProperty.call(obj, key);
 // isValidUid：判断条件是否成立。
 const isValidUid = (value) => Number.isInteger(value) && value > 0 && value <= SAFE_MAX_UID;
-
 // toPositiveInt?处理 toPositiveInt 相关逻辑。
 const toPositiveInt = (value, fallback, min = 1, max = Number.MAX_SAFE_INTEGER) => {
   const parsed = Number.parseInt(String(value || ''), 10);
@@ -124,18 +162,15 @@ const toPositiveInt = (value, fallback, min = 1, max = Number.MAX_SAFE_INTEGER) 
   if (parsed > max) return max;
   return parsed;
 };
-
 // sanitizeText：清洗不可信输入。
 const sanitizeText = (value, maxLen = 200) =>
   typeof value === 'string' ? value.trim().slice(0, maxLen) : '';
-
 // normalizeUserStatus：归一化外部输入。
 const normalizeUserStatus = (user) => {
   if (typeof user?.deletedAt === 'string' && user.deletedAt.trim()) return 'deleted';
   if (user?.blocked === true) return 'blocked';
   return 'active';
 };
-
 // resolveTokenCount：解析并确定最终值。
 const resolveTokenCount = (user) => {
   const list = Array.isArray(user?.tokens)
@@ -145,7 +180,6 @@ const resolveTokenCount = (user) => {
   if (!single) return list.length;
   return list.some((entry) => entry.token === user.token) ? list.length : list.length + 1;
 };
-
 // toUserSummary?处理 toUserSummary 相关逻辑。
 const toUserSummary = (user) => ({
   uid: Number(user?.uid) || 0,
@@ -163,9 +197,36 @@ const toUserSummary = (user) => ({
   createdAt: typeof user?.createdAt === 'string' ? user.createdAt : '',
   lastLoginAt: typeof user?.lastLoginAt === 'string' ? user.lastLoginAt : '',
 });
-
 // toUserDetail?处理 toUserDetail 相关逻辑。
-const toUserDetail = (user) => ({
+const buildDepressionRating = (user) => {
+  const analysis = user?.aiProfile?.analysis && typeof user.aiProfile.analysis === 'object'
+    ? user.aiProfile.analysis
+    : null;
+  const depression = analysis?.depressionTendency && typeof analysis.depressionTendency === 'object'
+    ? analysis.depressionTendency
+    : null;
+  return {
+    level: sanitizeText(depression?.level, 20) || 'unknown',
+    score: Number.isFinite(Number(depression?.score)) ? Number(depression.score) : null,
+    reason: sanitizeText(depression?.reason, 240),
+    riskSignals: extractAiTagNames(analysis?.riskSignals),
+  };
+};
+const buildAiProfileDetail = (user) => {
+  const analysis = user?.aiProfile?.analysis && typeof user.aiProfile.analysis === 'object'
+    ? user.aiProfile.analysis
+    : {};
+  return {
+    updatedAt: typeof user?.aiProfile?.updatedAt === 'string' ? user.aiProfile.updatedAt : '',
+    profileSummary: sanitizeText(analysis?.profileSummary, 1200),
+    personalityTraits: extractAiTagNames(analysis?.personalityTraits),
+    preferences: extractAiTagNames(analysis?.preferences),
+    riskSignals: extractAiTagNames(analysis?.riskSignals),
+    depressionTendency: buildDepressionRating(user),
+    raw: analysis,
+  };
+};
+const toUserDetail = (user, { recoPersona = null } = {}) => ({
   ...toUserSummary(user),
   gender: String(user?.gender || ''),
   birthday: String(user?.birthday || ''),
@@ -177,53 +238,578 @@ const toUserDetail = (user) => ({
     outgoing: Array.isArray(user?.friendRequests?.outgoing) ? user.friendRequests.outgoing.length : 0,
   },
   aiProfileUpdatedAt: typeof user?.aiProfile?.updatedAt === 'string' ? user.aiProfile.updatedAt : '',
+  assistantProfile: resolveAssistantProfileFromUser(user),
+  aiProfile: buildAiProfileDetail(user),
+  depressionRating: buildDepressionRating(user),
+  recoPersona: recoPersona || null,
 });
-
-// parseAdminToken：解析并校验输入值。
-const parseAdminToken = (req) => {
-  const auth = String(req.headers.authorization || '').trim();
-  if (auth.toLowerCase().startsWith('bearer ')) {
-    return auth.slice(7).trim();
-  }
-  const headerToken = String(req.headers['x-admin-token'] || '').trim();
-  if (headerToken) return headerToken;
-  return String(req.query?.adminToken || '').trim();
+const isDefaultAssistantProfile = (profile) =>
+  profile.translateStyle === DEFAULT_ASSISTANT_PROFILE.translateStyle &&
+  profile.explanationLevel === DEFAULT_ASSISTANT_PROFILE.explanationLevel &&
+  profile.replyStyle === DEFAULT_ASSISTANT_PROFILE.replyStyle;
+const extractAiTagNames = (input) => {
+  if (!Array.isArray(input)) return [];
+  return input
+    .map((entry) => {
+      if (typeof entry === 'string') return sanitizeText(entry, 80);
+      if (entry && typeof entry === 'object') {
+        return sanitizeText(entry.name || entry.label || entry.tag || '', 80);
+      }
+      return '';
+    })
+    .filter(Boolean);
 };
-
-// requireAdmin?处理 requireAdmin 相关逻辑。
-const requireAdmin = (req, res, next) => {
-  const token = parseAdminToken(req);
-  if (ADMIN_API_TOKEN) {
-    if (token !== ADMIN_API_TOKEN) {
-      res.status(401).json({ success: false, message: 'Admin token invalid.' });
-      return;
+const collectAiTagsForUser = (user) => {
+  const analysis = user?.aiProfile?.analysis && typeof user.aiProfile.analysis === 'object'
+    ? user.aiProfile.analysis
+    : null;
+  if (!analysis) return [];
+  return Array.from(
+    new Set(
+      [
+        ...extractAiTagNames(analysis.preferences),
+        ...extractAiTagNames(analysis.personalityTraits),
+        ...extractAiTagNames(analysis.riskSignals),
+      ].filter(Boolean)
+    )
+  ).slice(0, 20);
+};
+const pickCounterValue = (snapshot, name, predicate = () => true) =>
+  (snapshot?.counters || [])
+    .filter((entry) => entry?.name === name && predicate(entry?.labels || {}))
+    .reduce((sum, entry) => sum + (Number(entry?.value) || 0), 0);
+const pickResponseValue = (snapshot, path) =>
+  (snapshot?.counters || [])
+    .filter(
+      (entry) =>
+        entry?.name === 'http_responses_total' &&
+        String(entry?.labels?.path || '') === String(path || '')
+    )
+    .reduce((acc, entry) => {
+      const statusClass = String(entry?.labels?.statusClass || 'unknown');
+      const value = Number(entry?.value) || 0;
+      acc.total += value;
+      acc.byStatus[statusClass] = (acc.byStatus[statusClass] || 0) + value;
+      return acc;
+    }, { total: 0, byStatus: {} });
+const buildPhase1Overview = ({ users, flags, snapshot }) => {
+  const safeUsers = Array.isArray(users) ? users : [];
+  const byReplyStyle = { polite: 0, concise: 0, formal: 0 };
+  const byTranslateStyle = { formal: 0, casual: 0 };
+  const byExplanationLevel = { short: 0, medium: 0, detailed: 0 };
+  const tagMap = new Map();
+  const samples = [];
+  let customizedUsers = 0;
+  safeUsers.forEach((user) => {
+    const profile = resolveAssistantProfileFromUser(user);
+    byReplyStyle[profile.replyStyle] = (byReplyStyle[profile.replyStyle] || 0) + 1;
+    byTranslateStyle[profile.translateStyle] = (byTranslateStyle[profile.translateStyle] || 0) + 1;
+    byExplanationLevel[profile.explanationLevel] =
+      (byExplanationLevel[profile.explanationLevel] || 0) + 1;
+    const isCustomized = !isDefaultAssistantProfile(profile);
+    if (isCustomized) {
+      customizedUsers += 1;
+      if (samples.length < 20) {
+        samples.push({
+          uid: Number(user?.uid) || 0,
+          username: String(user?.username || ''),
+          nickname: String(user?.nickname || user?.username || ''),
+          profile,
+        });
+      }
     }
-    next();
-    return;
-  }
-  if (!ADMIN_ENABLE_INSECURE) {
-    res.status(403).json({
-      success: false,
-      message: 'Admin API disabled: set ADMIN_API_TOKEN or ADMIN_ENABLE_INSECURE=true.',
+    collectAiTagsForUser(user).forEach((tag) => {
+      tagMap.set(tag, (tagMap.get(tag) || 0) + 1);
     });
-    return;
-  }
-  next();
+  });
+  const tagTop = Array.from(tagMap.entries())
+    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+    .slice(0, 24)
+    .map(([name, count]) => ({ name, count }));
+  const requestVolume = {
+    replySuggest: pickCounterValue(
+      snapshot,
+      'http_requests_total',
+      (labels) => labels.path === '/api/chat/reply-suggest'
+    ),
+    chatSend: pickCounterValue(
+      snapshot,
+      'http_requests_total',
+      (labels) => labels.path === '/api/chat/send'
+    ),
+    translate: pickCounterValue(
+      snapshot,
+      'http_requests_total',
+      (labels) => labels.path === '/api/translate'
+    ),
+    translateProfileWrite: pickCounterValue(
+      snapshot,
+      'http_requests_total',
+      (labels) => labels.path === '/api/translate/profile' && labels.method === 'POST'
+    ),
+  };
+  return {
+    generatedAt: new Date().toISOString(),
+    featureEnabled: {
+      replyAssistant: Boolean(flags.replyAssistant),
+      translatePersonalization: Boolean(flags.translatePersonalization),
+    },
+    users: {
+      total: safeUsers.length,
+      customizedUsers,
+      defaultUsers: Math.max(0, safeUsers.length - customizedUsers),
+      byReplyStyle,
+      byTranslateStyle,
+      byExplanationLevel,
+    },
+    requestVolume,
+    responses: {
+      replySuggest: pickResponseValue(snapshot, '/api/chat/reply-suggest'),
+      translate: pickResponseValue(snapshot, '/api/translate'),
+      translateProfile: pickResponseValue(snapshot, '/api/translate/profile'),
+    },
+    topTags: tagTop,
+    samples,
+  };
 };
-
+const buildPhase4Overview = async ({ snapshot }) => {
+  const summary = await getSummaryAdminOverview({ limit: 30 });
+  const requestVolume = {
+    summaryRead: pickCounterValue(
+      snapshot,
+      'http_requests_total',
+      (labels) => labels.path === '/api/summary' && labels.method === 'GET'
+    ),
+    summaryRefresh: pickCounterValue(
+      snapshot,
+      'http_requests_total',
+      (labels) => labels.path === '/api/summary/refresh' && labels.method === 'POST'
+    ),
+    summaryArchive: pickCounterValue(
+      snapshot,
+      'http_requests_total',
+      (labels) => labels.path === '/api/summary/archive' && labels.method === 'POST'
+    ),
+    chatOverview: pickCounterValue(
+      snapshot,
+      'http_requests_total',
+      (labels) => labels.path === '/api/chat/overview' && labels.method === 'POST'
+    ),
+  };
+  return {
+    generatedAt: new Date().toISOString(),
+    featureEnabled: {
+      summaryCenter: Boolean(isFeatureEnabled('summaryCenter')),
+    },
+    requestVolume,
+    responses: {
+      summaryRead: pickResponseValue(snapshot, '/api/summary'),
+      summaryRefresh: pickResponseValue(snapshot, '/api/summary/refresh'),
+      summaryArchive: pickResponseValue(snapshot, '/api/summary/archive'),
+      chatOverview: pickResponseValue(snapshot, '/api/chat/overview'),
+    },
+    summary,
+  };
+};
+const buildPhase5Overview = async ({ snapshot }) => {
+  const reco = await getRecoAdminOverview({ limit: 180, windowHours: 24 });
+  const requestVolume = {
+    recoDecision: pickCounterValue(
+      snapshot,
+      'http_requests_total',
+      (labels) => labels.path === '/api/reco/decision' && labels.method === 'POST'
+    ),
+    recoFeedback: pickCounterValue(
+      snapshot,
+      'http_requests_total',
+      (labels) => labels.path === '/api/reco/feedback' && labels.method === 'POST'
+    ),
+    recoAdmin: pickCounterValue(
+      snapshot,
+      'http_requests_total',
+      (labels) => labels.path === '/api/reco/admin' && labels.method === 'GET'
+    ),
+    chatOverview: pickCounterValue(
+      snapshot,
+      'http_requests_total',
+      (labels) => labels.path === '/api/chat/overview' && labels.method === 'POST'
+    ),
+  };
+  return {
+    generatedAt: new Date().toISOString(),
+    featureEnabled: {
+      recoVw: Boolean(isFeatureEnabled('recoVw')),
+      recoVwShadow: Boolean(isFeatureEnabled('recoVwShadow')),
+      recoVwOnline: Boolean(isFeatureEnabled('recoVwOnline')),
+    },
+    requestVolume,
+    responses: {
+      recoDecision: pickResponseValue(snapshot, '/api/reco/decision'),
+      recoFeedback: pickResponseValue(snapshot, '/api/reco/feedback'),
+      recoAdmin: pickResponseValue(snapshot, '/api/reco/admin'),
+      chatOverview: pickResponseValue(snapshot, '/api/chat/overview'),
+    },
+    reco,
+  };
+};
+const buildGroupMembershipCountMap = (groups = []) => {
+  const map = new Map();
+  (Array.isArray(groups) ? groups : []).forEach((group) => {
+    normalizeUidArray(group?.memberUids).forEach((uid) => {
+      map.set(uid, (map.get(uid) || 0) + 1);
+    });
+  });
+  return map;
+};
+const buildRelationshipViewerSelector = (users = [], groups = [], selectedUid = 0) => {
+  const membershipMap = buildGroupMembershipCountMap(groups);
+  const items = (Array.isArray(users) ? users : [])
+    .map((user) => {
+      const uid = Number(user?.uid);
+      if (!isValidUid(uid)) return null;
+      const friendsCount = normalizeUidArray(user?.friends).length;
+      const groupsCount = Number(membershipMap.get(uid) || 0);
+      return {
+        uid,
+        username: String(user?.username || ''),
+        nickname: String(user?.nickname || user?.username || ''),
+        friendsCount,
+        groupsCount,
+      };
+    })
+    .filter(Boolean)
+    .sort(
+      (a, b) =>
+        b.friendsCount - a.friendsCount ||
+        b.groupsCount - a.groupsCount ||
+        a.uid - b.uid
+    );
+  const selected =
+    items.find((item) => item.uid === Number(selectedUid)) ||
+    items.find((item) => item.friendsCount > 0 || item.groupsCount > 0) ||
+    items[0] ||
+    null;
+  return {
+    selectedUid: selected ? selected.uid : 0,
+    users: items.slice(0, 80),
+  };
+};
+const toBoolean = (value, fallback = false) => {
+  if (typeof value === 'boolean') return value;
+  const normalized = String(value || '').trim().toLowerCase();
+  if (!normalized) return fallback;
+  if (normalized === '1' || normalized === 'true' || normalized === 'yes' || normalized === 'on') {
+    return true;
+  }
+  if (normalized === '0' || normalized === 'false' || normalized === 'no' || normalized === 'off') {
+    return false;
+  }
+  return fallback;
+};
+const normalizeUidArray = (value) =>
+  Array.from(
+    new Set(
+      (Array.isArray(value) ? value : [])
+        .map((item) => Number(item))
+        .filter((item) => isValidUid(item))
+    )
+  );
+const buildUsersLookup = (users) => {
+  const map = new Map();
+  (Array.isArray(users) ? users : []).forEach((user) => {
+    const uid = Number(user?.uid);
+    if (!isValidUid(uid)) return;
+    map.set(uid, user);
+  });
+  return map;
+};
+const buildMutualAdjacency = (users) => {
+  const userMap = buildUsersLookup(users);
+  const adjacency = new Map();
+  const oneWayEdges = [];
+  const mutualEdgeSet = new Set();
+  const ensureSet = (uid) => {
+    if (!adjacency.has(uid)) adjacency.set(uid, new Set());
+    return adjacency.get(uid);
+  };
+  userMap.forEach((user, uid) => {
+    ensureSet(uid);
+    const list = normalizeUidArray(user?.friends);
+    list.forEach((friendUid) => {
+      if (!userMap.has(friendUid) || friendUid === uid) return;
+      const peer = userMap.get(friendUid);
+      const peerFriends = normalizeUidArray(peer?.friends);
+      if (peerFriends.includes(uid)) {
+        const minUid = Math.min(uid, friendUid);
+        const maxUid = Math.max(uid, friendUid);
+        const edgeKey = `${minUid}-${maxUid}`;
+        if (!mutualEdgeSet.has(edgeKey)) {
+          mutualEdgeSet.add(edgeKey);
+          ensureSet(minUid).add(maxUid);
+          ensureSet(maxUid).add(minUid);
+        }
+      } else {
+        oneWayEdges.push({ fromUid: uid, toUid: friendUid });
+      }
+    });
+  });
+  return {
+    adjacency,
+    oneWayEdges,
+    mutualEdges: Array.from(mutualEdgeSet).map((key) => {
+      const [fromUid, toUid] = key.split('-').map((item) => Number(item));
+      return { fromUid, toUid };
+    }),
+  };
+};
+const computeConnectedComponents = (adjacency) => {
+  const visited = new Set();
+  const components = [];
+  Array.from(adjacency.keys()).forEach((uid) => {
+    if (visited.has(uid)) return;
+    const queue = [uid];
+    visited.add(uid);
+    let size = 0;
+    while (queue.length > 0) {
+      const current = queue.shift();
+      size += 1;
+      const neighbors = adjacency.get(current);
+      if (!neighbors) continue;
+      neighbors.forEach((neighborUid) => {
+        if (visited.has(neighborUid)) return;
+        visited.add(neighborUid);
+        queue.push(neighborUid);
+      });
+    }
+    components.push(size);
+  });
+  components.sort((a, b) => b - a);
+  return components;
+};
+const buildSocialOverview = ({ users, groups }) => {
+  const safeUsers = Array.isArray(users) ? users : [];
+  const safeGroups = Array.isArray(groups) ? groups : [];
+  const userMap = buildUsersLookup(safeUsers);
+  const { adjacency, oneWayEdges, mutualEdges } = buildMutualAdjacency(safeUsers);
+  const components = computeConnectedComponents(adjacency);
+  const friendCounts = [];
+  let isolatedUsers = 0;
+  const topUsers = [];
+  userMap.forEach((user, uid) => {
+    const friends = adjacency.get(uid);
+    const friendCount = friends ? friends.size : 0;
+    friendCounts.push(friendCount);
+    if (friendCount === 0) isolatedUsers += 1;
+    topUsers.push({
+      uid,
+      username: String(user?.username || ''),
+      nickname: String(user?.nickname || user?.username || ''),
+      friendCount,
+    });
+  });
+  topUsers.sort((a, b) => b.friendCount - a.friendCount || a.uid - b.uid);
+  const groupItems = [];
+  let groupMemberTotal = 0;
+  let usersWithGroup = 0;
+  const userInGroupSet = new Set();
+  safeGroups.forEach((group) => {
+    const gid = Number(group?.id);
+    if (!Number.isInteger(gid) || gid <= 0) return;
+    const memberUids = normalizeUidArray(group?.memberUids).filter((uid) => userMap.has(uid));
+    if (memberUids.length === 0) return;
+    memberUids.forEach((uid) => userInGroupSet.add(uid));
+    groupMemberTotal += memberUids.length;
+    groupItems.push({
+      id: gid,
+      name: sanitizeText(group?.name, 80) || `群聊${gid}`,
+      memberCount: memberUids.length,
+    });
+  });
+  usersWithGroup = userInGroupSet.size;
+  const noSocialUsers = safeUsers.filter((user) => {
+    const uid = Number(user?.uid);
+    if (!isValidUid(uid)) return false;
+    const friendCount = adjacency.get(uid)?.size || 0;
+    const inGroup = userInGroupSet.has(uid);
+    return friendCount === 0 && !inGroup;
+  }).length;
+  groupItems.sort((a, b) => b.memberCount - a.memberCount || a.id - b.id);
+  friendCounts.sort((a, b) => a - b);
+  const medianFriendCount =
+    friendCounts.length === 0
+      ? 0
+      : friendCounts.length % 2 === 1
+        ? friendCounts[Math.floor(friendCounts.length / 2)]
+        : (friendCounts[friendCounts.length / 2 - 1] + friendCounts[friendCounts.length / 2]) / 2;
+  const friendCountSum = friendCounts.reduce((sum, value) => sum + value, 0);
+  const avgFriendCount = friendCounts.length ? Number((friendCountSum / friendCounts.length).toFixed(2)) : 0;
+  const avgGroupSize = groupItems.length ? Number((groupMemberTotal / groupItems.length).toFixed(2)) : 0;
+  return {
+    generatedAt: new Date().toISOString(),
+    totals: {
+      users: userMap.size,
+      groups: groupItems.length,
+      mutualFriendEdges: mutualEdges.length,
+      oneWayFriendEdges: oneWayEdges.length,
+      isolatedUsers,
+      noSocialUsers,
+      usersWithGroup,
+      groupMemberships: groupMemberTotal,
+    },
+    metrics: {
+      avgFriendCount,
+      medianFriendCount,
+      avgGroupSize,
+      connectedComponents: components.length,
+      largestComponentSize: components[0] || 0,
+    },
+    topUsers: topUsers.slice(0, 12),
+    topGroups: groupItems.slice(0, 12),
+    componentSizes: components.slice(0, 10),
+    usersCache: getUsersCacheInfo(),
+  };
+};
+const buildSocialTree = ({ rootUid, depth, includeGroups, users, groups }) => {
+  if (!isValidUid(rootUid)) return null;
+  const safeDepth = toPositiveInt(depth, 2, 1, MAX_SOCIAL_TREE_DEPTH);
+  const safeIncludeGroups = Boolean(includeGroups);
+  const safeUsers = Array.isArray(users) ? users : [];
+  const safeGroups = Array.isArray(groups) ? groups : [];
+  const userMap = buildUsersLookup(safeUsers);
+  const rootUser = userMap.get(rootUid);
+  if (!rootUser) return null;
+  const { adjacency } = buildMutualAdjacency(safeUsers);
+  const nodes = [];
+  const edges = [];
+  const nodeKeys = new Set();
+  const edgeKeys = new Set();
+  const levelMap = new Map();
+  const pushNode = (node) => {
+    if (!node || !node.id || nodeKeys.has(node.id)) return;
+    if (nodes.length >= MAX_SOCIAL_TREE_NODES) return;
+    nodeKeys.add(node.id);
+    nodes.push(node);
+  };
+  const pushEdge = (edge) => {
+    if (!edge || !edge.from || !edge.to) return;
+    const key = `${edge.type}:${edge.from}->${edge.to}`;
+    if (edgeKeys.has(key)) return;
+    if (edges.length >= MAX_SOCIAL_TREE_EDGES) return;
+    edgeKeys.add(key);
+    edges.push(edge);
+  };
+  const toUserNode = (uid, level) => {
+    const user = userMap.get(uid);
+    return {
+      id: `u:${uid}`,
+      type: 'user',
+      uid,
+      label: sanitizeText(user?.nickname || user?.username || `用户${uid}`, 64),
+      username: sanitizeText(user?.username, 64),
+      level,
+      friendCount: adjacency.get(uid)?.size || 0,
+      online: user?.online === true,
+    };
+  };
+  const queue = [{ uid: rootUid, level: 0 }];
+  levelMap.set(rootUid, 0);
+  pushNode(toUserNode(rootUid, 0));
+  while (queue.length > 0) {
+    const current = queue.shift();
+    if (!current) continue;
+    if (current.level >= safeDepth) continue;
+    const neighbors = adjacency.get(current.uid) || new Set();
+    Array.from(neighbors).forEach((nextUid) => {
+      if (!userMap.has(nextUid)) return;
+      const nextLevel = current.level + 1;
+      const prevLevel = levelMap.get(nextUid);
+      if (typeof prevLevel !== 'number' || nextLevel < prevLevel) {
+        levelMap.set(nextUid, nextLevel);
+      }
+      pushNode(toUserNode(nextUid, levelMap.get(nextUid) || nextLevel));
+      const minUid = Math.min(current.uid, nextUid);
+      const maxUid = Math.max(current.uid, nextUid);
+      pushEdge({
+        id: `f:${minUid}-${maxUid}`,
+        type: 'friend',
+        from: `u:${minUid}`,
+        to: `u:${maxUid}`,
+      });
+      if (typeof prevLevel !== 'number' && nodes.length < MAX_SOCIAL_TREE_NODES) {
+        queue.push({ uid: nextUid, level: nextLevel });
+      }
+    });
+    if (nodes.length >= MAX_SOCIAL_TREE_NODES || edges.length >= MAX_SOCIAL_TREE_EDGES) break;
+  }
+  const discoveredUids = new Set(
+    nodes
+      .filter((item) => item.type === 'user')
+      .map((item) => Number(item.uid))
+      .filter((uid) => isValidUid(uid))
+  );
+  if (safeIncludeGroups && discoveredUids.size > 0) {
+    safeGroups.forEach((group) => {
+      if (nodes.length >= MAX_SOCIAL_TREE_NODES || edges.length >= MAX_SOCIAL_TREE_EDGES) return;
+      const gid = Number(group?.id);
+      if (!Number.isInteger(gid) || gid <= 0) return;
+      const memberUids = normalizeUidArray(group?.memberUids).filter((uid) => discoveredUids.has(uid));
+      if (!memberUids.length) return;
+      const groupNodeId = `g:${gid}`;
+      pushNode({
+        id: groupNodeId,
+        type: 'group',
+        gid,
+        label: sanitizeText(group?.name, 80) || `群聊${gid}`,
+        level: Math.max(
+          0,
+          ...memberUids.map((uid) => Number(levelMap.get(uid) || 0))
+        ),
+        memberCount: normalizeUidArray(group?.memberUids).length,
+      });
+      memberUids.forEach((uid) => {
+        pushEdge({
+          id: `gm:${gid}-${uid}`,
+          type: 'group_member',
+          from: `u:${uid}`,
+          to: groupNodeId,
+        });
+      });
+    });
+  }
+  const levelSummary = {};
+  nodes.forEach((node) => {
+    const level = Number(node?.level) || 0;
+    levelSummary[level] = (levelSummary[level] || 0) + 1;
+  });
+  return {
+    generatedAt: new Date().toISOString(),
+    rootUid,
+    depth: safeDepth,
+    includeGroups: safeIncludeGroups,
+    summary: {
+      nodes: nodes.length,
+      edges: edges.length,
+      userNodes: nodes.filter((item) => item.type === 'user').length,
+      groupNodes: nodes.filter((item) => item.type === 'group').length,
+      levelSummary,
+      truncated:
+        nodes.length >= MAX_SOCIAL_TREE_NODES || edges.length >= MAX_SOCIAL_TREE_EDGES,
+    },
+    nodes,
+    edges,
+  };
+};
 // cloneValue?处理 cloneValue 相关逻辑。
 const cloneValue = (value) => {
   if (typeof structuredClone === 'function') return structuredClone(value);
   return JSON.parse(JSON.stringify(value));
 };
-
 // normalizeProductStatus：归一化外部输入。
 const normalizeProductStatus = (value, fallback = 'draft') => {
   const normalized = String(value || '').trim().toLowerCase();
   if (PRODUCT_STATUS_SET.has(normalized)) return normalized;
   return fallback;
 };
-
 // normalizeTags：归一化外部输入。
 const normalizeTags = (value) => {
   const list = Array.isArray(value) ? value : typeof value === 'string' ? value.split(',') : [];
@@ -244,12 +830,10 @@ const normalizeProductRecord = (record, { fallbackId, nowIso }) => {
   const idRaw = Number(record.id);
   const id = Number.isInteger(idRaw) && idRaw > 0 ? idRaw : fallbackId;
   if (!Number.isInteger(id) || id <= 0) return null;
-
   const priceRaw = Number(record.price);
   const stockRaw = Number(record.stock);
   const salesRaw = Number(record.sales);
   const costRaw = Number(record.cost);
-
   return {
     id,
     name,
@@ -266,38 +850,34 @@ const normalizeProductRecord = (record, { fallbackId, nowIso }) => {
     updatedAt: typeof record.updatedAt === 'string' && record.updatedAt ? record.updatedAt : nowIso,
   };
 };
-
 // setProductsCache：设置运行时状态。
 const setProductsCache = (products, timestamp = Date.now()) => {
   productsCache = Array.isArray(products) ? products : [];
   productsCacheAt = timestamp;
   productsVersion += 1;
 };
-
 // ensureProductsStorage：确保前置条件与资源可用。
 const ensureProductsStorage = async () => {
   await fs.mkdir(DATA_DIR, { recursive: true });
   try {
     await fs.access(PRODUCTS_PATH);
   } catch {
-    await fs.writeFile(PRODUCTS_PATH, '[]', 'utf-8');
+    await atomicWriteFile(PRODUCTS_PATH, '[]', {
+      lockPath: PRODUCTS_LOCK_PATH,
+    });
   }
 };
-
 // queueProductsWriteTask：将任务按顺序排队处理。
 const queueProductsWriteTask = async (task) => {
-  const run = productsWriteQueue.then(task);
-  productsWriteQueue = run.catch(() => {});
-  return run;
+  return productsWriteQueue.enqueue(task);
 };
-
 // persistProductsSnapshot?处理 persistProductsSnapshot 相关逻辑。
 const persistProductsSnapshot = async (snapshot) => {
-  await fs.writeFile(PRODUCTS_PATH_TMP, JSON.stringify(snapshot, null, 2), 'utf-8');
-  await fs.rename(PRODUCTS_PATH_TMP, PRODUCTS_PATH);
+  await atomicWriteFile(PRODUCTS_PATH, JSON.stringify(snapshot, null, 2), {
+    lockPath: PRODUCTS_LOCK_PATH,
+  });
   setProductsCache(snapshot, Date.now());
 };
-
 // loadProductsFromDisk?处理 loadProductsFromDisk 相关逻辑。
 const loadProductsFromDisk = async () => {
   await ensureProductsStorage();
@@ -305,7 +885,6 @@ const loadProductsFromDisk = async () => {
   const parsed = JSON.parse(raw || '[]');
   const list = Array.isArray(parsed) ? parsed : [];
   const nowIso = new Date().toISOString();
-
   let maxId = 0;
   const normalized = [];
   list.forEach((entry, index) => {
@@ -315,11 +894,9 @@ const loadProductsFromDisk = async () => {
     maxId = Math.max(maxId, item.id);
     normalized.push(item);
   });
-
   setProductsCache(normalized, Date.now());
   return productsCache || [];
 };
-
 // readProductsCached：读取持久化或缓存数据。
 const readProductsCached = async ({ forceRefresh = false } = {}) => {
   const now = Date.now();
@@ -334,7 +911,6 @@ const readProductsCached = async ({ forceRefresh = false } = {}) => {
     await productsLoadInFlight;
     return productsCache || [];
   }
-
   productsLoadInFlight = queueProductsWriteTask(() => loadProductsFromDisk())
     .catch(async () => {
       await ensureProductsStorage();
@@ -343,11 +919,9 @@ const readProductsCached = async ({ forceRefresh = false } = {}) => {
     .finally(() => {
       productsLoadInFlight = null;
     });
-
   await productsLoadInFlight;
   return productsCache || [];
 };
-
 // mutateProducts?处理 mutateProducts 相关逻辑。
 const mutateProducts = async (mutator, { defaultChanged = true } = {}) => {
   if (typeof mutator !== 'function') {
@@ -355,7 +929,6 @@ const mutateProducts = async (mutator, { defaultChanged = true } = {}) => {
   }
   await ensureProductsStorage();
   await readProductsCached();
-
   let changed = defaultChanged;
   let result;
   await queueProductsWriteTask(async () => {
@@ -373,7 +946,6 @@ const mutateProducts = async (mutator, { defaultChanged = true } = {}) => {
   });
   return { changed, result };
 };
-
 // getNextProductId：获取并返回目标数据。
 const getNextProductId = (products) => {
   let maxId = 0;
@@ -385,14 +957,12 @@ const getNextProductId = (products) => {
   });
   return maxId + 1;
 };
-
 // buildProductsCacheInfo：构建对外输出数据。
 const buildProductsCacheInfo = () => ({
   version: productsVersion,
   cachedAt: productsCacheAt ? new Date(productsCacheAt).toISOString() : null,
   ageMs: productsCacheAt ? Math.max(0, Date.now() - productsCacheAt) : null,
 });
-
 // aggregateSlowEndpoints?处理 aggregateSlowEndpoints 相关逻辑。
 const aggregateSlowEndpoints = (snapshot) => {
   const map = new Map();
@@ -408,13 +978,11 @@ const aggregateSlowEndpoints = (snapshot) => {
       prev.max = Math.max(prev.max, Number(entry?.max) || 0);
       map.set(key, prev);
     });
-
   return Array.from(map.values())
     .map((item) => ({ ...item, avgMs: item.count > 0 ? item.sum / item.count : 0 }))
     .sort((a, b) => b.avgMs - a.avgMs)
     .slice(0, 10);
 };
-
 // aggregateErrorEndpoints?处理 aggregateErrorEndpoints 相关逻辑。
 const aggregateErrorEndpoints = (snapshot) => {
   const map = new Map();
@@ -432,22 +1000,18 @@ const aggregateErrorEndpoints = (snapshot) => {
       prev.errors += Number(entry?.value) || 0;
       map.set(key, prev);
     });
-
   return Array.from(map.values())
     .sort((a, b) => b.errors - a.errors)
     .slice(0, 10);
 };
-
 const normalizeMessageReviewStatus = (value) => {
   const status = sanitizeText(value, 24).toLowerCase();
   return MESSAGE_REVIEW_STATUS_SET.has(status) ? status : '';
 };
-
 const normalizeMessageReviewRiskLevel = (value) => {
   const riskLevel = sanitizeText(value, 24).toLowerCase();
   return MESSAGE_REVIEW_RISK_SET.has(riskLevel) ? riskLevel : '';
 };
-
 const normalizeMessageReviewTags = (value) => {
   const list = Array.isArray(value) ? value : typeof value === 'string' ? value.split(',') : [];
   return Array.from(
@@ -459,12 +1023,10 @@ const normalizeMessageReviewTags = (value) => {
     )
   );
 };
-
 const parseIsoTimestamp = (value) => {
   const parsed = Date.parse(String(value || ''));
   return Number.isFinite(parsed) && parsed > 0 ? new Date(parsed).toISOString() : '';
 };
-
 const normalizeMessageReviewRecord = (messageId, record) => {
   if (typeof messageId !== 'string' || !messageId.trim()) return null;
   if (!record || typeof record !== 'object') return null;
@@ -493,7 +1055,6 @@ const normalizeMessageReviewRecord = (messageId, record) => {
     })
     .filter(Boolean)
     .slice(-30);
-
   return {
     messageId: id,
     status,
@@ -505,23 +1066,20 @@ const normalizeMessageReviewRecord = (messageId, record) => {
     history,
   };
 };
-
 const ensureMessageReviewsStorage = async () => {
   await fs.mkdir(DATA_DIR, { recursive: true });
   try {
     await fs.access(MESSAGE_REVIEWS_PATH);
   } catch {
     const seed = { version: 1, updatedAt: '', records: {} };
-    await fs.writeFile(MESSAGE_REVIEWS_PATH, JSON.stringify(seed, null, 2), 'utf-8');
+    await atomicWriteFile(MESSAGE_REVIEWS_PATH, JSON.stringify(seed, null, 2), {
+      lockPath: MESSAGE_REVIEWS_LOCK_PATH,
+    });
   }
 };
-
 const queueMessageReviewsWriteTask = async (task) => {
-  const run = messageReviewsWriteQueue.then(task);
-  messageReviewsWriteQueue = run.catch(() => {});
-  return run;
+  return messageReviewsWriteQueue.enqueue(task);
 };
-
 const loadMessageReviewsFromDisk = async () => {
   await ensureMessageReviewsStorage();
   const raw = await fs.readFile(MESSAGE_REVIEWS_PATH, 'utf-8');
@@ -541,18 +1099,17 @@ const loadMessageReviewsFromDisk = async () => {
   };
   return messageReviewsCache;
 };
-
 const persistMessageReviewsSnapshot = async (snapshot) => {
   const normalized = {
     version: 1,
     updatedAt: new Date().toISOString(),
     records: snapshot?.records && typeof snapshot.records === 'object' ? snapshot.records : {},
   };
-  await fs.writeFile(MESSAGE_REVIEWS_PATH_TMP, JSON.stringify(normalized, null, 2), 'utf-8');
-  await fs.rename(MESSAGE_REVIEWS_PATH_TMP, MESSAGE_REVIEWS_PATH);
+  await atomicWriteFile(MESSAGE_REVIEWS_PATH, JSON.stringify(normalized, null, 2), {
+    lockPath: MESSAGE_REVIEWS_LOCK_PATH,
+  });
   messageReviewsCache = normalized;
 };
-
 const readMessageReviewsCached = async ({ forceRefresh = false } = {}) => {
   if (!forceRefresh && messageReviewsCache) {
     return messageReviewsCache;
@@ -572,7 +1129,6 @@ const readMessageReviewsCached = async ({ forceRefresh = false } = {}) => {
   await messageReviewsLoadInFlight;
   return messageReviewsCache || { version: 1, updatedAt: '', records: {} };
 };
-
 const mutateMessageReviews = async (mutator, { defaultChanged = true } = {}) => {
   if (typeof mutator !== 'function') {
     throw new TypeError('mutateMessageReviews requires a function mutator.');
@@ -598,7 +1154,6 @@ const mutateMessageReviews = async (mutator, { defaultChanged = true } = {}) => 
   });
   return { changed, result };
 };
-
 const getMessageAuditText = (message) => {
   const data = message?.data && typeof message.data === 'object' ? message.data : {};
   const parts = [];
@@ -611,13 +1166,11 @@ const getMessageAuditText = (message) => {
   }
   return parts.join(' ').trim();
 };
-
 const riskRank = (value) => {
   if (value === 'high') return 3;
   if (value === 'medium') return 2;
   return 1;
 };
-
 const inspectMessageRisk = (message) => {
   const text = getMessageAuditText(message);
   if (!text) {
@@ -643,7 +1196,6 @@ const inspectMessageRisk = (message) => {
     hitRules,
   };
 };
-
 const attachMessageAudit = (message, reviewsMap) => {
   const review = reviewsMap?.[message.id] || null;
   const inspection = inspectMessageRisk(message);
@@ -657,7 +1209,6 @@ const attachMessageAudit = (message, reviewsMap) => {
     inspection,
   };
 };
-
 const summarizeMessageReviewRecords = (records) => {
   const list = Object.values(records || {});
   const byStatus = { approved: 0, flagged: 0, blocked: 0, deleted: 0 };
@@ -676,7 +1227,6 @@ const summarizeMessageReviewRecords = (records) => {
     byRisk,
   };
 };
-
 const applyUserBatchAction = (user, action, nowIso) => {
   const next = { ...user };
   let changed = false;
@@ -690,7 +1240,6 @@ const applyUserBatchAction = (user, action, nowIso) => {
     next.token = null;
     next.tokenExpiresAt = null;
   };
-
   if (action === 'activate' || action === 'restore') {
     if (next.blocked === true) {
       next.blocked = false;
@@ -702,7 +1251,6 @@ const applyUserBatchAction = (user, action, nowIso) => {
     }
     return { changed, user: next };
   }
-
   if (action === 'block') {
     if (next.blocked !== true) {
       next.blocked = true;
@@ -711,7 +1259,6 @@ const applyUserBatchAction = (user, action, nowIso) => {
     clearSessions();
     return { changed, user: next };
   }
-
   if (action === 'soft-delete') {
     if (!next.deletedAt) {
       next.deletedAt = nowIso;
@@ -724,15 +1271,12 @@ const applyUserBatchAction = (user, action, nowIso) => {
     clearSessions();
     return { changed, user: next };
   }
-
   if (action === 'revoke-sessions') {
     clearSessions();
     return { changed, user: next };
   }
-
   return { changed: false, user: next };
 };
-
 const buildMessageReviewRecord = ({
   current,
   messageId,
@@ -763,8 +1307,177 @@ const buildMessageReviewRecord = ({
     history: nextHistory.slice(-30),
   };
 };
-
-router.use(requireAdmin);
+router.use(requireAdminAccess);
+router.get(
+  '/feature-flags',
+  asyncRoute(async (_req, res) => {
+    const flags = getFeatureFlagsSnapshot();
+    const definitions = getFeatureFlagDetails();
+    res.json({
+      success: true,
+      data: {
+        generatedAt: new Date().toISOString(),
+        flags,
+        definitions,
+        runtime: getFeatureFlagRuntimeState(),
+      },
+    });
+  })
+);
+router.post(
+  '/feature-flags/update',
+  asyncRoute(async (req, res) => {
+    const payload = req.body || {};
+    const actor =
+      sanitizeText(req?.admin?.username, 80) ||
+      sanitizeText(req.headers?.['x-admin-user'], 80) ||
+      'admin';
+    const changes = payload?.changes && typeof payload.changes === 'object' ? payload.changes : null;
+    if (changes) {
+      const normalizedChanges = {};
+      Object.entries(changes).forEach(([name, value]) => {
+        if (!hasOwn(FEATURE_DEFINITIONS, name)) return;
+        if (value === null || typeof value === 'undefined') {
+          normalizedChanges[name] = null;
+          return;
+        }
+        normalizedChanges[name] = Boolean(value);
+      });
+      const updated = await bulkUpdateFeatureFlagOverrides(normalizedChanges, { actor });
+      trackAdminEvent(req, {
+        eventType: 'click',
+        targetType: 'feature_flag',
+        tags: ['feature_flag_batch_update'],
+        metadata: {
+          actor,
+          changed: updated.length,
+          names: updated.map((item) => item.name),
+        },
+      });
+      res.json({
+        success: true,
+        data: {
+          updated,
+          flags: getFeatureFlagsSnapshot(),
+          definitions: getFeatureFlagDetails(),
+          runtime: getFeatureFlagRuntimeState(),
+        },
+      });
+      return;
+    }
+    const name = sanitizeText(payload?.name, 60);
+    if (!name || !hasOwn(FEATURE_DEFINITIONS, name)) {
+      res.status(400).json({ success: false, message: 'Invalid feature flag name.' });
+      return;
+    }
+    let enabled = null;
+    if (payload?.clearOverride === true || payload?.enabled === null) {
+      enabled = null;
+    } else if (typeof payload?.enabled === 'boolean') {
+      enabled = payload.enabled;
+    } else if (typeof payload?.override === 'boolean') {
+      enabled = payload.override;
+    } else {
+      res.status(400).json({ success: false, message: 'enabled must be boolean or null.' });
+      return;
+    }
+    const updated = await setFeatureFlagOverride(name, enabled, { actor });
+    trackAdminEvent(req, {
+      eventType: 'click',
+      targetType: 'feature_flag',
+      tags: ['feature_flag_update', name],
+      metadata: {
+        actor,
+        enabled: updated.enabled,
+        override: updated.override,
+      },
+    });
+    res.json({
+      success: true,
+      data: {
+        updated,
+        flags: getFeatureFlagsSnapshot(),
+        definitions: getFeatureFlagDetails(),
+        runtime: getFeatureFlagRuntimeState(),
+      },
+    });
+  })
+);
+router.get(
+  '/events/summary',
+  asyncRoute(async (_req, res) => {
+    const loggerSummary = await getEventLoggerStats();
+    res.json({
+      success: true,
+      data: {
+        generatedAt: new Date().toISOString(),
+        logger: loggerSummary,
+      },
+    });
+  })
+);
+// 路由：GET /phase1/overview。
+router.get(
+  '/phase1/overview',
+  asyncRoute(async (_req, res) => {
+    const users = await readUsersCached();
+    const flags = getFeatureFlagsSnapshot();
+    const snapshot = metrics.snapshot();
+    res.json({
+      success: true,
+      data: buildPhase1Overview({
+        users,
+        flags,
+        snapshot,
+      }),
+    });
+  })
+);
+router.get(
+  '/phase4/overview',
+  asyncRoute(async (_req, res) => {
+    const snapshot = metrics.snapshot();
+    const data = await buildPhase4Overview({ snapshot });
+    res.json({
+      success: true,
+      data,
+    });
+  })
+);
+router.get(
+  '/phase5/overview',
+  asyncRoute(async (_req, res) => {
+    const snapshot = metrics.snapshot();
+    const data = await buildPhase5Overview({ snapshot });
+    res.json({
+      success: true,
+      data,
+    });
+  })
+);
+router.post(
+  '/phase5/config',
+  asyncRoute(async (req, res) => {
+    const actor =
+      sanitizeText(req?.admin?.username, 80) ||
+      sanitizeText(req.headers?.['x-admin-user'], 80) ||
+      'admin';
+    const patch = req.body && typeof req.body === 'object' ? req.body : {};
+    const data = await updateRecoAdminConfig(patch, { actor });
+    trackAdminEvent(req, {
+      eventType: 'click',
+      targetType: 'phase5',
+      tags: ['phase5_config_update'],
+      metadata: {
+        actor,
+      },
+    });
+    res.json({
+      success: true,
+      data,
+    });
+  })
+);
 // 路由：GET /users/summary。
 router.get(
   '/users/summary',
@@ -778,7 +1491,6 @@ router.get(
       online: 0,
       tokens: 0,
     };
-
     users.forEach((user) => {
       const status = normalizeUserStatus(user);
       if (status === 'active') summary.active += 1;
@@ -787,7 +1499,6 @@ router.get(
       if (user?.online === true) summary.online += 1;
       summary.tokens += resolveTokenCount(user);
     });
-
     res.json({
       success: true,
       data: {
@@ -797,7 +1508,6 @@ router.get(
     });
   })
 );
-
 // 路由：GET /users。
 router.get(
   '/users',
@@ -806,7 +1516,6 @@ router.get(
     const pageSize = toPositiveInt(req.query?.pageSize, 20, 1, MAX_PAGE_SIZE);
     const q = sanitizeText(req.query?.q, 120).toLowerCase();
     const statusFilter = sanitizeText(req.query?.status, 20).toLowerCase();
-
     const users = await readUsersCached();
     const list = users
       .map(toUserSummary)
@@ -823,11 +1532,9 @@ router.get(
         );
       })
       .sort((a, b) => a.uid - b.uid);
-
     const total = list.length;
     const start = (page - 1) * pageSize;
     const items = list.slice(start, start + pageSize);
-
     res.json({
       success: true,
       data: {
@@ -840,7 +1547,6 @@ router.get(
     });
   })
 );
-
 // 路由：GET /users/detail。
 router.get(
   '/users/detail',
@@ -850,19 +1556,155 @@ router.get(
       res.status(400).json({ success: false, message: 'Invalid uid.' });
       return;
     }
-
     const users = await readUsersCached();
     const user = users.find((item) => item.uid === uid);
     if (!user) {
       res.status(404).json({ success: false, message: 'User not found.' });
       return;
     }
-
-    res.json({ success: true, data: toUserDetail(user) });
+    const recoPersona = await getRecoUserPersona(uid);
+    res.json({ success: true, data: toUserDetail(user, { recoPersona }) });
   })
 );
-
 // 路由：POST /users/update。
+router.get(
+  '/social/overview',
+  asyncRoute(async (_req, res) => {
+    const [users, groups] = await Promise.all([readUsersCached(), readGroups()]);
+    const overview = buildSocialOverview({ users, groups });
+    res.json({ success: true, data: overview });
+  })
+);
+router.get(
+  '/social/tree',
+  asyncRoute(async (req, res) => {
+    const uid = Number(req.query?.uid);
+    if (!isValidUid(uid)) {
+      res.status(400).json({ success: false, message: 'Invalid uid.' });
+      return;
+    }
+    const depth = toPositiveInt(req.query?.depth, 2, 1, MAX_SOCIAL_TREE_DEPTH);
+    const includeGroups = toBoolean(req.query?.includeGroups, true);
+    const [users, groups] = await Promise.all([readUsersCached(), readGroups()]);
+    const tree = buildSocialTree({
+      rootUid: uid,
+      depth,
+      includeGroups,
+      users,
+      groups,
+    });
+    if (!tree) {
+      res.status(404).json({ success: false, message: 'User not found.' });
+      return;
+    }
+    trackAdminEvent(req, {
+      eventType: 'impression',
+      targetUid: uid,
+      targetType: 'social_tree',
+      tags: ['social_tree', `depth_${depth}`, includeGroups ? 'with_group' : 'user_only'],
+      metadata: {
+        nodes: Number(tree?.summary?.nodes) || 0,
+        edges: Number(tree?.summary?.edges) || 0,
+      },
+    });
+    res.json({ success: true, data: tree });
+  })
+);
+router.get(
+  '/ops/relationship',
+  asyncRoute(async (req, res) => {
+    const requestedUid = Number(req.query?.uid);
+    const scope = normalizeScope(req.query?.scope);
+    const windowDays = normalizeWindowDays(req.query?.windowDays);
+    const limit = toPositiveInt(req.query?.limit, 20, 1, MAX_RELATIONSHIP_ADMIN_LIMIT);
+    const includeStable = toBoolean(req.query?.includeStable, false);
+    const [users, groups] = await Promise.all([readUsersCached(), readGroups()]);
+    const selector = buildRelationshipViewerSelector(users, groups, requestedUid);
+    const selectedUid = Number(selector.selectedUid) || 0;
+    const selectedUser = users.find((item) => Number(item?.uid) === selectedUid) || null;
+    const generatedAt = new Date().toISOString();
+    if (!selectedUser) {
+      res.json({
+        success: true,
+        data: {
+          enabled: Boolean(isFeatureEnabled('relationshipOps')),
+          available: false,
+          selectedUid: 0,
+          selector,
+          generatedAt,
+          scope,
+          windowDays,
+          summary: {
+            totalCandidates: 0,
+            totalDeclined: 0,
+            inactive7d: 0,
+            privateCount: 0,
+            groupCount: 0,
+          },
+          items: [],
+        },
+      });
+      return;
+    }
+    if (!isFeatureEnabled('relationshipOps')) {
+      res.json({
+        success: true,
+        data: {
+          enabled: false,
+          available: true,
+          selectedUid,
+          selector,
+          generatedAt,
+          scope,
+          windowDays,
+          summary: {
+            totalCandidates: 0,
+            totalDeclined: 0,
+            inactive7d: 0,
+            privateCount: 0,
+            groupCount: 0,
+          },
+          items: [],
+        },
+      });
+      return;
+    }
+    const database = await getChatDatabaseForOps();
+    const snapshot = buildRelationshipOpsSnapshot({
+      database,
+      user: selectedUser,
+      users,
+      groups,
+      options: {
+        scope,
+        windowDays,
+        limit,
+        includeStable,
+      },
+    });
+    trackAdminEvent(req, {
+      eventType: 'impression',
+      targetUid: selectedUid,
+      targetType: 'admin_relationship_ops',
+      tags: ['admin_relationship_ops', scope, 'window_' + windowDays],
+      metadata: {
+        limit,
+        includeStable,
+        items: Array.isArray(snapshot?.items) ? snapshot.items.length : 0,
+      },
+    });
+    res.json({
+      success: true,
+      data: {
+        enabled: true,
+        available: true,
+        selectedUid,
+        selector,
+        ...snapshot,
+      },
+    });
+  })
+);
 router.post(
   '/users/update',
   asyncRoute(async (req, res) => {
@@ -872,7 +1714,6 @@ router.post(
       res.status(400).json({ success: false, message: 'Invalid uid.' });
       return;
     }
-
     if (hasOwn(payload, 'nickname')) {
       const nickname = sanitizeText(payload.nickname, MAX_NICKNAME_LEN + 1);
       if (nickname.length > MAX_NICKNAME_LEN) {
@@ -880,7 +1721,6 @@ router.post(
         return;
       }
     }
-
     if (hasOwn(payload, 'signature')) {
       const signature = sanitizeText(payload.signature, MAX_SIGNATURE_LEN + 1);
       if (signature.length > MAX_SIGNATURE_LEN) {
@@ -888,18 +1728,15 @@ router.post(
         return;
       }
     }
-
     const mutation = await mutateUsers(
       (users) => {
         const index = users.findIndex((item) => item.uid === uid);
         if (index < 0) {
           return { changed: false, result: null };
         }
-
         const current = users[index];
         const next = { ...current };
         let changed = false;
-
         if (hasOwn(payload, 'nickname')) {
           const nickname = sanitizeText(payload.nickname, MAX_NICKNAME_LEN);
           const finalNickname = nickname || next.nickname || next.username;
@@ -908,7 +1745,6 @@ router.post(
             changed = true;
           }
         }
-
         if (hasOwn(payload, 'signature')) {
           const signature = sanitizeText(payload.signature, MAX_SIGNATURE_LEN) || DEFAULT_SIGNATURE;
           if (signature !== next.signature) {
@@ -916,7 +1752,6 @@ router.post(
             changed = true;
           }
         }
-
         if (hasOwn(payload, 'domain')) {
           const domain = sanitizeText(payload.domain, 253);
           if (domain !== String(next.domain || '')) {
@@ -924,7 +1759,6 @@ router.post(
             changed = true;
           }
         }
-
         ['gender', 'birthday', 'country', 'province', 'region'].forEach((field) => {
           if (!hasOwn(payload, field)) return;
           const value = sanitizeText(payload[field], 120);
@@ -933,7 +1767,6 @@ router.post(
             changed = true;
           }
         });
-
         if (hasOwn(payload, 'status')) {
           const status = sanitizeText(payload.status, 20).toLowerCase();
           if (status === 'active') {
@@ -958,7 +1791,6 @@ router.post(
             }
           }
         }
-
         if (hasOwn(payload, 'blocked')) {
           const blocked = Boolean(payload.blocked);
           if (blocked !== Boolean(next.blocked)) {
@@ -966,7 +1798,6 @@ router.post(
             changed = true;
           }
         }
-
         if (next.blocked === true || (typeof next.deletedAt === 'string' && next.deletedAt)) {
           const tokenCount = resolveTokenCount(next);
           if (tokenCount > 0) changed = true;
@@ -976,26 +1807,21 @@ router.post(
           next.token = null;
           next.tokenExpiresAt = null;
         }
-
         if (!changed) {
           return { changed: false, result: toUserSummary(next) };
         }
-
         users[index] = next;
         return { changed: true, result: toUserSummary(next) };
       },
       { defaultChanged: false }
     );
-
     if (!mutation.result) {
       res.status(404).json({ success: false, message: 'User not found.' });
       return;
     }
-
     res.json({ success: true, data: mutation.result });
   })
 );
-
 // 路由：POST /users/revoke-all。
 router.post(
   '/users/revoke-all',
@@ -1005,12 +1831,10 @@ router.post(
       res.status(400).json({ success: false, message: 'Invalid uid.' });
       return;
     }
-
     const mutation = await mutateUsers(
       (users) => {
         const index = users.findIndex((item) => item.uid === uid);
         if (index < 0) return { changed: false, result: null };
-
         const user = users[index];
         const revokedCount = resolveTokenCount(user);
         if (revokedCount <= 0 && user.online !== true) {
@@ -1019,7 +1843,6 @@ router.post(
             result: { uid, revokedCount: 0, user: toUserSummary(user) },
           };
         }
-
         users[index] = {
           ...users[index],
           online: false,
@@ -1027,7 +1850,6 @@ router.post(
           token: null,
           tokenExpiresAt: null,
         };
-
         return {
           changed: true,
           result: { uid, revokedCount, user: toUserSummary(users[index]) },
@@ -1035,16 +1857,13 @@ router.post(
       },
       { defaultChanged: false }
     );
-
     if (!mutation.result) {
       res.status(404).json({ success: false, message: 'User not found.' });
       return;
     }
-
     res.json({ success: true, data: mutation.result });
   })
 );
-
 // 路由：POST /users/soft-delete。
 router.post(
   '/users/soft-delete',
@@ -1054,13 +1873,11 @@ router.post(
       res.status(400).json({ success: false, message: 'Invalid uid.' });
       return;
     }
-
     const restore = Boolean(req.body?.restore);
     const mutation = await mutateUsers(
       (users) => {
         const index = users.findIndex((item) => item.uid === uid);
         if (index < 0) return { changed: false, result: null };
-
         const user = { ...users[index] };
         if (restore) {
           user.deletedAt = '';
@@ -1073,18 +1890,15 @@ router.post(
           user.token = null;
           user.tokenExpiresAt = null;
         }
-
         users[index] = user;
         return { changed: true, result: toUserSummary(user) };
       },
       { defaultChanged: false }
     );
-
     if (!mutation.result) {
       res.status(404).json({ success: false, message: 'User not found.' });
       return;
     }
-
     res.json({ success: true, data: mutation.result });
   })
 );
@@ -1098,7 +1912,6 @@ router.post(
       res.status(400).json({ success: false, message: 'Invalid batch action.' });
       return;
     }
-
     const source = Array.isArray(payload.uids) ? payload.uids : [];
     const uids = Array.from(
       new Set(
@@ -1112,7 +1925,6 @@ router.post(
       res.status(400).json({ success: false, message: 'uids is required.' });
       return;
     }
-
     const nowIso = new Date().toISOString();
     const mutation = await mutateUsers(
       (users) => {
@@ -1138,7 +1950,6 @@ router.post(
       },
       { defaultChanged: false }
     );
-
     res.json({
       success: true,
       data: {
@@ -1151,13 +1962,11 @@ router.post(
     });
   })
 );
-
 router.get(
   '/products/summary',
   asyncRoute(async (req, res) => {
     const lowStockThreshold = toPositiveInt(req.query?.lowStockThreshold, 10, 1, 100000);
     const list = await readProductsCached();
-
     const summary = {
       total: list.length,
       active: 0,
@@ -1170,18 +1979,15 @@ router.get(
       inventoryValue: 0,
       grossRevenue: 0,
     };
-
     list.forEach((item) => {
       const status = normalizeProductStatus(item?.status, 'draft');
       if (status === 'active') summary.active += 1;
       if (status === 'inactive') summary.inactive += 1;
       if (status === 'draft') summary.draft += 1;
       if (status === 'archived') summary.archived += 1;
-
       const stock = Number(item?.stock);
       const sales = Number(item?.sales);
       const price = Number(item?.price);
-
       if (Number.isInteger(stock) && stock >= 0) {
         summary.totalStock += stock;
         if (stock <= lowStockThreshold) {
@@ -1198,7 +2004,6 @@ router.get(
         summary.grossRevenue += price * sales;
       }
     });
-
     res.json({
       success: true,
       data: {
@@ -1209,7 +2014,6 @@ router.get(
     });
   })
 );
-
 // 路由：GET /products。
 router.get(
   '/products',
@@ -1218,7 +2022,6 @@ router.get(
     const pageSize = toPositiveInt(req.query?.pageSize, 20, 1, MAX_PAGE_SIZE);
     const q = sanitizeText(req.query?.q, 120).toLowerCase();
     const statusFilter = sanitizeText(req.query?.status, 20).toLowerCase();
-
     const list = await readProductsCached();
     const filtered = list
       .filter((item) => {
@@ -1234,11 +2037,9 @@ router.get(
         );
       })
       .sort((a, b) => String(b.updatedAt || '').localeCompare(String(a.updatedAt || '')));
-
     const total = filtered.length;
     const start = (page - 1) * pageSize;
     const items = filtered.slice(start, start + pageSize);
-
     res.json({
       success: true,
       data: {
@@ -1251,7 +2052,6 @@ router.get(
     });
   })
 );
-
 // 路由：POST /products/create。
 router.post(
   '/products/create',
@@ -1262,13 +2062,11 @@ router.post(
       res.status(400).json({ success: false, message: 'Product name is required.' });
       return;
     }
-
     const mutation = await mutateProducts(
       (products) => {
         if (products.length >= MAX_PRODUCTS) {
           return { changed: false, result: { error: 'Product limit reached.' } };
         }
-
         const nowIso = new Date().toISOString();
         const id = getNextProductId(products);
         const normalized = normalizeProductRecord(
@@ -1282,17 +2080,14 @@ router.post(
           },
           { fallbackId: id, nowIso }
         );
-
         if (!normalized) {
           return { changed: false, result: { error: 'Invalid product payload.' } };
         }
-
         products.unshift(normalized);
         return { changed: true, result: normalized };
       },
       { defaultChanged: false }
     );
-
     if (mutation.result?.error) {
       res.status(400).json({ success: false, message: mutation.result.error });
       return;
@@ -1301,11 +2096,9 @@ router.post(
       res.status(500).json({ success: false, message: 'Create product failed.' });
       return;
     }
-
     res.json({ success: true, data: mutation.result });
   })
 );
-
 // 路由：POST /products/update。
 router.post(
   '/products/update',
@@ -1316,16 +2109,13 @@ router.post(
       res.status(400).json({ success: false, message: 'Invalid product id.' });
       return;
     }
-
     const mutation = await mutateProducts(
       (products) => {
         const index = products.findIndex((item) => item.id === id);
         if (index < 0) return { changed: false, result: null };
-
         const current = products[index];
         const next = { ...current };
         let changed = false;
-
         if (hasOwn(payload, 'name')) {
           const name = sanitizeText(payload.name, 120);
           if (!name) return { changed: false, result: { error: 'Product name is required.' } };
@@ -1369,7 +2159,6 @@ router.post(
             changed = true;
           }
         }
-
         if (hasOwn(payload, 'price')) {
           const priceRaw = Number(payload.price);
           const price = Number.isFinite(priceRaw) && priceRaw >= 0 ? priceRaw : 0;
@@ -1402,17 +2191,14 @@ router.post(
             changed = true;
           }
         }
-
         if (changed) {
           next.updatedAt = new Date().toISOString();
           products[index] = next;
         }
-
         return { changed, result: next };
       },
       { defaultChanged: false }
     );
-
     if (mutation.result?.error) {
       res.status(400).json({ success: false, message: mutation.result.error });
       return;
@@ -1421,11 +2207,9 @@ router.post(
       res.status(404).json({ success: false, message: 'Product not found.' });
       return;
     }
-
     res.json({ success: true, data: mutation.result });
   })
 );
-
 // 路由：DELETE /products/delete。
 router.delete(
   '/products/delete',
@@ -1435,7 +2219,6 @@ router.delete(
       res.status(400).json({ success: false, message: 'Invalid product id.' });
       return;
     }
-
     const mutation = await mutateProducts(
       (products) => {
         const index = products.findIndex((item) => item.id === id);
@@ -1445,16 +2228,13 @@ router.delete(
       },
       { defaultChanged: false }
     );
-
     if (!mutation.result) {
       res.status(404).json({ success: false, message: 'Product not found.' });
       return;
     }
-
     res.json({ success: true, data: mutation.result });
   })
 );
-
 // 路由：GET /bottlenecks。
 router.get(
   '/messages/summary',
@@ -1475,7 +2255,56 @@ router.get(
     });
   })
 );
-
+router.get(
+  '/risk/overview',
+  asyncRoute(async (req, res) => {
+    const limit = toPositiveInt(req.query?.limit, 120, 10, 500);
+    const overview = await getRiskAdminOverview({ limit });
+    res.json({
+      success: true,
+      data: {
+        featureEnabled: isFeatureEnabled('riskGuard'),
+        profileRuntime: getRiskProfileRuntimeStats(),
+        ...overview,
+      },
+    });
+  })
+);
+router.get(
+  '/reco/overview',
+  asyncRoute(async (req, res) => {
+    const limit = toPositiveInt(req.query?.limit, 180, 20, 600);
+    const windowHours = toPositiveInt(req.query?.windowHours, 24, 1, 24 * 30);
+    const data = await getRecoAdminOverview({ limit, windowHours });
+    res.json({
+      success: true,
+      data,
+    });
+  })
+);
+router.post(
+  '/reco/config',
+  asyncRoute(async (req, res) => {
+    const actor =
+      sanitizeText(req?.admin?.username, 80) ||
+      sanitizeText(req.headers?.['x-admin-user'], 80) ||
+      'admin';
+    const patch = req.body && typeof req.body === 'object' ? req.body : {};
+    const data = await updateRecoAdminConfig(patch, { actor });
+    trackAdminEvent(req, {
+      eventType: 'click',
+      targetType: 'reco_config',
+      tags: ['reco_admin_config_update'],
+      metadata: {
+        actor,
+      },
+    });
+    res.json({
+      success: true,
+      data,
+    });
+  })
+);
 router.get(
   '/messages/search',
   asyncRoute(async (req, res) => {
@@ -1509,7 +2338,6 @@ router.get(
     });
   })
 );
-
 router.get(
   '/messages/detail',
   asyncRoute(async (req, res) => {
@@ -1532,7 +2360,6 @@ router.get(
     });
   })
 );
-
 router.post(
   '/messages/review',
   asyncRoute(async (req, res) => {
@@ -1547,7 +2374,6 @@ router.post(
       res.status(404).json({ success: false, message: 'Message not found.' });
       return;
     }
-
     const status = normalizeMessageReviewStatus(payload.status);
     if (!status) {
       res.status(400).json({ success: false, message: 'Invalid review status.' });
@@ -1560,7 +2386,6 @@ router.post(
     const tags = normalizeMessageReviewTags(payload.tags);
     const reviewer = sanitizeText(payload.reviewer || req.headers['x-admin-user'], 64);
     const reviewedAt = new Date().toISOString();
-
     const mutation = await mutateMessageReviews(
       (working) => {
         const records = working.records && typeof working.records === 'object' ? working.records : {};
@@ -1581,7 +2406,33 @@ router.post(
       },
       { defaultChanged: false }
     );
-
+    if (status === 'flagged' || status === 'blocked' || status === 'deleted') {
+      trackAdminEvent(req, {
+        eventType: 'report',
+        targetUid: Number(message?.senderUid) || 0,
+        targetType: 'message',
+        tags: ['admin_review', status],
+        reason: reason || status,
+        metadata: {
+          messageId,
+          riskLevel,
+        },
+      });
+    }
+    if (riskLevel === 'high' || riskLevel === 'medium') {
+      trackAdminEvent(req, {
+        eventType: 'risk_hit',
+        targetUid: Number(message?.senderUid) || 0,
+        targetType: 'message',
+        tags: ['admin_review', riskLevel],
+        reason: reason || 'risk_hit',
+        metadata: {
+          messageId,
+          status,
+          riskLevel,
+        },
+      });
+    }
     res.json({
       success: true,
       data: {
@@ -1591,7 +2442,6 @@ router.post(
     });
   })
 );
-
 router.post(
   '/messages/delete',
   asyncRoute(async (req, res) => {
@@ -1606,13 +2456,11 @@ router.post(
       res.status(404).json({ success: false, message: 'Message not found.' });
       return;
     }
-
     const reason = sanitizeText(payload.reason, MAX_MESSAGE_REVIEW_NOTE_LEN) || 'Deleted by admin';
     const reviewer = sanitizeText(payload.reviewer || req.headers['x-admin-user'], 64);
     const reviewedAt = new Date().toISOString();
     const inspection = inspectMessageRisk(deletedMessage);
     const riskLevel = inspection.autoRiskLevel || 'low';
-
     const mutation = await mutateMessageReviews(
       (working) => {
         const records = working.records && typeof working.records === 'object' ? working.records : {};
@@ -1633,7 +2481,29 @@ router.post(
       },
       { defaultChanged: false }
     );
-
+    trackAdminEvent(req, {
+      eventType: 'report',
+      targetUid: Number(deletedMessage?.senderUid) || 0,
+      targetType: 'message',
+      tags: ['admin_delete'],
+      reason,
+      metadata: {
+        messageId,
+      },
+    });
+    if (riskLevel === 'high' || riskLevel === 'medium') {
+      trackAdminEvent(req, {
+        eventType: 'risk_hit',
+        targetUid: Number(deletedMessage?.senderUid) || 0,
+        targetType: 'message',
+        tags: ['admin_delete', riskLevel],
+        reason,
+        metadata: {
+          messageId,
+          riskLevel,
+        },
+      });
+    }
     res.json({
       success: true,
       data: {
@@ -1643,7 +2513,6 @@ router.post(
     });
   })
 );
-
 router.get(
   '/bottlenecks',
   asyncRoute(async (req, res) => {
@@ -1653,15 +2522,12 @@ router.get(
     const memory = process.memoryUsage();
     const heapUsageRatio =
       memory.heapTotal > 0 ? Number((memory.heapUsed / memory.heapTotal).toFixed(4)) : 0;
-
     const counterValue = (name) =>
       (snapshot.counters || [])
         .filter((entry) => entry?.name === name)
         .reduce((sum, entry) => sum + (Number(entry?.value) || 0), 0);
-
     const wsBackpressureDrops = counterValue('ws_backpressure_disconnect_total');
     const wsMessageErrors = counterValue('ws_message_error_total');
-
     const recommendations = [];
     if (slowEndpoints[0] && slowEndpoints[0].avgMs >= 350) {
       recommendations.push(
@@ -1691,7 +2557,6 @@ router.get(
     if (!recommendations.length) {
       recommendations.push('No obvious bottleneck in current window.');
     }
-
     res.json({
       success: true,
       data: {
@@ -1713,5 +2578,4 @@ router.get(
     });
   })
 );
-
 export default router;

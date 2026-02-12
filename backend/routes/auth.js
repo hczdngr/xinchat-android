@@ -9,12 +9,13 @@ import path from 'path';
 import crypto from 'crypto';
 import { fileURLToPath } from 'url';
 import { isTokenRevoked, revokeToken } from '../tokenRevocation.js';
+import { atomicWriteFile, createSerialQueue } from '../utils/filePersistence.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const DATA_DIR = path.join(__dirname, '..', 'data');
 const USERS_PATH = path.join(DATA_DIR, 'users.json');
-const USERS_PATH_TMP = path.join(DATA_DIR, 'users.json.tmp');
+const USERS_LOCK_PATH = path.join(DATA_DIR, 'users.json.lock');
 const UID_START = 100000000;
 const TOKEN_TTL_DAYS = 181;
 
@@ -243,10 +244,14 @@ const authenticate = async (req, res, next) => {
 };
 
 const USERS_CACHE_TTL_MS = parsePositiveInt(process.env.USERS_CACHE_TTL_MS, 5000, 200);
+const USERS_WRITE_QUEUE_MAX = parsePositiveInt(process.env.USERS_WRITE_QUEUE_MAX, 2000, 20);
 let cachedUsers = null;
 let cachedUsersAt = 0;
 let usersLoadInFlight = null;
-let writeUsersQueue = Promise.resolve();
+const usersWriteQueue = createSerialQueue({
+  maxPending: USERS_WRITE_QUEUE_MAX,
+  overflowError: 'users_write_queue_overflow',
+});
 let ensureStorageInFlight = null;
 let storageReady = false;
 let tokenIndexCache = new Map();
@@ -303,16 +308,25 @@ const setUsersCache = (users, timestamp = Date.now()) => {
 
 // queueUsersWriteTask：将任务按顺序排队处理。
 const queueUsersWriteTask = async (task) => {
-  const run = writeUsersQueue.then(task);
-  writeUsersQueue = run.catch(() => {});
-  return run;
+  return usersWriteQueue.enqueue(task);
 };
 
 // persistUsersSnapshot?处理 persistUsersSnapshot 相关逻辑。
 const persistUsersSnapshot = async (snapshot) => {
-  await fs.writeFile(USERS_PATH_TMP, JSON.stringify(snapshot, null, 2), 'utf-8');
-  await fs.rename(USERS_PATH_TMP, USERS_PATH);
-  setUsersCache(snapshot, Date.now());
+  const payload = JSON.stringify(snapshot, null, 2);
+  try {
+    await atomicWriteFile(USERS_PATH, payload, {
+      lockPath: USERS_LOCK_PATH,
+      retry: {
+        attempts: 120,
+        baseDelayMs: 10,
+        maxDelayMs: 120,
+      },
+    });
+    setUsersCache(snapshot, Date.now());
+  } catch (writeError) {
+    throw writeError || new Error('persist_users_failed');
+  }
 };
 
 // ensureStorage：确保前置条件与资源可用。

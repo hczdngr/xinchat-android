@@ -1,9 +1,12 @@
-/**
- * 模块说明：聊天路由模块：处理消息、上传、贴纸与会话读取逻辑。
+﻿/**
+ * Chat routes:
+ * - message send/fetch
+ * - media upload helpers
+ * - sticker storage and overview stats
  */
 
 
-﻿import express from 'express';
+import express from 'express';
 import fs from 'fs/promises';
 import { createWriteStream } from 'fs';
 import path from 'path';
@@ -12,6 +15,19 @@ import { fileURLToPath } from 'url';
 import initSqlJs from 'sql.js';
 import { createAuthenticateMiddleware, extractToken } from './session.js';
 import { getGroupById, readGroups } from './groups.js';
+import { createRequestEvent, trackEventSafe } from '../events/eventLogger.js';
+import { isFeatureEnabled } from '../featureFlags.js';
+import { createMemoryRateLimiter } from '../assistant/rateLimiter.js';
+import { generateReplySuggestions } from '../assistant/replyAssistantService.js';
+import {
+  assessOutgoingTextRisk,
+  buildConversationRiskProfile,
+  recordRiskDecision,
+} from '../risk/scorer.js';
+import { appendRiskAppeal, upsertRiskIgnore } from '../risk/stateStore.js';
+import { buildOverviewInlineSummary } from '../summary/service.js';
+import { decideConversationRanking, recordRecoFeedback } from '../reco/index.js';
+import { atomicWriteFile } from '../utils/filePersistence.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -23,21 +39,81 @@ const STICKER_DIR = path.join(DATA_DIR, 'stickers');
 const STICKER_INDEX_PATH = path.join(STICKER_DIR, 'index.json');
 const CHAT_JSON_PATH = path.join(DATA_DIR, 'chat.json');
 const DB_PATH = path.join(DATA_DIR, 'chat.sqlite');
-const DB_TMP_PATH = path.join(DATA_DIR, 'chat.sqlite.tmp');
+const DB_LOCK_PATH = path.join(DATA_DIR, 'chat.sqlite.lock');
+const STICKER_INDEX_LOCK_PATH = path.join(STICKER_DIR, 'index.lock');
+const USERFILE_INDEX_LOCK_PATH = path.join(USERFILE_DIR, 'index.lock');
 
 const router = express.Router();
 const ALLOWED_TYPES = new Set(['image', 'video', 'voice', 'text', 'gif', 'file', 'card', 'call']);
 const ALLOWED_TARGET_TYPES = new Set(['private', 'group']);
 const MAX_LIMIT = 500;
 const DEFAULT_LIMIT = 50;
-const FLUSH_INTERVAL_MS = 250;
+const FLUSH_DEBOUNCE_MS = Math.max(
+  50,
+  Number.parseInt(String(process.env.CHAT_DB_FLUSH_DEBOUNCE_MS || '450'), 10) || 450
+);
+const FLUSH_MAX_DELAY_MS = Math.max(
+  FLUSH_DEBOUNCE_MS,
+  Number.parseInt(String(process.env.CHAT_DB_FLUSH_MAX_DELAY_MS || '2200'), 10) || 2200
+);
 let chatNotifier = null;
+const replySuggestLimiter = createMemoryRateLimiter({
+  windowMs: Number.parseInt(String(process.env.REPLY_SUGGEST_RATE_WINDOW_MS || '60000'), 10) || 60_000,
+  max: Number.parseInt(String(process.env.REPLY_SUGGEST_RATE_MAX || '120'), 10) || 120,
+});
+const chatRiskQueryLimiter = createMemoryRateLimiter({
+  windowMs: Number.parseInt(String(process.env.RISK_PROFILE_RATE_WINDOW_MS || '60000'), 10) || 60_000,
+  max: Number.parseInt(String(process.env.RISK_PROFILE_RATE_MAX || '90'), 10) || 90,
+});
+const chatRiskIgnoreLimiter = createMemoryRateLimiter({
+  windowMs: Number.parseInt(String(process.env.RISK_IGNORE_RATE_WINDOW_MS || '60000'), 10) || 60_000,
+  max: Number.parseInt(String(process.env.RISK_IGNORE_RATE_MAX || '30'), 10) || 30,
+});
+const chatRiskAppealLimiter = createMemoryRateLimiter({
+  windowMs: Number.parseInt(String(process.env.RISK_APPEAL_RATE_WINDOW_MS || '60000'), 10) || 60_000,
+  max: Number.parseInt(String(process.env.RISK_APPEAL_RATE_MAX || '20'), 10) || 20,
+});
 
-// isValidType：判断条件是否成立。
+const trackRouteEvent = (req, payload) => {
+  void trackEventSafe(
+    createRequestEvent(req, {
+      actorUid: Number(req?.auth?.user?.uid) || 0,
+      ...payload,
+    })
+  );
+};
+
 const isValidType = (value) => typeof value === 'string' && ALLOWED_TYPES.has(value);
-// isValidTargetType：判断条件是否成立。
 const isValidTargetType = (value) =>
   typeof value === 'string' && ALLOWED_TARGET_TYPES.has(value);
+const toBoolean = (value, fallback = false) => {
+  if (typeof value === 'boolean') return value;
+  const normalized = String(value || '').trim().toLowerCase();
+  if (!normalized) return fallback;
+  if (normalized === '1' || normalized === 'true' || normalized === 'yes' || normalized === 'on') {
+    return true;
+  }
+  if (normalized === '0' || normalized === 'false' || normalized === 'no' || normalized === 'off') {
+    return false;
+  }
+  return fallback;
+};
+const makeReplySuggestRateKey = (req) => {
+  const uid = Number(req?.auth?.user?.uid) || 0;
+  const ipRaw = String(
+    req?.headers?.['x-forwarded-for'] || req?.socket?.remoteAddress || req?.ip || ''
+  );
+  const ip = ipRaw.split(',')[0]?.trim() || '';
+  return `${uid || ip || 'unknown'}:reply_suggest`;
+};
+const makeRiskRateKey = (req, scope = 'risk') => {
+  const uid = Number(req?.auth?.user?.uid) || 0;
+  const ipRaw = String(
+    req?.headers?.['x-forwarded-for'] || req?.socket?.remoteAddress || req?.ip || ''
+  );
+  const ip = ipRaw.split(',')[0]?.trim() || '';
+  return `${uid || ip || 'unknown'}:${scope}`;
+};
 const DATA_IMAGE_RE = /^data:(image\/(png|jpe?g|gif|webp));base64,/i;
 const IMAGE_EXTS = ['png', 'jpg', 'jpeg', 'gif', 'webp'];
 const DATA_URL_RE = /^data:([^;]+);base64,/i;
@@ -53,7 +129,6 @@ const MAX_DEVICE_ID_LENGTH = 128;
 const MAX_DEVICE_CREATED_AT_FUTURE_DRIFT_MS = 5 * 60 * 1000;
 const MAX_UID = Number.parseInt(String(process.env.MAX_UID || '2147483647'), 10);
 const SAFE_MAX_UID = Number.isInteger(MAX_UID) && MAX_UID > 0 ? MAX_UID : 2147483647;
-// isValidUid：判断条件是否成立。
 const isValidUid = (value) =>
   Number.isInteger(value) && value > 0 && value <= SAFE_MAX_UID;
 
@@ -62,6 +137,8 @@ let db = null;
 let flushTimer = null;
 let flushInFlight = false;
 let pendingFlush = false;
+let flushWindowStartAt = 0;
+let dbDirtyCount = 0;
 let chatStorageReady = false;
 let chatStoragePromise = null;
 let stickerStoreLoaded = false;
@@ -72,8 +149,11 @@ let stickerStoreCache = {
   updatedAt: '',
 };
 let stickerStoreWriteChain = Promise.resolve();
+let userfileIndexLoaded = false;
+let userfileIndexCache = {};
+let userfileIndexWriteChain = Promise.resolve();
+const preparedStatements = new Map();
 
-// parseImageDataUrl：解析并校验输入值。
 const parseImageDataUrl = (value) => {
   if (typeof value !== 'string') return null;
   const match = value.match(DATA_IMAGE_RE);
@@ -91,7 +171,6 @@ const parseImageDataUrl = (value) => {
   }
 };
 
-// parseDataUrl：解析并校验输入值。
 const parseDataUrl = (value) => {
   if (typeof value !== 'string') return null;
   const match = value.match(DATA_URL_RE);
@@ -108,7 +187,6 @@ const parseDataUrl = (value) => {
   }
 };
 
-// fileExists?处理 fileExists 相关逻辑。
 const fileExists = async (targetPath) => {
   try {
     await fs.access(targetPath);
@@ -118,24 +196,43 @@ const fileExists = async (targetPath) => {
   }
 };
 
-// readUserfileIndex：读取持久化或缓存数据。
-const readUserfileIndex = async () => {
+const clonePlain = (value, fallback = {}) => {
   try {
-    const raw = await fs.readFile(USERFILE_INDEX_PATH, 'utf-8');
-    const parsed = JSON.parse(raw);
-    return parsed && typeof parsed === 'object' ? parsed : {};
+    return JSON.parse(JSON.stringify(value ?? fallback));
   } catch {
-    return {};
+    return Array.isArray(fallback) ? [] : {};
   }
 };
 
-// writeUserfileIndex：写入持久化数据。
-const writeUserfileIndex = async (index) => {
-  await fs.mkdir(USERFILE_DIR, { recursive: true });
-  await fs.writeFile(USERFILE_INDEX_PATH, JSON.stringify(index || {}, null, 2));
+const readUserfileIndex = async () => {
+  if (userfileIndexLoaded) {
+    return clonePlain(userfileIndexCache, {});
+  }
+  try {
+    const raw = await fs.readFile(USERFILE_INDEX_PATH, 'utf-8');
+    const parsed = JSON.parse(raw);
+    userfileIndexCache = parsed && typeof parsed === 'object' ? parsed : {};
+  } catch {
+    userfileIndexCache = {};
+  }
+  userfileIndexLoaded = true;
+  return clonePlain(userfileIndexCache, {});
 };
 
-// normalizeStickerStore：归一化外部输入。
+const writeUserfileIndex = async (index) => {
+  const snapshot = index && typeof index === 'object' ? index : {};
+  userfileIndexCache = clonePlain(snapshot, {});
+  userfileIndexLoaded = true;
+  userfileIndexWriteChain = userfileIndexWriteChain
+    .catch(() => undefined)
+    .then(() =>
+      atomicWriteFile(USERFILE_INDEX_PATH, JSON.stringify(userfileIndexCache, null, 2), {
+        lockPath: USERFILE_INDEX_LOCK_PATH,
+      })
+    );
+  await userfileIndexWriteChain;
+};
+
 const normalizeStickerStore = (input) => {
   const source = input && typeof input === 'object' ? input : {};
   const byHashSource = source.byHash && typeof source.byHash === 'object' ? source.byHash : {};
@@ -195,7 +292,6 @@ const normalizeStickerStore = (input) => {
   };
 };
 
-// ensureStickerStore：确保前置条件与资源可用。
 const ensureStickerStore = async () => {
   if (stickerStoreLoaded) return stickerStoreCache;
   try {
@@ -208,7 +304,6 @@ const ensureStickerStore = async () => {
   return stickerStoreCache;
 };
 
-// persistStickerStore?处理 persistStickerStore 相关逻辑。
 const persistStickerStore = async () => {
   await fs.mkdir(STICKER_DIR, { recursive: true });
   const next = {
@@ -216,12 +311,11 @@ const persistStickerStore = async () => {
     updatedAt: new Date().toISOString(),
   };
   stickerStoreCache = next;
-  const tempPath = `${STICKER_INDEX_PATH}.tmp`;
-  await fs.writeFile(tempPath, JSON.stringify(next, null, 2), 'utf-8');
-  await fs.rename(tempPath, STICKER_INDEX_PATH);
+  await atomicWriteFile(STICKER_INDEX_PATH, JSON.stringify(next, null, 2), {
+    lockPath: STICKER_INDEX_LOCK_PATH,
+  });
 };
 
-// queueStickerStorePersist：将任务按顺序排队处理。
 const queueStickerStorePersist = async () => {
   stickerStoreWriteChain = stickerStoreWriteChain
     .catch(() => undefined)
@@ -229,7 +323,6 @@ const queueStickerStorePersist = async () => {
   await stickerStoreWriteChain;
 };
 
-// getUserStickerList：获取并返回目标数据。
 const getUserStickerList = (uid) => {
   const store = stickerStoreCache;
   const userEntry = store.users[String(uid)];
@@ -242,7 +335,6 @@ const getUserStickerList = (uid) => {
   return list;
 };
 
-// upsertUserSticker?处理 upsertUserSticker 相关逻辑。
 const upsertUserSticker = async ({ uid, hash, ext, mime, size, url, skipPersist = false }) => {
   await ensureStickerStore();
   const now = new Date().toISOString();
@@ -251,7 +343,7 @@ const upsertUserSticker = async ({ uid, hash, ext, mime, size, url, skipPersist 
   const safeHash = String(hash || '').trim();
   const safeUrl = String(url || '').trim();
   if (!safeHash || !safeUrl || !ALLOWED_STICKER_EXTS.has(safeExt)) {
-    throw new Error('贴纸格式无效。');
+    throw new Error('Invalid sticker format.');
   }
   const existing = stickerStoreCache.byHash[safeHash];
   stickerStoreCache.byHash[safeHash] = {
@@ -284,7 +376,6 @@ const upsertUserSticker = async ({ uid, hash, ext, mime, size, url, skipPersist 
   return stickerStoreCache.byHash[safeHash];
 };
 
-// pruneUserfileIndex：清理无效或过期数据。
 const pruneUserfileIndex = async (index) => {
   const next = { ...(index || {}) };
   const entries = Object.entries(next);
@@ -300,14 +391,12 @@ const pruneUserfileIndex = async (index) => {
   return next;
 };
 
-// sanitizeFilename：清洗不可信输入。
 const sanitizeFilename = (value) => {
   const base = path.basename(String(value || '').trim());
   if (!base) return '';
   return base.replace(/[\\/:*?"<>|]+/g, '_');
 };
 
-// guessExtension?处理 guessExtension 相关逻辑。
 const guessExtension = (name, mime) => {
   const extFromName = path.extname(name || '').slice(1).toLowerCase();
   if (extFromName) return extFromName;
@@ -321,7 +410,6 @@ const guessExtension = (name, mime) => {
   return map[mime] || 'bin';
 };
 
-// resolvePathWithinRoot：解析并确定最终值。
 const resolvePathWithinRoot = (rootDir, relativePath) => {
   if (typeof relativePath !== 'string' || !relativePath.trim()) return '';
   if (relativePath.includes('\0')) return '';
@@ -331,7 +419,6 @@ const resolvePathWithinRoot = (rootDir, relativePath) => {
   return resolved.startsWith(`${root}${path.sep}`) ? resolved : '';
 };
 
-// cleanupUserFiles?处理 cleanupUserFiles 相关逻辑。
 const cleanupUserFiles = async () => {
   const now = Date.now();
   await fs.mkdir(USERFILE_DIR, { recursive: true });
@@ -359,7 +446,6 @@ const cleanupUserFiles = async () => {
   await pruneUserfileIndex(index);
 };
 
-// maybeCleanupUserFiles?处理 maybeCleanupUserFiles 相关逻辑。
 const maybeCleanupUserFiles = async () => {
   const now = Date.now();
   if (now - lastCleanupAt < CLEANUP_INTERVAL_MS) return;
@@ -367,7 +453,6 @@ const maybeCleanupUserFiles = async () => {
   await cleanupUserFiles();
 };
 
-// buildFileMeta：构建对外输出数据。
 const buildFileMeta = (name, size, mime) => {
   const uploadedAt = new Date().toISOString();
   const expiresAt = new Date(Date.now() + FILE_TTL_MS).toISOString();
@@ -380,7 +465,6 @@ const buildFileMeta = (name, size, mime) => {
   };
 };
 
-// storeUserFileBuffer?处理 storeUserFileBuffer 相关逻辑。
 const storeUserFileBuffer = async (buffer, senderUid, name, mime) => {
   const hash = crypto.createHash('sha256').update(buffer).digest('hex');
   const safeBase = sanitizeFilename(name) || 'file';
@@ -411,17 +495,15 @@ const storeUserFileBuffer = async (buffer, senderUid, name, mime) => {
   return { filename, hash };
 };
 
-// storeUserFileFromPath?处理 storeUserFileFromPath 相关逻辑。
 const storeUserFileFromPath = async (sourcePath, senderUid, name, mime) => {
   const stat = await fs.stat(sourcePath);
   if (stat.size > MAX_FILE_BYTES) {
-    throw new Error('文件过大。');
+    throw new Error('File is too large.');
   }
   const buffer = await fs.readFile(sourcePath);
   return storeUserFileBuffer(buffer, senderUid, name, mime);
 };
 
-// storeImageBuffer?处理 storeImageBuffer 相关逻辑。
 const storeImageBuffer = async (buffer, ext) => {
   const hash = crypto.createHash('sha256').update(buffer).digest('hex');
   const filename = `${hash}.${ext}`;
@@ -437,7 +519,6 @@ const storeImageBuffer = async (buffer, ext) => {
   return { filename, hash };
 };
 
-// getImageExtFromMime：获取并返回目标数据。
 const getImageExtFromMime = (mime) => {
   const map = {
     'image/png': 'png',
@@ -449,7 +530,6 @@ const getImageExtFromMime = (mime) => {
   return map[String(mime || '').toLowerCase()] || '';
 };
 
-// readStreamToFile：读取持久化或缓存数据。
 const readStreamToFile = (req, tempPath, maxBytes) =>
   new Promise((resolve, reject) => {
     let size = 0;
@@ -467,7 +547,7 @@ const readStreamToFile = (req, tempPath, maxBytes) =>
       size += chunk.length;
       if (size > maxBytes) {
         req.destroy();
-        cleanup(new Error('文件过大。'));
+        cleanup(new Error('File is too large.'));
         return;
       }
       hash.update(chunk);
@@ -482,7 +562,6 @@ const readStreamToFile = (req, tempPath, maxBytes) =>
     req.pipe(out);
   });
 
-// readStreamToBuffer：读取持久化或缓存数据。
 const readStreamToBuffer = (req, maxBytes) =>
   new Promise((resolve, reject) => {
     let size = 0;
@@ -491,7 +570,7 @@ const readStreamToBuffer = (req, maxBytes) =>
       size += chunk.length;
       if (size > maxBytes) {
         req.destroy();
-        reject(new Error('文件过大。'));
+        reject(new Error('File is too large.'));
         return;
       }
       chunks.push(chunk);
@@ -502,7 +581,6 @@ const readStreamToBuffer = (req, maxBytes) =>
     });
   });
 
-// findImageUrlByHash：查找目标记录。
 const findImageUrlByHash = async (hash, baseUrl) => {
   if (!hash) return '';
   for (const ext of IMAGE_EXTS) {
@@ -515,7 +593,6 @@ const findImageUrlByHash = async (hash, baseUrl) => {
   return '';
 };
 
-// getSqlModule：获取并返回目标数据。
 const getSqlModule = async () => {
   if (sqlModule) {
     return sqlModule;
@@ -526,13 +603,113 @@ const getSqlModule = async () => {
   return sqlModule;
 };
 
-// openDb?处理 openDb 相关逻辑。
+const resetPreparedStatements = () => {
+  preparedStatements.forEach((stmt) => {
+    try {
+      stmt.free();
+    } catch {
+      // ignore release errors
+    }
+  });
+  preparedStatements.clear();
+};
+
+const getPreparedStatement = (database, key, sql) => {
+  if (!database) {
+    throw new Error('database_not_ready');
+  }
+  const cached = preparedStatements.get(key);
+  if (cached) {
+    try {
+      cached.reset();
+      return cached;
+    } catch {
+      preparedStatements.delete(key);
+      try {
+        cached.free();
+      } catch {
+        // ignore release errors
+      }
+    }
+  }
+  const stmt = database.prepare(sql);
+  preparedStatements.set(key, stmt);
+  return stmt;
+};
+
+const rebuildPreparedStatement = (database, key, sql) => {
+  const current = preparedStatements.get(key);
+  if (current) {
+    try {
+      current.free();
+    } catch {
+      // ignore release errors
+    }
+    preparedStatements.delete(key);
+  }
+  const next = database.prepare(sql);
+  preparedStatements.set(key, next);
+  return next;
+};
+
+const withPreparedStatementRetry = (database, key, sql, runner) => {
+  let stmt = getPreparedStatement(database, key, sql);
+  try {
+    return runner(stmt);
+  } catch {
+    stmt = rebuildPreparedStatement(database, key, sql);
+    return runner(stmt);
+  }
+};
+
+const queryOnePrepared = (database, key, sql, params = []) => {
+  return withPreparedStatementRetry(database, key, sql, (stmt) => {
+    stmt.reset();
+    stmt.bind(Array.isArray(params) ? params : []);
+    let row = null;
+    if (stmt.step()) {
+      row = stmt.getAsObject();
+    }
+    stmt.reset();
+    return row;
+  });
+};
+
+const querySingleNumberPrepared = (database, key, sql, params = []) => {
+  const row = queryOnePrepared(database, key, sql, params);
+  const first = row ? Object.values(row)[0] : 0;
+  const parsed = Number(first);
+  return Number.isFinite(parsed) ? parsed : 0;
+};
+
+const executePrepared = (database, key, sql, params = []) => {
+  withPreparedStatementRetry(database, key, sql, (stmt) => {
+    stmt.reset();
+    stmt.run(Array.isArray(params) ? params : []);
+    stmt.reset();
+    return undefined;
+  });
+};
+
+const queryRowsPrepared = (database, key, sql, params = []) =>
+  withPreparedStatementRetry(database, key, sql, (stmt) => {
+    stmt.reset();
+    stmt.bind(Array.isArray(params) ? params : []);
+    const rows = [];
+    while (stmt.step()) {
+      rows.push(stmt.getAsObject());
+    }
+    stmt.reset();
+    return rows;
+  });
+
 const openDb = async () => {
   if (db) {
     return db;
   }
   await fs.mkdir(DATA_DIR, { recursive: true });
   const SQL = await getSqlModule();
+  resetPreparedStatements();
   try {
     const file = await fs.readFile(DB_PATH);
     db = new SQL.Database(new Uint8Array(file));
@@ -554,6 +731,12 @@ const openDb = async () => {
       ON messages (targetType, senderUid, targetUid, createdAtMs);
     CREATE INDEX IF NOT EXISTS idx_messages_group
       ON messages (targetType, targetUid, createdAtMs);
+    CREATE INDEX IF NOT EXISTS idx_messages_private_reverse
+      ON messages (targetType, targetUid, senderUid, createdAtMs DESC);
+    CREATE INDEX IF NOT EXISTS idx_messages_group_type_time
+      ON messages (targetType, targetUid, type, createdAtMs DESC);
+    CREATE INDEX IF NOT EXISTS idx_messages_sender_time
+      ON messages (senderUid, createdAtMs DESC);
     CREATE TABLE IF NOT EXISTS chat_delete_cutoffs (
       uid INTEGER NOT NULL,
       deviceId TEXT NOT NULL,
@@ -578,9 +761,8 @@ const openDb = async () => {
   return db;
 };
 
-// flushDb：将内存状态刷入磁盘。
 const flushDb = async () => {
-  if (!db) {
+  if (!db || dbDirtyCount <= 0) {
     return;
   }
   if (flushInFlight) {
@@ -588,36 +770,63 @@ const flushDb = async () => {
     return;
   }
   flushInFlight = true;
+  const dirtySnapshot = dbDirtyCount;
+  dbDirtyCount = 0;
   try {
     const data = db.export();
-    await fs.writeFile(DB_TMP_PATH, Buffer.from(data));
-    await fs.rename(DB_TMP_PATH, DB_PATH);
+    await atomicWriteFile(DB_PATH, Buffer.from(data), {
+      encoding: null,
+      lockPath: DB_LOCK_PATH,
+      retry: {
+        attempts: 120,
+        baseDelayMs: 10,
+        maxDelayMs: 140,
+      },
+    });
+    flushWindowStartAt = 0;
+  } catch (error) {
+    dbDirtyCount += dirtySnapshot;
+    console.error('Chat db flush error:', error);
   } finally {
     flushInFlight = false;
-    if (pendingFlush) {
+    if (pendingFlush || dbDirtyCount > 0) {
       pendingFlush = false;
-      await flushDb();
+      scheduleFlush({ markDirty: false });
     }
   }
 };
 
-// scheduleFlush?处理 scheduleFlush 相关逻辑。
-const scheduleFlush = () => {
-  if (flushTimer) {
+const scheduleFlush = ({ markDirty = true } = {}) => {
+  if (markDirty) {
+    dbDirtyCount += 1;
+  }
+  if (dbDirtyCount <= 0) return;
+  const now = Date.now();
+  if (!flushWindowStartAt) {
+    flushWindowStartAt = now;
+  }
+  if (flushInFlight) {
+    pendingFlush = true;
     return;
   }
-  flushTimer = setTimeout(async () => {
+  const elapsedMs = Math.max(0, now - flushWindowStartAt);
+  const maxRemaining = Math.max(0, FLUSH_MAX_DELAY_MS - elapsedMs);
+  const delayMs = Math.min(FLUSH_DEBOUNCE_MS, maxRemaining);
+  if (flushTimer) {
+    clearTimeout(flushTimer);
     flushTimer = null;
-    await flushDb();
-  }, FLUSH_INTERVAL_MS);
+  }
+  flushTimer = setTimeout(() => {
+    flushTimer = null;
+    void flushDb();
+  }, delayMs);
+  flushTimer.unref?.();
 };
 
-// setChatNotifier：设置运行时状态。
 const setChatNotifier = (notifier) => {
   chatNotifier = typeof notifier === 'function' ? notifier : null;
 };
 
-// migrateChatJson?处理 migrateChatJson 相关逻辑。
 const migrateChatJson = async () => {
   const database = await openDb();
   const countStmt = database.prepare('SELECT COUNT(1) as count FROM messages');
@@ -697,7 +906,6 @@ const migrateChatJson = async () => {
   }
 };
 
-// ensureChatStorage：确保前置条件与资源可用。
 const ensureChatStorage = async () => {
   if (chatStorageReady) return;
   if (chatStoragePromise) {
@@ -719,9 +927,13 @@ const ensureChatStorage = async () => {
   }
 };
 
+const getChatDatabaseForOps = async () => {
+  await ensureChatStorage();
+  return openDb();
+};
+
 const authenticate = createAuthenticateMiddleware({ scope: 'Chat' });
 
-// toMessage?处理 toMessage 相关逻辑。
 const toMessage = (row) => {
   let data = {};
   try {
@@ -740,7 +952,6 @@ const toMessage = (row) => {
   };
 };
 
-// parseReadAtMap：解析并校验输入值。
 const parseReadAtMap = (value) => {
   const source = value && typeof value === 'object' ? value : {};
   const result = {};
@@ -754,7 +965,6 @@ const parseReadAtMap = (value) => {
   return result;
 };
 
-// normalizeDeviceId：归一化外部输入。
 const normalizeDeviceId = (value) => {
   if (typeof value !== 'string') return '';
   const trimmed = value.trim();
@@ -769,12 +979,10 @@ const normalizeDeviceId = (value) => {
   return sanitized;
 };
 
-// resolveDeleteCutoffDeviceHeaderId：解析并确定最终值。
 const resolveDeleteCutoffDeviceHeaderId = (req) =>
   normalizeDeviceId(String(req.headers['x-xinchat-device-id'] || '')) ||
   normalizeDeviceId(String(req.headers['x-device-id'] || ''));
 
-// resolveDeleteCutoffDeviceId：解析并确定最终值。
 const resolveDeleteCutoffDeviceId = (req) => {
   const fromHeader = resolveDeleteCutoffDeviceHeaderId(req);
   if (fromHeader) return fromHeader;
@@ -784,7 +992,6 @@ const resolveDeleteCutoffDeviceId = (req) => {
   return hash ? `tok:${hash}` : '';
 };
 
-// extractDeviceCreatedAtMsFromId：提取请求中的关键信息。
 const extractDeviceCreatedAtMsFromId = (deviceId) => {
   if (typeof deviceId !== 'string') return 0;
   const match = deviceId.trim().match(/^dev_([0-9a-z]+)_/i);
@@ -794,7 +1001,6 @@ const extractDeviceCreatedAtMsFromId = (deviceId) => {
   return Math.floor(parsed);
 };
 
-// normalizeDeviceCreatedAtMs：归一化外部输入。
 const normalizeDeviceCreatedAtMs = (value) => {
   const parsed = Number(value);
   if (!Number.isFinite(parsed) || parsed <= 0) return 0;
@@ -803,7 +1009,6 @@ const normalizeDeviceCreatedAtMs = (value) => {
   return floored > maxAllowed ? maxAllowed : floored;
 };
 
-// resolveDeviceCreatedAtMsFromRequest：解析并确定最终值。
 const resolveDeviceCreatedAtMsFromRequest = (req, deviceId) => {
   const fromHeader =
     normalizeDeviceCreatedAtMs(req.headers['x-xinchat-device-created-at']) ||
@@ -818,28 +1023,25 @@ const resolveDeviceCreatedAtMsFromRequest = (req, deviceId) => {
   return Date.now();
 };
 
-// getDeviceBaselineCutoff：获取并返回目标数据。
 const getDeviceBaselineCutoff = (database, { uid, deviceId }) => {
   if (!database) return 0;
   if (!Number.isInteger(uid) || uid <= 0 || !deviceId) return 0;
-  const stmt = database.prepare(`
-    SELECT createdAtMs
-    FROM chat_device_state
-    WHERE uid = ? AND deviceId = ?
-    LIMIT 1
-  `);
-  stmt.bind([uid, deviceId]);
-  let cutoffMs = 0;
-  if (stmt.step()) {
-    const row = stmt.getAsObject();
-    const parsed = Number(row?.createdAtMs);
-    cutoffMs = Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : 0;
-  }
-  stmt.free();
+  const row = queryOnePrepared(
+    database,
+    'device_state:baseline_by_uid_device',
+    `
+      SELECT createdAtMs
+      FROM chat_device_state
+      WHERE uid = ? AND deviceId = ?
+      LIMIT 1
+    `,
+    [uid, deviceId]
+  );
+  const parsed = Number(row?.createdAtMs);
+  const cutoffMs = Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : 0;
   return cutoffMs;
 };
 
-// ensureDeviceBaselineCutoff：确保前置条件与资源可用。
 const ensureDeviceBaselineCutoff = (database, { uid, deviceId, createdAtMs }) => {
   if (!database) return { cutoffMs: 0, inserted: false };
   if (!Number.isInteger(uid) || uid <= 0 || !deviceId) {
@@ -851,19 +1053,22 @@ const ensureDeviceBaselineCutoff = (database, { uid, deviceId, createdAtMs }) =>
   }
   const normalized = normalizeDeviceCreatedAtMs(createdAtMs) || Date.now();
   const nowIso = new Date().toISOString();
-  const stmt = database.prepare(`
-    INSERT INTO chat_device_state (uid, deviceId, createdAtMs, updatedAt)
-    VALUES (?, ?, ?, ?)
-    ON CONFLICT(uid, deviceId)
-    DO UPDATE SET
-      createdAtMs = CASE
-        WHEN excluded.createdAtMs < chat_device_state.createdAtMs THEN excluded.createdAtMs
-        ELSE chat_device_state.createdAtMs
-      END,
-      updatedAt = excluded.updatedAt
-  `);
-  stmt.run([uid, deviceId, normalized, nowIso]);
-  stmt.free();
+  executePrepared(
+    database,
+    'device_state:upsert',
+    `
+      INSERT INTO chat_device_state (uid, deviceId, createdAtMs, updatedAt)
+      VALUES (?, ?, ?, ?)
+      ON CONFLICT(uid, deviceId)
+      DO UPDATE SET
+        createdAtMs = CASE
+          WHEN excluded.createdAtMs < chat_device_state.createdAtMs THEN excluded.createdAtMs
+          ELSE chat_device_state.createdAtMs
+        END,
+        updatedAt = excluded.updatedAt
+    `,
+    [uid, deviceId, normalized, nowIso]
+  );
   const finalCutoff = getDeviceBaselineCutoff(database, { uid, deviceId });
   return {
     cutoffMs: finalCutoff > 0 ? finalCutoff : normalized,
@@ -871,7 +1076,6 @@ const ensureDeviceBaselineCutoff = (database, { uid, deviceId, createdAtMs }) =>
   };
 };
 
-// normalizeDeleteCutoffEntry：归一化外部输入。
 const normalizeDeleteCutoffEntry = (entry) => {
   if (!entry || typeof entry !== 'object') return null;
   const targetType = String(entry.targetType || '').trim();
@@ -887,7 +1091,6 @@ const normalizeDeleteCutoffEntry = (entry) => {
   };
 };
 
-// parseDeleteCutoffList：解析并校验输入值。
 const parseDeleteCutoffList = (value) => {
   let source = value;
   if (typeof source === 'string') {
@@ -911,7 +1114,6 @@ const parseDeleteCutoffList = (value) => {
   return Array.from(dedup.values());
 };
 
-// upsertDeleteCutoff?处理 upsertDeleteCutoff 相关逻辑。
 const upsertDeleteCutoff = (database, { uid, deviceId, targetType, targetUid, cutoffMs }) => {
   if (!database) return;
   if (!Number.isInteger(uid) || uid <= 0) return;
@@ -919,45 +1121,45 @@ const upsertDeleteCutoff = (database, { uid, deviceId, targetType, targetUid, cu
   if (!Number.isInteger(targetUid) || targetUid <= 0) return;
   if (!Number.isFinite(cutoffMs) || cutoffMs <= 0) return;
   const nowIso = new Date().toISOString();
-  const stmt = database.prepare(`
-    INSERT INTO chat_delete_cutoffs (uid, deviceId, targetType, targetUid, cutoffMs, updatedAt)
-    VALUES (?, ?, ?, ?, ?, ?)
-    ON CONFLICT(uid, deviceId, targetType, targetUid)
-    DO UPDATE SET
-      cutoffMs = CASE
-        WHEN excluded.cutoffMs > chat_delete_cutoffs.cutoffMs THEN excluded.cutoffMs
-        ELSE chat_delete_cutoffs.cutoffMs
-      END,
-      updatedAt = excluded.updatedAt
-  `);
-  stmt.run([uid, deviceId, targetType, targetUid, Math.floor(cutoffMs), nowIso]);
-  stmt.free();
+  executePrepared(
+    database,
+    'delete_cutoff:upsert',
+    `
+      INSERT INTO chat_delete_cutoffs (uid, deviceId, targetType, targetUid, cutoffMs, updatedAt)
+      VALUES (?, ?, ?, ?, ?, ?)
+      ON CONFLICT(uid, deviceId, targetType, targetUid)
+      DO UPDATE SET
+        cutoffMs = CASE
+          WHEN excluded.cutoffMs > chat_delete_cutoffs.cutoffMs THEN excluded.cutoffMs
+          ELSE chat_delete_cutoffs.cutoffMs
+        END,
+        updatedAt = excluded.updatedAt
+    `,
+    [uid, deviceId, targetType, targetUid, Math.floor(cutoffMs), nowIso]
+  );
 };
 
-// getDeleteCutoffForTarget：获取并返回目标数据。
 const getDeleteCutoffForTarget = (database, { uid, deviceId, targetType, targetUid }) => {
   if (!database) return 0;
   if (!Number.isInteger(uid) || uid <= 0) return 0;
   if (!deviceId || !isValidTargetType(targetType)) return 0;
   if (!Number.isInteger(targetUid) || targetUid <= 0) return 0;
-  const stmt = database.prepare(`
-    SELECT cutoffMs
-    FROM chat_delete_cutoffs
-    WHERE uid = ? AND deviceId = ? AND targetType = ? AND targetUid = ?
-    LIMIT 1
-  `);
-  stmt.bind([uid, deviceId, targetType, targetUid]);
-  let cutoffMs = 0;
-  if (stmt.step()) {
-    const row = stmt.getAsObject();
-    const parsed = Number(row?.cutoffMs);
-    cutoffMs = Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : 0;
-  }
-  stmt.free();
+  const row = queryOnePrepared(
+    database,
+    'delete_cutoff:find_one',
+    `
+      SELECT cutoffMs
+      FROM chat_delete_cutoffs
+      WHERE uid = ? AND deviceId = ? AND targetType = ? AND targetUid = ?
+      LIMIT 1
+    `,
+    [uid, deviceId, targetType, targetUid]
+  );
+  const parsed = Number(row?.cutoffMs);
+  const cutoffMs = Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : 0;
   return cutoffMs;
 };
 
-// loadDeleteCutoffMapByDevice?处理 loadDeleteCutoffMapByDevice 相关逻辑。
 const loadDeleteCutoffMapByDevice = (database, { uid, deviceId }) => {
   const result = {
     private: new Map(),
@@ -965,14 +1167,17 @@ const loadDeleteCutoffMapByDevice = (database, { uid, deviceId }) => {
   };
   if (!database) return result;
   if (!Number.isInteger(uid) || uid <= 0 || !deviceId) return result;
-  const stmt = database.prepare(`
-    SELECT targetType, targetUid, cutoffMs
-    FROM chat_delete_cutoffs
-    WHERE uid = ? AND deviceId = ?
-  `);
-  stmt.bind([uid, deviceId]);
-  while (stmt.step()) {
-    const row = stmt.getAsObject();
+  const rows = queryRowsPrepared(
+    database,
+    'delete_cutoff:list_by_device',
+    `
+      SELECT targetType, targetUid, cutoffMs
+      FROM chat_delete_cutoffs
+      WHERE uid = ? AND deviceId = ?
+    `,
+    [uid, deviceId]
+  );
+  for (const row of rows) {
     const targetType = String(row?.targetType || '');
     const targetUid = Number(row?.targetUid);
     const cutoffMs = Number(row?.cutoffMs);
@@ -985,21 +1190,386 @@ const loadDeleteCutoffMapByDevice = (database, { uid, deviceId }) => {
       map.set(targetUid, Math.floor(cutoffMs));
     }
   }
-  stmt.free();
   return result;
 };
 
-// 路由：POST /send。
+const verifyChatTargetAccess = async ({ user, users, targetType, targetUid }) => {
+  if (!isValidTargetType(targetType) || !isValidUid(targetUid)) {
+    return { ok: false, status: 400, message: 'Request failed.' };
+  }
+
+  if (targetType === 'private') {
+    const targetUser = users.find((item) => item.uid === targetUid);
+    if (!targetUser) {
+      return { ok: false, status: 404, message: 'Request failed.' };
+    }
+    const isMutualFriend =
+      Array.isArray(user.friends) &&
+      user.friends.includes(targetUid) &&
+      Array.isArray(targetUser.friends) &&
+      targetUser.friends.includes(user.uid);
+    if (!isMutualFriend) {
+      return { ok: false, status: 403, message: 'Request failed.' };
+    }
+    return { ok: true, targetUser };
+  }
+
+  const group = await getGroupById(targetUid);
+  if (!group) {
+    return { ok: false, status: 404, message: 'Request failed.' };
+  }
+  const memberSet = new Set(Array.isArray(group.memberUids) ? group.memberUids : []);
+  if (!memberSet.has(user.uid)) {
+    return { ok: false, status: 403, message: 'Request failed.' };
+  }
+  return { ok: true, group };
+};
+
+const normalizeRiskTarget = (raw) => {
+  const source = raw && typeof raw === 'object' ? raw : {};
+  const targetType = String(source.targetType || '').trim();
+  const targetUid = Number(source.targetUid);
+  if (!isValidTargetType(targetType) || !isValidUid(targetUid)) {
+    return null;
+  }
+  return { targetType, targetUid };
+};
+
+router.post('/reply-suggest', authenticate, async (req, res) => {
+  try {
+    const rateKey = makeReplySuggestRateKey(req);
+    if (!replySuggestLimiter.consume(rateKey)) {
+      res.status(429).json({ success: false, message: 'Too many requests.' });
+      return;
+    }
+
+    if (!isFeatureEnabled('replyAssistant')) {
+      res.json({
+        success: true,
+        data: {
+          enabled: false,
+          suggestions: [],
+          reason: 'feature_disabled',
+        },
+      });
+      return;
+    }
+
+    const body = req.body || {};
+    const targetType = String(body.targetType || '').trim();
+    const targetUid = Number(body.targetUid);
+    const textRaw =
+      typeof body.text === 'string'
+        ? body.text
+        : typeof body.lastMessage === 'string'
+          ? body.lastMessage
+          : typeof body.content === 'string'
+            ? body.content
+            : '';
+    const text = String(textRaw || '').trim().slice(0, 300);
+    if (!text) {
+      res.status(400).json({ success: false, message: 'text is required.' });
+      return;
+    }
+
+    const { user, users } = req.auth;
+    const access = await verifyChatTargetAccess({
+      user,
+      users,
+      targetType,
+      targetUid,
+    });
+    if (!access.ok) {
+      res.status(access.status).json({ success: false, message: access.message });
+      return;
+    }
+
+    const suggestionBundle = await generateReplySuggestions({
+      text,
+      user,
+      requestedStyle: body.style || body.replyStyle || '',
+      useProfile: toBoolean(body.useProfile, true),
+      count: body.count,
+    });
+
+    trackRouteEvent(req, {
+      eventType: 'impression',
+      targetUid,
+      targetType,
+      tags: ['reply_suggest', suggestionBundle.styleMode],
+      metadata: {
+        count: suggestionBundle.count,
+        intent: suggestionBundle.intent,
+      },
+    });
+
+    res.json({
+      success: true,
+      data: {
+        enabled: true,
+        ...suggestionBundle,
+      },
+    });
+  } catch (error) {
+    console.error('Reply suggest error:', error);
+    res.status(500).json({ success: false, message: 'Request failed.' });
+  }
+});
+
+router.get('/risk', authenticate, async (req, res) => {
+  try {
+    const rateKey = makeRiskRateKey(req, 'risk_profile');
+    if (!chatRiskQueryLimiter.consume(rateKey)) {
+      res.status(429).json({ success: false, message: 'Too many requests.' });
+      return;
+    }
+
+    const payload = { ...(req.query || {}), ...(req.body || {}) };
+    const target = normalizeRiskTarget(payload);
+    if (!target) {
+      res.status(400).json({ success: false, message: 'targetType and targetUid are required.' });
+      return;
+    }
+
+    const { user, users } = req.auth;
+    const access = await verifyChatTargetAccess({
+      user,
+      users,
+      targetType: target.targetType,
+      targetUid: target.targetUid,
+    });
+    if (!access.ok) {
+      res.status(access.status).json({ success: false, message: access.message });
+      return;
+    }
+
+    if (!isFeatureEnabled('riskGuard')) {
+      res.json({
+        success: true,
+        data: {
+          enabled: false,
+          source: 'chat_profile',
+          available: true,
+          score: 0,
+          level: 'low',
+          tags: [],
+          evidence: [],
+          summary: 'risk guard is disabled.',
+          ignored: false,
+          targetUid: target.targetUid,
+          targetType: target.targetType,
+          generatedAt: new Date().toISOString(),
+        },
+      });
+      return;
+    }
+
+    const database = await openDb();
+    let profile = null;
+    try {
+      profile = await buildConversationRiskProfile({
+        database,
+        viewerUid: user.uid,
+        targetUid: target.targetUid,
+        targetType: target.targetType,
+      });
+    } catch (riskError) {
+      profile = {
+        source: 'chat_profile',
+        available: false,
+        score: 0,
+        level: 'low',
+        tags: [],
+        evidence: [],
+        summary: 'risk profile unavailable.',
+        ignored: false,
+        generatedAt: new Date().toISOString(),
+        targetUid: target.targetUid,
+        targetType: target.targetType,
+      };
+    }
+
+    trackRouteEvent(req, {
+      eventType: 'impression',
+      targetUid: target.targetUid,
+      targetType: target.targetType,
+      tags: ['chat_risk_profile', String(profile?.level || 'low')],
+      metadata: {
+        score: Number(profile?.score) || 0,
+        ignored: profile?.ignored === true,
+        cacheMode: String(profile?.cache?.mode || 'none'),
+      },
+    });
+
+    res.json({
+      success: true,
+      data: {
+        enabled: true,
+        ...profile,
+      },
+    });
+  } catch (error) {
+    console.error('Chat risk profile error:', error);
+    res.status(500).json({ success: false, message: 'Request failed.' });
+  }
+});
+
+router.post('/risk/ignore', authenticate, async (req, res) => {
+  try {
+    const rateKey = makeRiskRateKey(req, 'risk_ignore');
+    if (!chatRiskIgnoreLimiter.consume(rateKey)) {
+      res.status(429).json({ success: false, message: 'Too many requests.' });
+      return;
+    }
+
+    if (!isFeatureEnabled('riskGuard')) {
+      res.json({
+        success: true,
+        data: {
+          enabled: false,
+          ignored: false,
+          reason: 'feature_disabled',
+        },
+      });
+      return;
+    }
+
+    const target = normalizeRiskTarget(req.body || {});
+    if (!target) {
+      res.status(400).json({ success: false, message: 'targetType and targetUid are required.' });
+      return;
+    }
+
+    const { user, users } = req.auth;
+    const access = await verifyChatTargetAccess({
+      user,
+      users,
+      targetType: target.targetType,
+      targetUid: target.targetUid,
+    });
+    if (!access.ok) {
+      res.status(access.status).json({ success: false, message: access.message });
+      return;
+    }
+
+    const reason = String(req.body?.reason || '').trim().slice(0, 180);
+    const ttlHours = Number(req.body?.ttlHours);
+    const entry = await upsertRiskIgnore({
+      actorUid: user.uid,
+      targetUid: target.targetUid,
+      targetType: target.targetType,
+      reason,
+      ttlHours: Number.isFinite(ttlHours) && ttlHours > 0 ? ttlHours : 24 * 7,
+    });
+
+    trackRouteEvent(req, {
+      eventType: 'mute',
+      targetUid: target.targetUid,
+      targetType: target.targetType,
+      tags: ['chat_risk_ignore'],
+      metadata: {
+        ttlHours: Number.isFinite(ttlHours) && ttlHours > 0 ? ttlHours : 24 * 7,
+      },
+    });
+
+    res.json({
+      success: true,
+      data: {
+        enabled: true,
+        ignored: true,
+        entry,
+      },
+    });
+  } catch (error) {
+    console.error('Chat risk ignore error:', error);
+    res.status(500).json({ success: false, message: 'Request failed.' });
+  }
+});
+
+router.post('/risk/appeal', authenticate, async (req, res) => {
+  try {
+    const rateKey = makeRiskRateKey(req, 'risk_appeal');
+    if (!chatRiskAppealLimiter.consume(rateKey)) {
+      res.status(429).json({ success: false, message: 'Too many requests.' });
+      return;
+    }
+
+    if (!isFeatureEnabled('riskGuard')) {
+      res.json({
+        success: true,
+        data: {
+          enabled: false,
+          accepted: false,
+          reason: 'feature_disabled',
+        },
+      });
+      return;
+    }
+
+    const target = normalizeRiskTarget(req.body || {});
+    if (!target) {
+      res.status(400).json({ success: false, message: 'targetType and targetUid are required.' });
+      return;
+    }
+    const { user, users } = req.auth;
+    const access = await verifyChatTargetAccess({
+      user,
+      users,
+      targetType: target.targetType,
+      targetUid: target.targetUid,
+    });
+    if (!access.ok) {
+      res.status(access.status).json({ success: false, message: access.message });
+      return;
+    }
+
+    const reason = String(req.body?.reason || '').trim().slice(0, 300) || 'possible_false_positive';
+    const appeal = await appendRiskAppeal({
+      actorUid: user.uid,
+      targetUid: target.targetUid,
+      targetType: target.targetType,
+      reason,
+      context: {
+        requestId: req.requestId || '',
+        client: 'chat',
+      },
+    });
+
+    trackRouteEvent(req, {
+      eventType: 'report',
+      targetUid: target.targetUid,
+      targetType: target.targetType,
+      tags: ['chat_risk_appeal'],
+      reason,
+      metadata: {
+        appealId: appeal?.id || '',
+      },
+    });
+
+    res.json({
+      success: true,
+      data: {
+        enabled: true,
+        accepted: Boolean(appeal),
+        appeal,
+      },
+    });
+  } catch (error) {
+    console.error('Chat risk appeal error:', error);
+    res.status(500).json({ success: false, message: 'Request failed.' });
+  }
+});
+
 router.post('/send', authenticate, async (req, res) => {
   try {
     await ensureChatStorage();
     const body = req.body || {};
     if (!isValidType(body.type)) {
-      res.status(400).json({ success: false, message: '请求失败。' });
+      res.status(400).json({ success: false, message: 'Request failed.' });
       return;
     }
     if (!isValidTargetType(body.targetType)) {
-      res.status(400).json({ success: false, message: '请求失败。' });
+      res.status(400).json({ success: false, message: 'Request failed.' });
       return;
     }
     const targetType = String(body.targetType || '');
@@ -1007,46 +1577,53 @@ router.post('/send', authenticate, async (req, res) => {
     const senderUid = Number(body.senderUid);
     const targetUid = Number(body.targetUid);
     if (!isValidUid(senderUid) || !isValidUid(targetUid)) {
-      res.status(400).json({ success: false, message: '请求失败。' });
+      res.status(400).json({ success: false, message: 'Request failed.' });
       return;
     }
 
-	    const { user, users } = req.auth;
+    const { user, users } = req.auth;
     if (user.uid !== senderUid) {
-      res.status(403).json({ success: false, message: '请求失败。' });
+      res.status(403).json({ success: false, message: 'Request failed.' });
       return;
     }
 
-    if (targetType === 'private') {
-      const targetUser = users.find((item) => item.uid === targetUid);
-      if (!targetUser) {
-        res.status(404).json({ success: false, message: '请求失败。' });
-        return;
-      }
-
-      const isMutualFriend =
-        Array.isArray(user.friends) &&
-        user.friends.includes(targetUid) &&
-        Array.isArray(targetUser.friends) &&
-        targetUser.friends.includes(user.uid);
-      if (!isMutualFriend) {
-        res.status(403).json({ success: false, message: '请求失败。' });
-        return;
-      }
-	    } else {
-	      const group = await getGroupById(targetUid);
-      if (!group) {
-        res.status(404).json({ success: false, message: '群聊不存在。' });
-        return;
-      }
-      const memberSet = new Set(Array.isArray(group.memberUids) ? group.memberUids : []);
-      if (!memberSet.has(user.uid)) {
-        res.status(403).json({ success: false, message: '你不在该群聊中。' });
-        return;
-      }
+    const access = await verifyChatTargetAccess({ user, users, targetType, targetUid });
+    if (!access.ok) {
+      res.status(access.status).json({ success: false, message: access.message });
+      return;
     }
 
-    const { type, senderUid: _, targetUid: __, targetType: ___, ...data } = body;
+    const {
+      type,
+      senderUid: _,
+      targetUid: __,
+      targetType: ___,
+      replySuggest: replySuggestRaw,
+      replyStyle: replyStyleRaw,
+      replySuggestStyle: replySuggestStyleRaw,
+      replySuggestUseProfile: replySuggestUseProfileRaw,
+      recoDecisionId: recoDecisionIdRaw,
+      recoCandidateId: recoCandidateIdRaw,
+      recoFeedbackAction: recoFeedbackActionRaw,
+      ...data
+    } = body;
+    const shouldAttachReplySuggest =
+      toBoolean(replySuggestRaw, true) && isFeatureEnabled('replyAssistant');
+    const requestedReplyStyle =
+      typeof replySuggestStyleRaw === 'string' && replySuggestStyleRaw.trim()
+        ? replySuggestStyleRaw.trim()
+        : typeof replyStyleRaw === 'string'
+          ? replyStyleRaw.trim()
+          : '';
+    const recoDecisionId =
+      typeof recoDecisionIdRaw === 'string' ? recoDecisionIdRaw.trim().slice(0, 80) : '';
+    const recoCandidateId =
+      typeof recoCandidateIdRaw === 'string' ? recoCandidateIdRaw.trim().toLowerCase().slice(0, 120) : '';
+    const recoFeedbackAction =
+      typeof recoFeedbackActionRaw === 'string'
+        ? recoFeedbackActionRaw.trim().toLowerCase().slice(0, 32)
+        : 'reply';
+    const replySuggestUseProfile = toBoolean(replySuggestUseProfileRaw, true);
     const messageData = { ...data };
     const baseUrl = `${req.protocol}://${req.get('host')}`;
     if (type === 'text') {
@@ -1062,11 +1639,11 @@ router.post('/send', authenticate, async (req, res) => {
         (Array.isArray(messageData.urls) && messageData.urls.length > 0) ||
         (messageData.hashData && typeof messageData.hashData === 'object');
       if (!content) {
-        res.status(400).json({ success: false, message: '文本消息不能为空。' });
+        res.status(400).json({ success: false, message: 'Request failed.' });
         return;
       }
       if (hasImagePayload) {
-        res.status(400).json({ success: false, message: '不支持图文一起发送。' });
+        res.status(400).json({ success: false, message: 'Request failed.' });
         return;
       }
       messageData.content = content;
@@ -1076,7 +1653,7 @@ router.post('/send', authenticate, async (req, res) => {
       const textContent = typeof messageData.content === 'string' ? messageData.content.trim() : '';
       const textAlias = typeof messageData.text === 'string' ? messageData.text.trim() : '';
       if (textContent || textAlias) {
-        res.status(400).json({ success: false, message: '不支持图文一起发送。' });
+        res.status(400).json({ success: false, message: 'Request failed.' });
         return;
       }
       const hashUrlMap = new Map();
@@ -1133,7 +1710,7 @@ router.post('/send', authenticate, async (req, res) => {
       };
       if (Array.isArray(messageData.urls)) {
         if (messageData.urls.length !== 1) {
-          res.status(400).json({ success: false, message: '图片消息仅支持单张发送。' });
+          res.status(400).json({ success: false, message: 'Request failed.' });
           return;
         }
         const urls = [];
@@ -1144,7 +1721,7 @@ router.post('/send', authenticate, async (req, res) => {
           }
         }
         if (!urls.length || !urls[0]) {
-          res.status(400).json({ success: false, message: '图片消息不能为空。' });
+          res.status(400).json({ success: false, message: 'Request failed.' });
           return;
         }
         messageData.url = urls[0];
@@ -1153,12 +1730,12 @@ router.post('/send', authenticate, async (req, res) => {
         const rawUrl =
           typeof messageData.url === 'string' ? messageData.url.trim() : '';
         if (!rawUrl) {
-          res.status(400).json({ success: false, message: '图片消息不能为空。' });
+          res.status(400).json({ success: false, message: 'Request failed.' });
           return;
         }
         const normalized = await normalizeImageValue(rawUrl);
         if (!normalized || !String(normalized).trim()) {
-          res.status(400).json({ success: false, message: '图片消息不能为空。' });
+          res.status(400).json({ success: false, message: 'Request failed.' });
           return;
         }
         messageData.url = normalized;
@@ -1182,11 +1759,11 @@ router.post('/send', authenticate, async (req, res) => {
       if (rawDataUrl) {
         const parsed = parseDataUrl(rawDataUrl);
         if (!parsed) {
-          res.status(400).json({ success: false, message: '请求失败。' });
+          res.status(400).json({ success: false, message: 'Request failed.' });
           return;
         }
         if (parsed.buffer.length > MAX_FILE_BYTES) {
-          res.status(400).json({ success: false, message: '请求失败。' });
+          res.status(400).json({ success: false, message: 'Request failed.' });
           return;
         }
         mime = parsed.mime || mime;
@@ -1206,7 +1783,7 @@ router.post('/send', authenticate, async (req, res) => {
           parsedUrl = null;
         }
         if (!parsedUrl || !parsedUrl.pathname.startsWith('/uploads/userfile/')) {
-          res.status(400).json({ success: false, message: '请求失败。' });
+          res.status(400).json({ success: false, message: 'Request failed.' });
           return;
         }
         const relativePath = decodeURIComponent(
@@ -1214,17 +1791,17 @@ router.post('/send', authenticate, async (req, res) => {
         );
         const sourcePath = resolvePathWithinRoot(USERFILE_DIR, relativePath);
         if (!sourcePath) {
-          res.status(400).json({ success: false, message: '请求失败。' });
+          res.status(400).json({ success: false, message: 'Request failed.' });
           return;
         }
         if (!(await fileExists(sourcePath))) {
-          res.status(404).json({ success: false, message: '请求失败。' });
+          res.status(404).json({ success: false, message: 'Request failed.' });
           return;
         }
         const stat = await fs.stat(sourcePath);
         size = stat.size;
         if (size > MAX_FILE_BYTES) {
-          res.status(400).json({ success: false, message: '请求失败。' });
+          res.status(400).json({ success: false, message: 'Request failed.' });
           return;
         }
         const stored = await storeUserFileFromPath(
@@ -1235,7 +1812,7 @@ router.post('/send', authenticate, async (req, res) => {
         );
         filename = stored.filename;
       } else {
-        res.status(400).json({ success: false, message: '请求失败。' });
+        res.status(400).json({ success: false, message: 'Request failed.' });
         return;
       }
 
@@ -1248,6 +1825,7 @@ router.post('/send', authenticate, async (req, res) => {
       messageData.url = `${baseUrl}/uploads/userfile/${senderUid}/${filename}`;
       delete messageData.dataUrl;
     }
+
     const createdAt = new Date().toISOString();
     const createdAtMs = Date.now();
     const entry = {
@@ -1261,34 +1839,163 @@ router.post('/send', authenticate, async (req, res) => {
     };
 
     const database = await openDb();
-    const stmt = database.prepare(`
-      INSERT INTO messages (
-        id, type, senderUid, targetUid, targetType, data, createdAt, createdAtMs
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-    `);
-    stmt.run([
-      entry.id,
-      entry.type,
-      entry.senderUid,
-      entry.targetUid,
-      entry.targetType,
-      JSON.stringify(entry.data || {}),
-      entry.createdAt,
-      createdAtMs,
-    ]);
-    stmt.free();
+    let risk = null;
+    if (isFeatureEnabled('riskGuard') && type === 'text') {
+      try {
+        const text = String(messageData.content || '').trim();
+        risk = await assessOutgoingTextRisk({
+          database,
+          senderUid,
+          targetUid,
+          targetType,
+          text,
+          nowMs: createdAtMs,
+        });
+      } catch (riskError) {
+        risk = {
+          source: 'chat_send',
+          available: false,
+          score: 0,
+          level: 'low',
+          tags: [],
+          evidence: [],
+          summary: 'risk scorer unavailable.',
+          generatedAt: new Date().toISOString(),
+        };
+      }
+    }
+
+    executePrepared(
+      database,
+      'messages:insert',
+      `
+        INSERT INTO messages (
+          id, type, senderUid, targetUid, targetType, data, createdAt, createdAtMs
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      `,
+      [
+        entry.id,
+        entry.type,
+        entry.senderUid,
+        entry.targetUid,
+        entry.targetType,
+        JSON.stringify(entry.data || {}),
+        entry.createdAt,
+        createdAtMs,
+      ]
+    );
     scheduleFlush();
     if (chatNotifier) {
       setImmediate(() => chatNotifier(entry));
     }
-    res.json({ success: true, data: entry });
+
+    if (risk && (risk.level === 'medium' || risk.level === 'high')) {
+      trackRouteEvent(req, {
+        eventType: 'risk_hit',
+        targetUid: entry.targetUid,
+        targetType: entry.targetType,
+        tags: ['chat_send', String(risk.level || 'low'), ...(Array.isArray(risk.tags) ? risk.tags : [])],
+        reason: String(risk.summary || '').slice(0, 120),
+        metadata: {
+          messageId: entry.id,
+          riskScore: Number(risk.score) || 0,
+          riskTags: Array.isArray(risk.tags) ? risk.tags : [],
+        },
+      });
+      void recordRiskDecision({
+        channel: 'chat_send',
+        actorUid: senderUid,
+        subjectUid: senderUid,
+        targetUid,
+        targetType,
+        risk,
+        metadata: {
+          messageId: entry.id,
+        },
+      }).catch(() => undefined);
+    }
+
+    let assistant = null;
+    if (shouldAttachReplySuggest && type === 'text') {
+      try {
+        const suggestText = String(messageData.content || '').trim();
+        if (suggestText) {
+          const suggestionBundle = await generateReplySuggestions({
+            text: suggestText,
+            user,
+            requestedStyle: requestedReplyStyle,
+            useProfile: replySuggestUseProfile,
+            count: 3,
+          });
+          assistant = {
+            replySuggestions: suggestionBundle.suggestions,
+            styleMode: suggestionBundle.styleMode,
+            intent: suggestionBundle.intent,
+            generatedAt: suggestionBundle.generatedAt,
+            model: suggestionBundle.model,
+            degraded: false,
+          };
+          trackRouteEvent(req, {
+            eventType: 'impression',
+            targetUid: entry.targetUid,
+            targetType: entry.targetType,
+            tags: ['reply_suggest_attach', suggestionBundle.styleMode],
+            metadata: {
+              count: suggestionBundle.count,
+              intent: suggestionBundle.intent,
+            },
+          });
+        }
+      } catch (replySuggestError) {
+        assistant = {
+          replySuggestions: [],
+          degraded: true,
+          reason: 'reply_suggest_failed',
+        };
+      }
+    }
+
+    trackRouteEvent(req, {
+      eventType: 'reply',
+      targetUid: entry.targetUid,
+      targetType: entry.targetType,
+      tags: [entry.targetType, entry.type],
+      metadata: {
+        messageType: entry.type,
+        replySuggestAttached: Boolean(assistant && !assistant.degraded),
+        recoDecisionId: recoDecisionId || '',
+      },
+    });
+
+    if (recoDecisionId && isFeatureEnabled('recoVw')) {
+      void recordRecoFeedback({
+        uid: senderUid,
+        decisionId: recoDecisionId,
+        action: recoFeedbackAction || 'reply',
+        candidateId: recoCandidateId || `${targetType}:${targetUid}`,
+        metadata: {
+          source: 'chat_send',
+          messageId: entry.id,
+        },
+      }).catch(() => undefined);
+    }
+
+    const responsePayload = { success: true, data: entry };
+    if (assistant) {
+      responsePayload.assistant = assistant;
+    }
+    if (risk) {
+      responsePayload.risk = {
+        enabled: true,
+        ...risk,
+      };
+    }
+    res.json(responsePayload);
   } catch (error) {
     console.error('Chat send error:', error);
-    res.status(500).json({ success: false, message: '请求失败。' });
+    res.status(500).json({ success: false, message: 'Request failed.' });
   }
 });
-
-// 路由：GET /stickers/list。
 router.get('/stickers/list', authenticate, async (req, res) => {
   try {
     await ensureChatStorage();
@@ -1297,18 +2004,17 @@ router.get('/stickers/list', authenticate, async (req, res) => {
     res.json({ success: true, data: list });
   } catch (error) {
     console.error('Sticker list error:', error);
-    res.status(500).json({ success: false, message: '获取贴纸失败。' });
+    res.status(500).json({ success: false, message: 'Request failed.' });
   }
 });
 
-// 路由：POST /stickers/upload/batch。
 router.post('/stickers/upload/batch', authenticate, async (req, res) => {
   try {
     await ensureChatStorage();
     const body = req.body || {};
     const items = Array.isArray(body.items) ? body.items.slice(0, MAX_STICKER_BATCH_UPLOAD) : [];
     if (!items.length) {
-      res.status(400).json({ success: false, message: '贴纸列表不能为空。' });
+      res.status(400).json({ success: false, message: 'Request failed.' });
       return;
     }
     const parseStickerItem = (item) => {
@@ -1326,7 +2032,7 @@ router.post('/stickers/upload/batch', authenticate, async (req, res) => {
 
     const parsedItems = items.map(parseStickerItem).filter(Boolean);
     if (!parsedItems.length) {
-      res.status(400).json({ success: false, message: '贴纸格式无效。' });
+      res.status(400).json({ success: false, message: 'Request failed.' });
       return;
     }
 
@@ -1354,11 +2060,10 @@ router.post('/stickers/upload/batch', authenticate, async (req, res) => {
     res.json({ success: true, data: { uploaded, stickers: list } });
   } catch (error) {
     console.error('Sticker batch upload error:', error);
-    res.status(400).json({ success: false, message: '贴纸批量上传失败。' });
+    res.status(400).json({ success: false, message: 'Request failed.' });
   }
 });
 
-// 路由：POST /stickers/upload。
 router.post('/stickers/upload', authenticate, async (req, res) => {
   try {
     await ensureChatStorage();
@@ -1371,11 +2076,11 @@ router.post('/stickers/upload', authenticate, async (req, res) => {
       parsed = parseImageDataUrl(`data:${rawMime};base64,${rawBase64}`);
     }
     if (!parsed) {
-      res.status(400).json({ success: false, message: '贴纸格式无效。' });
+      res.status(400).json({ success: false, message: 'Request failed.' });
       return;
     }
     if (parsed.buffer.length <= 0 || parsed.buffer.length > MAX_STICKER_BYTES) {
-      res.status(400).json({ success: false, message: '贴纸大小无效。' });
+      res.status(400).json({ success: false, message: 'Request failed.' });
       return;
     }
 
@@ -1394,12 +2099,11 @@ router.post('/stickers/upload', authenticate, async (req, res) => {
     res.json({ success: true, data: { sticker, stickers: list } });
   } catch (error) {
     console.error('Sticker upload error:', error);
-    const message = error?.message === '贴纸格式无效。' ? error.message : '贴纸上传失败。';
+    const message = error?.message === 'File is too large.' ? 'File is too large.' : 'Upload failed.';
     res.status(400).json({ success: false, message });
   }
 });
 
-// 路由：POST /upload/image。
 router.post('/upload/image', authenticate, async (req, res) => {
   try {
     await fs.mkdir(IMAGE_DIR, { recursive: true });
@@ -1427,11 +2131,11 @@ router.post('/upload/image', authenticate, async (req, res) => {
         buffer = Buffer.from(bodyText, 'base64');
       }
       if (!buffer || !buffer.length) {
-        res.status(400).json({ success: false, message: '请求失败。' });
+        res.status(400).json({ success: false, message: 'Request failed.' });
         return;
       }
       if (buffer.length > MAX_FILE_BYTES) {
-        res.status(400).json({ success: false, message: '请求失败。' });
+        res.status(400).json({ success: false, message: 'Request failed.' });
         return;
       }
       if (!IMAGE_EXTS.includes(ext)) {
@@ -1480,12 +2184,11 @@ router.post('/upload/image', authenticate, async (req, res) => {
     });
   } catch (error) {
     console.error('Image upload error:', error);
-    const message = error?.message === '文件过大。' ? '文件过大。' : '上传失败。';
+    const message = error?.message === 'File is too large.' ? 'File is too large.' : 'Upload failed.';
     res.status(400).json({ success: false, message });
   }
 });
 
-// 路由：POST /upload/file。
 router.post('/upload/file', authenticate, async (req, res) => {
   try {
     await fs.mkdir(USERFILE_DIR, { recursive: true });
@@ -1544,12 +2247,11 @@ router.post('/upload/file', authenticate, async (req, res) => {
     });
   } catch (error) {
     console.error('File upload error:', error);
-    const message = error?.message === '文件过大。' ? '文件过大。' : '上传失败。';
+    const message = error?.message === 'File is too large.' ? 'File is too large.' : 'Upload failed.';
     res.status(400).json({ success: false, message });
   }
 });
 
-// 路由：GET /get。
 router.get('/get', authenticate, async (req, res) => {
   try {
     await ensureChatStorage();
@@ -1569,15 +2271,15 @@ router.get('/get', authenticate, async (req, res) => {
     let beforeMs = 0;
 
     if (!isValidTargetType(targetType)) {
-      res.status(400).json({ success: false, message: '请求失败。' });
+      res.status(400).json({ success: false, message: 'Request failed.' });
       return;
     }
     if (!isValidUid(targetUid)) {
-      res.status(400).json({ success: false, message: '请求失败。' });
+      res.status(400).json({ success: false, message: 'Request failed.' });
       return;
     }
     if (type && !isValidType(type)) {
-      res.status(400).json({ success: false, message: '请求失败。' });
+      res.status(400).json({ success: false, message: 'Request failed.' });
       return;
     }
 
@@ -1608,7 +2310,7 @@ router.get('/get', authenticate, async (req, res) => {
     if (targetType === 'private') {
       const targetUser = users.find((item) => item.uid === targetUid);
       if (!targetUser) {
-        res.status(404).json({ success: false, message: '请求失败。' });
+        res.status(404).json({ success: false, message: 'Request failed.' });
         return;
       }
       const isMutualFriend =
@@ -1617,18 +2319,18 @@ router.get('/get', authenticate, async (req, res) => {
         Array.isArray(targetUser.friends) &&
         targetUser.friends.includes(user.uid);
       if (!isMutualFriend) {
-        res.status(403).json({ success: false, message: '请求失败。' });
+        res.status(403).json({ success: false, message: 'Request failed.' });
         return;
       }
     } else {
       const group = await getGroupById(targetUid);
       if (!group) {
-        res.status(404).json({ success: false, message: '群聊不存在。' });
+        res.status(404).json({ success: false, message: 'Request failed.' });
         return;
       }
       const memberSet = new Set(Array.isArray(group.memberUids) ? group.memberUids : []);
 	      if (!memberSet.has(user.uid)) {
-	        res.status(403).json({ success: false, message: '你不在该群聊中。' });
+	        res.status(403).json({ success: false, message: 'Request failed.' });
 	        return;
 	      }
 	    }
@@ -1661,26 +2363,26 @@ router.get('/get', authenticate, async (req, res) => {
     });
     const effectiveDeleteCutoffMs = Math.max(deviceBaselineCutoffMs, targetDeleteCutoffMs);
     if (sinceId) {
-      const sinceStmt = database.prepare('SELECT createdAtMs FROM messages WHERE id = ?');
-      sinceStmt.bind([sinceId]);
-      if (sinceStmt.step()) {
-        const row = sinceStmt.getAsObject();
-        if (row && Number.isFinite(row.createdAtMs)) {
-          sinceMs = Math.max(sinceMs, row.createdAtMs);
-        }
+      const row = queryOnePrepared(
+        database,
+        'messages:createdAtMs_by_id',
+        'SELECT createdAtMs FROM messages WHERE id = ?',
+        [sinceId]
+      );
+      if (row && Number.isFinite(Number(row.createdAtMs))) {
+        sinceMs = Math.max(sinceMs, Number(row.createdAtMs));
       }
-      sinceStmt.free();
     }
     if (beforeId) {
-      const beforeStmt = database.prepare('SELECT createdAtMs FROM messages WHERE id = ?');
-      beforeStmt.bind([beforeId]);
-      if (beforeStmt.step()) {
-        const row = beforeStmt.getAsObject();
-        if (row && Number.isFinite(row.createdAtMs)) {
-          beforeMs = row.createdAtMs;
-        }
+      const row = queryOnePrepared(
+        database,
+        'messages:createdAtMs_by_id',
+        'SELECT createdAtMs FROM messages WHERE id = ?',
+        [beforeId]
+      );
+      if (row && Number.isFinite(Number(row.createdAtMs))) {
+        beforeMs = Number(row.createdAtMs);
       }
-      beforeStmt.free();
     }
 
     const params = [targetType];
@@ -1730,26 +2432,41 @@ router.get('/get', authenticate, async (req, res) => {
       rows.reverse();
     }
     const data = rows.map(toMessage);
+    trackRouteEvent(req, {
+      eventType: 'impression',
+      targetUid,
+      targetType,
+      tags: [targetType],
+      metadata: {
+        itemCount: data.length,
+      },
+    });
     res.json({ success: true, data });
   } catch (error) {
     console.error('Chat get error:', error);
-    res.status(500).json({ success: false, message: '请求失败。' });
+    res.status(500).json({ success: false, message: 'Request failed.' });
   }
 });
 
-// 路由：POST /overview。
 router.post('/overview', authenticate, async (req, res) => {
   try {
     await ensureChatStorage();
     const { user, users } = req.auth;
-    const friendIds = (Array.isArray(user.friends) ? user.friends : []).filter((uid) => {
-      if (!Number.isInteger(uid)) return false;
-      const target = users.find((item) => item.uid === uid);
-      return (
-        Boolean(target) &&
-        Array.isArray(target.friends) &&
-        target.friends.includes(user.uid)
-      );
+    const includeSummary = toBoolean(req.body?.includeSummary ?? req.query?.includeSummary, false);
+    const usersByUid = new Map(
+      (Array.isArray(users) ? users : [])
+        .map((item) => [Number(item?.uid), item])
+        .filter(([uid]) => Number.isInteger(uid) && uid > 0)
+    );
+    const selfFriendSet = new Set(
+      (Array.isArray(user.friends) ? user.friends : [])
+        .map((uid) => Number(uid))
+        .filter((uid) => Number.isInteger(uid) && uid > 0)
+    );
+    const friendIds = Array.from(selfFriendSet).filter((uid) => {
+      const target = usersByUid.get(uid);
+      if (!target || !Array.isArray(target.friends)) return false;
+      return target.friends.includes(user.uid);
     });
     const groups = await readGroups();
     const joinedGroups = groups.filter((group) => {
@@ -1760,7 +2477,30 @@ router.post('/overview', authenticate, async (req, res) => {
       .map((group) => Number(group?.id))
       .filter((id) => Number.isInteger(id) && id > 0);
     if (!friendIds.length && !groupIds.length) {
-      res.json({ success: true, data: [] });
+      if (includeSummary) {
+        res.json({
+          success: true,
+          data: [],
+          summaryCenter: isFeatureEnabled('summaryCenter')
+            ? {
+                enabled: true,
+                available: true,
+                generatedAt: new Date().toISOString(),
+                ...buildOverviewInlineSummary([], 3),
+              }
+            : {
+                enabled: false,
+                available: true,
+                generatedAt: new Date().toISOString(),
+                unreadTotal: 0,
+                unreadConversations: 0,
+                highlights: [],
+                summaryText: 'summary center is disabled.',
+              },
+        });
+      } else {
+        res.json({ success: true, data: [] });
+      }
       return;
     }
 
@@ -1829,80 +2569,86 @@ router.post('/overview', authenticate, async (req, res) => {
       deviceId,
     });
 
-	    if (friendIds.length > 0) {
-	      const placeholders = friendIds.map(() => '?').join(',');
-	      const stmt = database.prepare(`
-        SELECT id, type, senderUid, targetUid, targetType, data, createdAt, createdAtMs
-        FROM messages
-        WHERE targetType = 'private'
-          AND (
-            (senderUid = ? AND targetUid IN (${placeholders}))
-            OR
-            (targetUid = ? AND senderUid IN (${placeholders}))
-          )
-        ORDER BY createdAtMs DESC
-      `);
-      stmt.bind([user.uid, ...friendIds, user.uid, ...friendIds]);
-      while (stmt.step()) {
-        const row = stmt.getAsObject();
-        const senderUid = Number(row.senderUid);
-        const targetUid = Number(row.targetUid);
-	        const createdAtMs = Number(row.createdAtMs) || 0;
-	        const friendUid = senderUid === user.uid ? targetUid : senderUid;
-	        if (!friendSet.has(friendUid)) {
-	          continue;
-	        }
+    if (friendIds.length > 0) {
+      for (const friendUid of friendIds) {
         const deleteCutoffMs = Number(deleteCutoffMap.private.get(friendUid)) || 0;
         const effectiveCutoffMs = Math.max(deviceBaselineCutoffMs, deleteCutoffMs);
-        if (effectiveCutoffMs > 0 && createdAtMs <= effectiveCutoffMs) {
-          continue;
+        const latestRow = queryOnePrepared(
+          database,
+          'overview:private_latest',
+          `
+            SELECT id, type, senderUid, targetUid, targetType, data, createdAt, createdAtMs
+            FROM messages
+            WHERE targetType = 'private'
+              AND ((senderUid = ? AND targetUid = ?) OR (senderUid = ? AND targetUid = ?))
+              AND createdAtMs > ?
+            ORDER BY createdAtMs DESC
+            LIMIT 1
+          `,
+          [user.uid, friendUid, friendUid, user.uid, effectiveCutoffMs]
+        );
+        if (latestRow) {
+          latestMap[friendUid] = toMessage(latestRow);
         }
-	        if (!latestMap[friendUid]) {
-	          latestMap[friendUid] = toMessage(row);
-	        }
-        if (row.type === 'text' && senderUid !== user.uid) {
-          const seenAt = Number(readAt[friendUid]) || 0;
-          if (createdAtMs > seenAt) {
-            unreadMap[friendUid] = (unreadMap[friendUid] || 0) + 1;
-          }
-        }
+        const seenAt = Number(readAt[friendUid]) || 0;
+        const unreadSinceMs = Math.max(effectiveCutoffMs, seenAt);
+        const unreadCount = querySingleNumberPrepared(
+          database,
+          'overview:private_unread_count',
+          `
+            SELECT COUNT(1) AS total
+            FROM messages
+            WHERE targetType = 'private'
+              AND senderUid = ?
+              AND targetUid = ?
+              AND type = 'text'
+              AND createdAtMs > ?
+          `,
+          [friendUid, user.uid, unreadSinceMs]
+        );
+        unreadMap[friendUid] = Math.max(0, unreadCount);
       }
-      stmt.free();
     }
 
-	    if (groupIds.length > 0) {
-	      const placeholders = groupIds.map(() => '?').join(',');
-	      const groupStmt = database.prepare(`
-        SELECT id, type, senderUid, targetUid, targetType, data, createdAt, createdAtMs
-        FROM messages
-        WHERE targetType = 'group' AND targetUid IN (${placeholders})
-        ORDER BY createdAtMs DESC
-      `);
-      groupStmt.bind(groupIds);
-      while (groupStmt.step()) {
-        const row = groupStmt.getAsObject();
-        const groupUid = Number(row.targetUid);
-        const senderUid = Number(row.senderUid);
-	        const createdAtMs = Number(row.createdAtMs) || 0;
-	        if (!groupSet.has(groupUid)) {
-	          continue;
-	        }
+    if (groupIds.length > 0) {
+      for (const groupUid of groupIds) {
         const deleteCutoffMs = Number(deleteCutoffMap.group.get(groupUid)) || 0;
         const effectiveCutoffMs = Math.max(deviceBaselineCutoffMs, deleteCutoffMs);
-        if (effectiveCutoffMs > 0 && createdAtMs <= effectiveCutoffMs) {
-          continue;
+        const latestRow = queryOnePrepared(
+          database,
+          'overview:group_latest',
+          `
+            SELECT id, type, senderUid, targetUid, targetType, data, createdAt, createdAtMs
+            FROM messages
+            WHERE targetType = 'group'
+              AND targetUid = ?
+              AND createdAtMs > ?
+            ORDER BY createdAtMs DESC
+            LIMIT 1
+          `,
+          [groupUid, effectiveCutoffMs]
+        );
+        if (latestRow) {
+          latestMap[groupUid] = toMessage(latestRow);
         }
-	        if (!latestMap[groupUid]) {
-	          latestMap[groupUid] = toMessage(row);
-	        }
-        if (row.type === 'text' && senderUid !== user.uid) {
-          const seenAt = Number(readAt[groupUid]) || 0;
-          if (createdAtMs > seenAt) {
-            unreadMap[groupUid] = (unreadMap[groupUid] || 0) + 1;
-          }
-        }
+        const seenAt = Number(readAt[groupUid]) || 0;
+        const unreadSinceMs = Math.max(effectiveCutoffMs, seenAt);
+        const unreadCount = querySingleNumberPrepared(
+          database,
+          'overview:group_unread_count',
+          `
+            SELECT COUNT(1) AS total
+            FROM messages
+            WHERE targetType = 'group'
+              AND targetUid = ?
+              AND senderUid != ?
+              AND type = 'text'
+              AND createdAtMs > ?
+          `,
+          [groupUid, user.uid, unreadSinceMs]
+        );
+        unreadMap[groupUid] = Math.max(0, unreadCount);
       }
-      groupStmt.free();
     }
 
     const privateItems = friendIds.map((uid) => ({
@@ -1924,14 +2670,128 @@ router.post('/overview', authenticate, async (req, res) => {
       },
     }));
     const data = [...privateItems, ...groupItems];
-    res.json({ success: true, data });
+    const includeReco = toBoolean(req.body?.includeReco ?? req.query?.includeReco, true);
+    let reco = null;
+    let finalData = data;
+    if (includeReco) {
+      try {
+        const decision = await decideConversationRanking({
+          uid: user.uid,
+          candidates: data,
+          context: {
+            source: 'chat_overview',
+          },
+          nowMs: Date.now(),
+        });
+        const rankMap = new Map(
+          (Array.isArray(decision?.ranking) ? decision.ranking : []).map((item) => [
+            String(item?.candidateId || ''),
+            item,
+          ])
+        );
+        const itemMap = new Map(
+          data.map((item) => [
+            `${item.targetType}:${Number(item.uid)}`,
+            item,
+          ])
+        );
+        if (decision.mode === 'online' && Array.isArray(decision.appliedOrder)) {
+          const reordered = [];
+          const taken = new Set();
+          decision.appliedOrder.forEach((candidateId) => {
+            const key = String(candidateId || '');
+            if (!key || taken.has(key)) return;
+            const found = itemMap.get(key);
+            if (!found) return;
+            reordered.push(found);
+            taken.add(key);
+          });
+          data.forEach((item) => {
+            const key = `${item.targetType}:${Number(item.uid)}`;
+            if (taken.has(key)) return;
+            reordered.push(item);
+          });
+          finalData = reordered;
+        }
+        finalData = finalData.map((item) => {
+          const candidateId = `${item.targetType}:${Number(item.uid)}`;
+          const rankInfo = rankMap.get(candidateId);
+          if (!rankInfo) return item;
+          return {
+            ...item,
+            reco: {
+              decisionId: decision.decisionId,
+              candidateId,
+              score: Number(rankInfo.score) || 0,
+              rank: Number(rankInfo.rank) || 0,
+              mode: decision.mode,
+              provider: decision.provider,
+              explored: decision.explored === true,
+            },
+          };
+        });
+        reco = decision;
+      } catch (recoError) {
+        reco = {
+          decisionId: '',
+          mode: 'disabled',
+          provider: 'none',
+          selectedCandidateId: '',
+          ranking: [],
+          appliedOrder: [],
+          shadowOrder: [],
+          explored: false,
+          degraded: true,
+          reason: 'reco_failed',
+        };
+      }
+    }
+    const summaryCenter =
+      includeSummary && isFeatureEnabled('summaryCenter')
+        ? {
+            enabled: true,
+            available: true,
+            generatedAt: new Date().toISOString(),
+            ...buildOverviewInlineSummary(finalData, 3),
+          }
+        : includeSummary
+          ? {
+              enabled: false,
+              available: true,
+              generatedAt: new Date().toISOString(),
+              unreadTotal: 0,
+              unreadConversations: 0,
+              highlights: [],
+              summaryText: 'summary center is disabled.',
+            }
+          : null;
+    trackRouteEvent(req, {
+      eventType: 'impression',
+      targetUid: 0,
+      targetType: 'overview',
+      tags: ['overview'],
+      metadata: {
+        privateCount: privateItems.length,
+        groupCount: groupItems.length,
+        totalCount: finalData.length,
+        recoMode: reco?.mode || 'disabled',
+      },
+    });
+    if (summaryCenter) {
+      const payload = { success: true, data: finalData, summaryCenter };
+      if (reco) payload.reco = reco;
+      res.json(payload);
+      return;
+    }
+    const payload = { success: true, data: finalData };
+    if (reco) payload.reco = reco;
+    res.json(payload);
   } catch (error) {
     console.error('Chat overview error:', error);
-    res.status(500).json({ success: false, message: '请求失败。' });
+    res.status(500).json({ success: false, message: 'Request failed.' });
   }
 });
 
-// 路由：POST /delete-cutoff。
 router.post('/delete-cutoff', authenticate, async (req, res) => {
   try {
     await ensureChatStorage();
@@ -1939,15 +2799,15 @@ router.post('/delete-cutoff', authenticate, async (req, res) => {
     const targetUid = Number(req.body?.targetUid);
     const cutoffMs = Number(req.body?.cutoffMs);
     if (!isValidTargetType(targetType)) {
-      res.status(400).json({ success: false, message: '请求失败。' });
+      res.status(400).json({ success: false, message: 'Request failed.' });
       return;
     }
     if (!isValidUid(targetUid)) {
-      res.status(400).json({ success: false, message: '请求失败。' });
+      res.status(400).json({ success: false, message: 'Request failed.' });
       return;
     }
     if (!Number.isFinite(cutoffMs) || cutoffMs <= 0) {
-      res.status(400).json({ success: false, message: '请求失败。' });
+      res.status(400).json({ success: false, message: 'Request failed.' });
       return;
     }
 
@@ -1955,7 +2815,7 @@ router.post('/delete-cutoff', authenticate, async (req, res) => {
     if (targetType === 'private') {
       const targetUser = users.find((item) => item.uid === targetUid);
       if (!targetUser) {
-        res.status(404).json({ success: false, message: '请求失败。' });
+        res.status(404).json({ success: false, message: 'Request failed.' });
         return;
       }
       const isMutualFriend =
@@ -1964,18 +2824,18 @@ router.post('/delete-cutoff', authenticate, async (req, res) => {
         Array.isArray(targetUser.friends) &&
         targetUser.friends.includes(user.uid);
       if (!isMutualFriend) {
-        res.status(403).json({ success: false, message: '请求失败。' });
+        res.status(403).json({ success: false, message: 'Request failed.' });
         return;
       }
     } else {
       const group = await getGroupById(targetUid);
       if (!group) {
-        res.status(404).json({ success: false, message: '群聊不存在。' });
+        res.status(404).json({ success: false, message: 'Request failed.' });
         return;
       }
       const memberSet = new Set(Array.isArray(group.memberUids) ? group.memberUids : []);
       if (!memberSet.has(user.uid)) {
-        res.status(403).json({ success: false, message: '你不在该群聊中。' });
+        res.status(403).json({ success: false, message: 'Request failed.' });
         return;
       }
     }
@@ -1983,7 +2843,7 @@ router.post('/delete-cutoff', authenticate, async (req, res) => {
     const deviceHeaderId = resolveDeleteCutoffDeviceHeaderId(req);
     const deviceId = deviceHeaderId || resolveDeleteCutoffDeviceId(req);
     if (!deviceId) {
-      res.status(400).json({ success: false, message: '请求失败。' });
+      res.status(400).json({ success: false, message: 'Request failed.' });
       return;
     }
     const database = await openDb();
@@ -2023,6 +2883,15 @@ router.post('/delete-cutoff', authenticate, async (req, res) => {
       targetUid,
     });
     const effectiveCutoffMs = Math.max(deviceBaselineCutoffMs, targetCutoffMs);
+    trackRouteEvent(req, {
+      eventType: 'mute',
+      targetUid,
+      targetType,
+      tags: ['delete_cutoff'],
+      metadata: {
+        cutoffMs: effectiveCutoffMs,
+      },
+    });
     res.json({
       success: true,
       data: {
@@ -2033,33 +2902,31 @@ router.post('/delete-cutoff', authenticate, async (req, res) => {
     });
   } catch (error) {
     console.error('Chat delete cutoff error:', error);
-    res.status(500).json({ success: false, message: '请求失败。' });
+    res.status(500).json({ success: false, message: 'Request failed.' });
   }
 });
 
-// 路由：DELETE /del。
 router.delete('/del', authenticate, async (req, res) => {
   try {
     await ensureChatStorage();
     const rawId = req.body?.id;
     if ((typeof rawId !== 'string' && typeof rawId !== 'number') || String(rawId).trim() === '') {
-      res.status(400).json({ success: false, message: '请求失败。' });
+      res.status(400).json({ success: false, message: 'Request failed.' });
       return;
     }
     const id = String(rawId).trim();
 
     const database = await openDb();
-    const selectStmt = database.prepare(
-      'SELECT id, type, senderUid, targetUid, targetType, data, createdAt, createdAtMs FROM messages WHERE id = ?'
+    const existing = queryOnePrepared(
+      database,
+      'messages:select_by_id_full',
+      'SELECT id, type, senderUid, targetUid, targetType, data, createdAt, createdAtMs FROM messages WHERE id = ?',
+      [id]
     );
-    selectStmt.bind([id]);
-    if (!selectStmt.step()) {
-      selectStmt.free();
-      res.status(404).json({ success: false, message: '请求失败。' });
+    if (!existing) {
+      res.status(404).json({ success: false, message: 'Request failed.' });
       return;
     }
-    const existing = selectStmt.getAsObject();
-    selectStmt.free();
 
     const { user } = req.auth;
     const senderUid = Number(existing.senderUid);
@@ -2080,18 +2947,21 @@ router.delete('/del', authenticate, async (req, res) => {
       isGroupMember = memberUids.includes(user.uid);
     }
     if (!isSender && !isPrivateRecipient && !isGroupMember) {
-      res.status(403).json({ success: false, message: '请求失败。' });
+      res.status(403).json({ success: false, message: 'Request failed.' });
       return;
     }
 
-    const delStmt = database.prepare('DELETE FROM messages WHERE id = ?');
-    delStmt.run([id]);
-    delStmt.free();
+    executePrepared(
+      database,
+      'messages:delete_by_id',
+      'DELETE FROM messages WHERE id = ?',
+      [id]
+    );
     scheduleFlush();
     res.json({ success: true, data: toMessage(existing) });
   } catch (error) {
     console.error('Chat delete error:', error);
-    res.status(500).json({ success: false, message: '请求失败。' });
+    res.status(500).json({ success: false, message: 'Request failed.' });
   }
 });
 
@@ -2282,16 +3152,15 @@ const findMessageByIdForAdmin = async (id) => {
   if (!messageId) return null;
   await ensureChatStorage();
   const database = await openDb();
-  const stmt = database.prepare(
-    'SELECT id, type, senderUid, targetUid, targetType, data, createdAt, createdAtMs FROM messages WHERE id = ?'
+  const row = queryOnePrepared(
+    database,
+    'messages:select_by_id_full',
+    'SELECT id, type, senderUid, targetUid, targetType, data, createdAt, createdAtMs FROM messages WHERE id = ?',
+    [messageId]
   );
-  stmt.bind([messageId]);
-  if (!stmt.step()) {
-    stmt.free();
+  if (!row) {
     return null;
   }
-  const row = stmt.getAsObject();
-  stmt.free();
   return toAdminMessage(row);
 };
 
@@ -2300,20 +3169,22 @@ const deleteMessageByIdForAdmin = async (id) => {
   if (!messageId) return null;
   await ensureChatStorage();
   const database = await openDb();
-  const selectStmt = database.prepare(
-    'SELECT id, type, senderUid, targetUid, targetType, data, createdAt, createdAtMs FROM messages WHERE id = ?'
+  const row = queryOnePrepared(
+    database,
+    'messages:select_by_id_full',
+    'SELECT id, type, senderUid, targetUid, targetType, data, createdAt, createdAtMs FROM messages WHERE id = ?',
+    [messageId]
   );
-  selectStmt.bind([messageId]);
-  if (!selectStmt.step()) {
-    selectStmt.free();
+  if (!row) {
     return null;
   }
-  const row = selectStmt.getAsObject();
-  selectStmt.free();
 
-  const delStmt = database.prepare('DELETE FROM messages WHERE id = ?');
-  delStmt.run([messageId]);
-  delStmt.free();
+  executePrepared(
+    database,
+    'messages:delete_by_id',
+    'DELETE FROM messages WHERE id = ?',
+    [messageId]
+  );
   scheduleFlush();
 
   return toAdminMessage(row);
@@ -2325,32 +3196,39 @@ const summarizeMessagesForAdmin = async ({ windowHours = 24 } = {}) => {
   const safeWindowHours = toAdminPositiveInt(windowHours, 24, 1, 24 * 365);
   const sinceMs = Date.now() - safeWindowHours * 60 * 60 * 1000;
 
-  const total = querySingleNumber(database, 'SELECT COUNT(1) AS total FROM messages');
-  const inWindow = querySingleNumber(
+  const total = querySingleNumberPrepared(
     database,
+    'summary:messages_total',
+    'SELECT COUNT(1) AS total FROM messages'
+  );
+  const inWindow = querySingleNumberPrepared(
+    database,
+    'summary:messages_window_total',
     'SELECT COUNT(1) AS total FROM messages WHERE createdAtMs >= ?',
     [sinceMs]
   );
 
   const byType = {};
-  const typeStmt = database.prepare('SELECT type, COUNT(1) AS count FROM messages GROUP BY type');
-  while (typeStmt.step()) {
-    const row = typeStmt.getAsObject();
+  const typeRows = queryRowsPrepared(
+    database,
+    'summary:messages_by_type',
+    'SELECT type, COUNT(1) AS count FROM messages GROUP BY type'
+  );
+  for (const row of typeRows) {
     const type = String(row?.type || '').trim() || 'unknown';
     byType[type] = Number(row?.count) || 0;
   }
-  typeStmt.free();
 
   const byTargetType = {};
-  const targetStmt = database.prepare(
+  const targetRows = queryRowsPrepared(
+    database,
+    'summary:messages_by_target_type',
     'SELECT targetType, COUNT(1) AS count FROM messages GROUP BY targetType'
   );
-  while (targetStmt.step()) {
-    const row = targetStmt.getAsObject();
+  for (const row of targetRows) {
     const targetType = String(row?.targetType || '').trim() || 'unknown';
     byTargetType[targetType] = Number(row?.count) || 0;
   }
-  targetStmt.free();
 
   return {
     total,
@@ -2364,6 +3242,7 @@ const summarizeMessagesForAdmin = async ({ windowHours = 24 } = {}) => {
 
 export {
   ensureChatStorage,
+  getChatDatabaseForOps,
   setChatNotifier,
   searchMessagesForAdmin,
   findMessageByIdForAdmin,
@@ -2371,6 +3250,14 @@ export {
   summarizeMessagesForAdmin,
 };
 export default router;
+
+
+
+
+
+
+
+
 
 
 

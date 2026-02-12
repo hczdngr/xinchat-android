@@ -8,7 +8,7 @@
     "android:assemble": "npm run api:sync-host && cd android && gradlew.bat assembleDebug",
     "android:install": "npm run api:sync-host && node scripts/android-install.js",
     "android:auto-install": "npm run api:sync-host && node scripts/android-auto-install.js",
-    "backend": "npm --prefix backend install && npm --prefix backend run start",
+    "backend": "npm --prefix backend install && npm --prefix backend/admin-pro-umi install && npm --prefix backend/admin-pro-umi run tsc && npm --prefix backend/admin-pro-umi run build && npm --prefix backend run start",
     "ios": "react-native run-ios",
     "lint": "eslint .",
     "start": "react-native start",

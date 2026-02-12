@@ -1,5 +1,8 @@
-/**
- * 模块说明：洞察 API 模块：提供暖心提示、百科检索与识图能力。
+﻿/**
+ * Insight API routes:
+ * - warm tips
+ * - encyclopedia lookup
+ * - object detection
  */
 
 
@@ -11,7 +14,6 @@ import { createAuthenticateMiddleware } from './session.js';
 const router = express.Router();
 const authenticate = createAuthenticateMiddleware({ scope: 'Insight' });
 
-// readPositiveInt：读取持久化或缓存数据。
 const readPositiveInt = (value, fallback, min = 1) => {
   const parsed = Number.parseInt(String(value || ''), 10);
   return Number.isFinite(parsed) && parsed >= min ? parsed : fallback;
@@ -31,17 +33,14 @@ const DEFAULT_WARM_TIP =
   '\u4f60\u5e76\u4e0d\u5b64\u5355\u3002\u8bf7\u5148\u7167\u987e\u597d\u81ea\u5df1\uff0c\u5fc5\u8981\u65f6\u53ca\u65f6\u8054\u7cfb\u5bb6\u4eba\u670b\u53cb\u6216\u4e13\u4e1a\u5fc3\u7406\u652f\u6301\u3002';
 const WARM_TIP_OUTPUT_TOKENS = 3000;
 const WARM_TIP_OUTPUT_TOKENS_FALLBACK = 3000;
-// WARM_TIP_MAX_RETRIES?处理 WARM_TIP_MAX_RETRIES 相关逻辑。
 const WARM_TIP_MAX_RETRIES = (() => {
   const parsed = Number.parseInt(String(process.env.WARM_TIP_MAX_RETRIES || ''), 10);
   return Number.isFinite(parsed) && parsed > 0 ? parsed : 3;
 })();
-// WARM_TIP_RETRY_DELAY_MS?处理 WARM_TIP_RETRY_DELAY_MS 相关逻辑。
 const WARM_TIP_RETRY_DELAY_MS = (() => {
   const parsed = Number.parseInt(String(process.env.WARM_TIP_RETRY_DELAY_MS || ''), 10);
   return Number.isFinite(parsed) && parsed >= 100 ? parsed : 700;
 })();
-// WARM_TIP_REQUEST_TIMEOUT_MS?处理 WARM_TIP_REQUEST_TIMEOUT_MS 相关逻辑。
 const WARM_TIP_REQUEST_TIMEOUT_MS = (() => {
   const parsed = Number.parseInt(String(process.env.WARM_TIP_REQUEST_TIMEOUT_MS || ''), 10);
   return Number.isFinite(parsed) && parsed >= 1000 ? parsed : 30000;
@@ -113,7 +112,6 @@ const objectDetectQueue = [];
 let aiClient = null;
 let aiClientKey = '';
 
-// decodeHardcodedGeminiKey?处理 decodeHardcodedGeminiKey 相关逻辑。
 const decodeHardcodedGeminiKey = () => {
   try {
     return Buffer.from(HARDCODED_GEMINI_API_KEY_B64, 'base64').toString('utf8').trim();
@@ -122,7 +120,6 @@ const decodeHardcodedGeminiKey = () => {
   }
 };
 
-// toErrorDetail?处理 toErrorDetail 相关逻辑。
 const toErrorDetail = (error) => {
   const detail = {
     message: error instanceof Error ? error.message : String(error),
@@ -147,7 +144,6 @@ const toErrorDetail = (error) => {
   return detail;
 };
 
-// toShortText?处理 toShortText 相关逻辑。
 const toShortText = (value, max = 90) => {
   const text = String(value || '')
     .replace(/\s+/g, ' ')
@@ -156,7 +152,6 @@ const toShortText = (value, max = 90) => {
   return text.length > max ? `${text.slice(0, max)}...` : text;
 };
 
-// extractGeminiText：提取请求中的关键信息。
 const extractGeminiText = (payload) => {
   const candidates = Array.isArray(payload?.candidates) ? payload.candidates : [];
   for (const candidate of candidates) {
@@ -170,7 +165,6 @@ const extractGeminiText = (payload) => {
   return '';
 };
 
-// parseModelJson：解析并校验输入值。
 const parseModelJson = (text) => {
   const raw = String(text || '').trim();
   if (!raw) return null;
@@ -248,14 +242,12 @@ const parseModelJson = (text) => {
   return null;
 };
 
-// normalizeBase64String：归一化外部输入。
 const normalizeBase64String = (value) => {
   const text = String(value || '');
   if (!text) return '';
   return /\s/.test(text) ? text.replace(/\s+/g, '') : text;
 };
 
-// parseImageInput：解析并校验输入值。
 const parseImageInput = (body = {}) => {
   const fromDataUrl = String(body?.image || body?.imageDataUrl || '').trim();
   if (fromDataUrl.startsWith('data:')) {
@@ -274,7 +266,6 @@ const parseImageInput = (body = {}) => {
   return { mimeType, base64 };
 };
 
-// normalizeConfidenceValue：归一化外部输入。
 const normalizeConfidenceValue = (raw) => {
   const parsed = Number(raw);
   if (!Number.isFinite(parsed)) return 0;
@@ -288,7 +279,6 @@ const normalizeConfidenceValue = (raw) => {
   return next;
 };
 
-// toConfidence?处理 toConfidence 相关逻辑。
 const toConfidence = (value) => {
   if (typeof value === 'number') {
     return normalizeConfidenceValue(value);
@@ -307,7 +297,6 @@ const toConfidence = (value) => {
   return normalizeConfidenceValue(raw);
 };
 
-// normalizeObjectDetectResult：归一化外部输入。
 const normalizeObjectDetectResult = (parsed, fallbackSummary = '') => {
   const summary = toShortText(parsed?.summary || fallbackSummary || '', 220);
   const scene = toShortText(parsed?.scene || '', 120);
@@ -328,7 +317,6 @@ const normalizeObjectDetectResult = (parsed, fallbackSummary = '') => {
   };
 };
 
-// buildVisionModelCandidates：构建对外输出数据。
 const buildVisionModelCandidates = (requestedModel, maxCount = OBJECT_DETECT_MAX_MODEL_CANDIDATES) => {
   const preferred = String(requestedModel || '').trim();
   const list = [preferred, ...GEMINI_VISION_MODEL_FALLBACKS].filter(Boolean);
@@ -337,7 +325,6 @@ const buildVisionModelCandidates = (requestedModel, maxCount = OBJECT_DETECT_MAX
   return unique.slice(0, safeMax);
 };
 
-// stripHtml?处理 stripHtml 相关逻辑。
 const stripHtml = (value) =>
   String(value || '')
     .replace(/<[^>]+>/g, ' ')
@@ -348,7 +335,6 @@ const stripHtml = (value) =>
     .replace(/\s+/g, ' ')
     .trim();
 
-// normalizeWikiEntry：归一化外部输入。
 const normalizeWikiEntry = (entry = {}, query = '', source = '') => {
   const title = toShortText(entry?.title || query, 80) || query;
   const summary = toShortText(entry?.extract || entry?.summary || '', 1200);
@@ -367,7 +353,7 @@ const normalizeWikiEntry = (entry = {}, query = '', source = '') => {
   return {
     query,
     title: title || query,
-    summary: summary || snippet || `${query}暂无详细百科摘要。`,
+    summary: summary || snippet || `${query} 暂无详细百科摘要。`,
     snippet,
     url,
     thumbnail,
@@ -375,7 +361,6 @@ const normalizeWikiEntry = (entry = {}, query = '', source = '') => {
   };
 };
 
-// fetchWikiSummary?处理 fetchWikiSummary 相关逻辑。
 const fetchWikiSummary = async ({ host, query, sourceLabel }) => {
   const searchUrl = `https://${host}/w/api.php?action=query&list=search&utf8=1&format=json&srlimit=1&srsearch=${encodeURIComponent(
     query
@@ -437,7 +422,6 @@ const fetchWikiSummary = async ({ host, query, sourceLabel }) => {
   );
 };
 
-// clipByApproxTokens?处理 clipByApproxTokens 相关逻辑。
 const clipByApproxTokens = (text, tokenLimit) => {
   const value = String(text || '');
   if (!value) return '';
@@ -446,13 +430,11 @@ const clipByApproxTokens = (text, tokenLimit) => {
   return value.length > limit ? value.slice(0, limit) : value;
 };
 
-// sleep?处理 sleep 相关逻辑。
 const sleep = (ms) =>
   new Promise((resolve) => {
     setTimeout(resolve, ms);
   });
 
-// withTimeout?处理 withTimeout 相关逻辑。
 const withTimeout = async (promise, timeoutMs, label) => {
   let timer = null;
   try {
@@ -469,7 +451,6 @@ const withTimeout = async (promise, timeoutMs, label) => {
   }
 };
 
-// getAiClient：获取并返回目标数据。
 const getAiClient = (apiKey) => {
   if (!aiClient || aiClientKey !== apiKey) {
     aiClient = new GoogleGenAI({ apiKey });
@@ -478,7 +459,6 @@ const getAiClient = (apiKey) => {
   return aiClient;
 };
 
-// withWarmTipConcurrency?处理 withWarmTipConcurrency 相关逻辑。
 const withWarmTipConcurrency = async (task) =>
   new Promise((resolve, reject) => {
     const run = () => {
@@ -501,7 +481,6 @@ const withWarmTipConcurrency = async (task) =>
     warmTipQueue.push(run);
   });
 
-// buildObjectDetectCacheKey：构建对外输出数据。
 const buildObjectDetectCacheKey = ({ mimeType, base64 }) => {
   const hash = crypto.createHash('sha256');
   hash.update(String(mimeType || 'image/jpeg'));
@@ -510,7 +489,6 @@ const buildObjectDetectCacheKey = ({ mimeType, base64 }) => {
   return hash.digest('hex');
 };
 
-// getObjectDetectCacheEntry：获取并返回目标数据。
 const getObjectDetectCacheEntry = (cacheKey) => {
   const entry = objectDetectCache.get(cacheKey);
   if (!entry) return null;
@@ -523,7 +501,6 @@ const getObjectDetectCacheEntry = (cacheKey) => {
   return entry;
 };
 
-// setObjectDetectCacheEntry：设置运行时状态。
 const setObjectDetectCacheEntry = (cacheKey, data) => {
   objectDetectCache.set(cacheKey, {
     data,
@@ -536,7 +513,6 @@ const setObjectDetectCacheEntry = (cacheKey, data) => {
   }
 };
 
-// cleanupObjectDetectCache?处理 cleanupObjectDetectCache 相关逻辑。
 const cleanupObjectDetectCache = () => {
   const now = Date.now();
   for (const [cacheKey, entry] of objectDetectCache.entries()) {
@@ -546,7 +522,6 @@ const cleanupObjectDetectCache = () => {
   }
 };
 
-// withObjectDetectConcurrency?处理 withObjectDetectConcurrency 相关逻辑。
 const withObjectDetectConcurrency = async (task) =>
   new Promise((resolve, reject) => {
     const run = () => {
@@ -569,7 +544,6 @@ const withObjectDetectConcurrency = async (task) =>
     objectDetectQueue.push(run);
   });
 
-// isObjectDetectRetryableError：判断条件是否成立。
 const isObjectDetectRetryableError = (error) => {
   const status = Number(error?.status || error?.statusCode || 0);
   if (OBJECT_DETECT_RETRYABLE_STATUSES.has(status)) return true;
@@ -588,7 +562,6 @@ const isObjectDetectRetryableError = (error) => {
   return false;
 };
 
-// mapObjectDetectError?处理 mapObjectDetectError 相关逻辑。
 const mapObjectDetectError = (error) => {
   const status = Number(error?.status || error?.statusCode || 0);
   const message = String(error?.message || '');
@@ -605,7 +578,6 @@ const mapObjectDetectError = (error) => {
   return { statusCode: 502, publicMessage: '\u56fe\u50cf\u8bc6\u522b\u670d\u52a1\u4e0d\u53ef\u7528\u3002' };
 };
 
-// detectObjectsByModelCandidates?处理 detectObjectsByModelCandidates 相关逻辑。
 const detectObjectsByModelCandidates = async ({ ai, modelCandidates, input }) => {
   let lastError = null;
 
@@ -675,21 +647,18 @@ const detectObjectsByModelCandidates = async ({ ai, modelCandidates, input }) =>
 
 setInterval(cleanupObjectDetectCache, 60 * 1000).unref?.();
 
-// sanitizeTip：清洗不可信输入。
 const sanitizeTip = (value) =>
   String(value || '')
     .replace(/\s+/g, ' ')
     .replace(/^["'\u201c\u201d]+|["'\u201c\u201d]+$/g, '')
     .trim();
 
-// isCompleteTip：判断条件是否成立。
 const isCompleteTip = ({ text, finishReason }) => {
   if (!sanitizeTip(text)) return false;
   if (String(finishReason || '').toUpperCase() === 'MAX_TOKENS') return false;
   return true;
 };
 
-// hasDepressionTendency：判断是否具备指定状态。
 const hasDepressionTendency = (user) => {
   const analysis = user?.aiProfile?.analysis || {};
   const depression = analysis?.depressionTendency || {};
@@ -697,13 +666,11 @@ const hasDepressionTendency = (user) => {
   return level === 'medium' || level === 'high';
 };
 
-// buildLocalWarmTip：构建对外输出数据。
 const buildLocalWarmTip = (user) => {
   const name = toShortText(user?.nickname || user?.username || '\u4f60', 20) || '\u4f60';
   return `${name}\uff0c\u5148\u8ba9\u81ea\u5df1\u6162\u4e0b\u6765\uff0c\u54ea\u6015\u53ea\u662f\u77ed\u6682\u4f11\u606f\u4e5f\u5f88\u91cd\u8981\u3002\u4f60\u53ef\u4ee5\u968f\u65f6\u8054\u7cfb\u4fe1\u4efb\u7684\u5bb6\u4eba\u670b\u53cb\u6216\u4e13\u4e1a\u652f\u6301\u3002`;
 };
 
-// buildUserSummary：构建对外输出数据。
 const buildUserSummary = (user) => {
   const analysis = user?.aiProfile?.analysis || {};
   const depression = analysis?.depressionTendency || {};
@@ -731,7 +698,6 @@ const buildUserSummary = (user) => {
   return clipByApproxTokens(fields, WARM_TIP_INPUT_TOKENS);
 };
 
-// buildPrompt：构建对外输出数据。
 const buildPrompt = (user) => {
   const summary = buildUserSummary(user);
   return `
@@ -748,7 +714,6 @@ ${summary}
 `.trim();
 };
 
-// requestWarmTipOnce?处理 requestWarmTipOnce 相关逻辑。
 const requestWarmTipOnce = async ({ ai, model, prompt, maxOutputTokens }) => {
   const response = await withTimeout(
     ai.models.generateContent({
@@ -767,7 +732,6 @@ const requestWarmTipOnce = async ({ ai, model, prompt, maxOutputTokens }) => {
   return { text, finishReason };
 };
 
-// requestWarmTipWithRetry?处理 requestWarmTipWithRetry 相关逻辑。
 const requestWarmTipWithRetry = async ({ ai, model, prompt, maxOutputTokens }) => {
   let lastError = null;
   for (let attempt = 0; attempt < WARM_TIP_MAX_RETRIES; attempt += 1) {
@@ -794,14 +758,12 @@ const requestWarmTipWithRetry = async ({ ai, model, prompt, maxOutputTokens }) =
   throw lastError || new Error('warm-tip request failed');
 };
 
-// createWarmTipCacheEntry：创建对象或中间件。
 const createWarmTipCacheEntry = ({ versionKey, tip }) => ({
   versionKey,
   tip,
   updatedAt: new Date().toISOString(),
 });
 
-// getUserCacheMeta：获取并返回目标数据。
 const getUserCacheMeta = (user) => {
   const uid = Number(user?.uid);
   const cacheKey = Number.isInteger(uid) ? String(uid) : `anon:${String(user?.username || '')}`;
@@ -819,7 +781,6 @@ const getUserCacheMeta = (user) => {
   return { cacheKey, versionKey };
 };
 
-// generateWarmTip?处理 generateWarmTip 相关逻辑。
 const generateWarmTip = async ({ user, cacheKey, versionKey }) => {
   const apiKey = String(process.env.GEMINI_API_KEY || decodeHardcodedGeminiKey()).trim();
   if (!apiKey) return buildLocalWarmTip(user);
@@ -875,7 +836,6 @@ const generateWarmTip = async ({ user, cacheKey, versionKey }) => {
   }
 };
 
-// refreshWarmTipInBackground?处理 refreshWarmTipInBackground 相关逻辑。
 const refreshWarmTipInBackground = ({ user, cacheKey, versionKey }) => {
   if (warmTipInFlight.has(cacheKey)) return warmTipInFlight.get(cacheKey);
   const run = withWarmTipConcurrency(() => generateWarmTip({ user, cacheKey, versionKey }))
@@ -933,7 +893,6 @@ export const prewarmWarmTipCache = async ({ users, logger = console } = {}) => {
   return { queued, skipped };
 };
 
-// 路由：GET /warm-tip。
 router.get('/warm-tip', authenticate, async (req, res) => {
   try {
     const { user } = req.auth || {};
@@ -978,19 +937,18 @@ router.get('/warm-tip', authenticate, async (req, res) => {
   }
 });
 
-// 路由：GET /encyclopedia。
 router.get('/encyclopedia', authenticate, async (req, res) => {
   try {
     const rawQuery = String(req.query?.query || req.query?.q || '')
       .replace(/\s+/g, ' ')
       .trim();
     if (!rawQuery) {
-      res.status(400).json({ success: false, message: '缺少 query 参数。' });
+      res.status(400).json({ success: false, message: 'Missing query parameter.' });
       return;
     }
     const query = rawQuery.slice(0, ENCYCLOPEDIA_QUERY_MAX_LENGTH);
     const providers = [
-      { host: 'zh.wikipedia.org', sourceLabel: '维基百科(中文)' },
+      { host: 'zh.wikipedia.org', sourceLabel: '缁村熀鐧剧(涓枃)' },
       { host: 'en.wikipedia.org', sourceLabel: 'Wikipedia(English)' },
     ];
 
@@ -1003,8 +961,8 @@ router.get('/encyclopedia', authenticate, async (req, res) => {
           sourceLabel: provider.sourceLabel,
         });
         if (result) break;
-      } catch (error) {
-        // Try next provider.
+      } catch {
+        continue;
       }
     }
 
@@ -1017,7 +975,7 @@ router.get('/encyclopedia', authenticate, async (req, res) => {
           url: fallbackUrl,
         },
         query,
-        '维基搜索'
+        '缁村熀鎼滅储'
       );
       res.json({ success: true, data: fallback });
       return;
@@ -1029,12 +987,11 @@ router.get('/encyclopedia', authenticate, async (req, res) => {
     console.warn('[encyclopedia] failed', detail);
     res.status(500).json({
       success: false,
-      message: '百科检索失败，请稍后重试。',
+      message: 'Encyclopedia request failed. Please retry later.',
     });
   }
 });
 
-// 路由：POST /object-detect。
 router.post('/object-detect', authenticate, async (req, res) => {
   try {
     const input = parseImageInput(req.body || {});
@@ -1146,3 +1103,5 @@ router.post('/object-detect', authenticate, async (req, res) => {
 });
 
 export default router;
+
+

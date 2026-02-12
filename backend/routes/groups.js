@@ -8,12 +8,13 @@ import fs from 'fs/promises';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { createAuthenticateMiddleware } from './session.js';
+import { atomicWriteFile, createSerialQueue } from '../utils/filePersistence.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const DATA_DIR = path.join(__dirname, '..', 'data');
 const GROUPS_PATH = path.join(DATA_DIR, 'groups.json');
-const GROUPS_TMP_PATH = path.join(DATA_DIR, 'groups.json.tmp');
+const GROUPS_LOCK_PATH = path.join(DATA_DIR, 'groups.json.lock');
 
 const GROUP_ID_START = 2000000000;
 const MAX_GROUP_MEMBERS = 50;
@@ -23,14 +24,22 @@ const GROUP_ANNOUNCEMENT_MAX_LEN = 300;
 const GROUP_MEMBER_NICK_MAX_LEN = 40;
 
 const CACHE_TTL_MS = 800;
+const GROUPS_WRITE_QUEUE_MAX = 2000;
+const GROUPS_MUTATION_QUEUE_MAX = 2000;
 
 const router = express.Router();
 const authenticate = createAuthenticateMiddleware({ scope: 'Groups' });
 
 let cachedGroups = null;
 let cachedGroupsAt = 0;
-let writeQueue = Promise.resolve();
-let mutationQueue = Promise.resolve();
+const writeQueue = createSerialQueue({
+  maxPending: GROUPS_WRITE_QUEUE_MAX,
+  overflowError: 'groups_write_queue_overflow',
+});
+const mutationQueue = createSerialQueue({
+  maxPending: GROUPS_MUTATION_QUEUE_MAX,
+  overflowError: 'groups_mutation_queue_overflow',
+});
 let groupsNotifier = null;
 
 // clone?处理 clone 相关逻辑。
@@ -68,9 +77,7 @@ const emitGroupEvent = (uids, payload) => {
 
 // enqueueMutation?处理 enqueueMutation 相关逻辑。
 const enqueueMutation = (task) => {
-  const run = mutationQueue.catch(() => undefined).then(task);
-  mutationQueue = run.then(() => undefined).catch(() => undefined);
-  return run;
+  return mutationQueue.enqueue(task);
 };
 
 // fileExists?处理 fileExists 相关逻辑。
@@ -87,7 +94,9 @@ const fileExists = async (targetPath) => {
 const ensureGroupStorage = async () => {
   await fs.mkdir(DATA_DIR, { recursive: true });
   if (!(await fileExists(GROUPS_PATH))) {
-    await fs.writeFile(GROUPS_PATH, '[]', 'utf-8');
+    await atomicWriteFile(GROUPS_PATH, '[]', {
+      lockPath: GROUPS_LOCK_PATH,
+    });
   }
 };
 
@@ -203,7 +212,9 @@ const readGroups = async () => {
 
   const groups = sanitizeGroups(parsed);
   if (!Array.isArray(parsed) || parsed.length !== groups.length) {
-    await fs.writeFile(GROUPS_PATH, JSON.stringify(groups, null, 2), 'utf-8');
+    await atomicWriteFile(GROUPS_PATH, JSON.stringify(groups, null, 2), {
+      lockPath: GROUPS_LOCK_PATH,
+    });
   }
 
   cachedGroups = clone(groups);
@@ -215,13 +226,13 @@ const readGroups = async () => {
 const writeGroups = async (groups) => {
   await ensureGroupStorage();
   const snapshot = sanitizeGroups(groups);
-  const run = writeQueue.then(async () => {
-    await fs.writeFile(GROUPS_TMP_PATH, JSON.stringify(snapshot, null, 2), 'utf-8');
-    await fs.rename(GROUPS_TMP_PATH, GROUPS_PATH);
+  const run = writeQueue.enqueue(async () => {
+    await atomicWriteFile(GROUPS_PATH, JSON.stringify(snapshot, null, 2), {
+      lockPath: GROUPS_LOCK_PATH,
+    });
     cachedGroups = clone(snapshot);
     cachedGroupsAt = Date.now();
   });
-  writeQueue = run.catch(() => {});
   await run;
 };
 
