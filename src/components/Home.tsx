@@ -236,11 +236,6 @@ type ReplySuggestionPanel = {
   reason: string;
   suggestions: ReplySuggestionEntry[];
 };
-type AssistantProfileSnapshot = {
-  translateStyle: string;
-  explanationLevel: string;
-  replyStyle: ReplySuggestStyle;
-};
 type ChatRiskEvidence = {
   rule: string;
   type: string;
@@ -378,12 +373,6 @@ const decodeChatUid = (chatUid: number): { targetUid: number; targetType: ChatTa
   }
   return { targetUid: normalizedUid, targetType: 'private' };
 };
-const REPLY_STYLE_OPTIONS: ReadonlyArray<ReplySuggestStyle> = ['polite', 'concise', 'formal'];
-const REPLY_STYLE_LABEL_MAP: Record<ReplySuggestStyle, string> = {
-  polite: '礼貌',
-  concise: '简洁',
-  formal: '正式',
-};
 const normalizeReplySuggestStyle = (value: unknown): ReplySuggestStyle => {
   const raw = String(value || '').trim().toLowerCase();
   if (raw === 'concise') return 'concise';
@@ -475,7 +464,7 @@ const normalizeChatRiskProfile = (value: any): ChatRiskProfile | null => {
       level: 'low',
       tags: [],
       evidence: [],
-      summary: 'risk guard is disabled.',
+      summary: '风控功能未开启。',
       ignored: false,
       generatedAt: String(source.generatedAt || ''),
       targetUid: Number(source.targetUid) || 0,
@@ -2137,17 +2126,16 @@ export default function Home({
 
   const [activeChatUid, setActiveChatUid] = useState<number | null>(null);
   const [draftMessage, setDraftMessage] = useState('');
-  const [replySuggestStyle, setReplySuggestStyle] = useState<ReplySuggestStyle>('polite');
-  const [replySuggestUseProfile, setReplySuggestUseProfile] = useState(true);
-  const [replySuggestTapSend, setReplySuggestTapSend] = useState(false);
   const [replySuggestLoading, setReplySuggestLoading] = useState(false);
+  const [replyAssistantPanelVisible, setReplyAssistantPanelVisible] = useState(false);
+  const [replyAssistantFetchFailedByUid, setReplyAssistantFetchFailedByUid] = useState<
+    Record<number, boolean>
+  >({});
   const [replySuggestionPanelByUid, setReplySuggestionPanelByUid] = useState<
     Record<number, ReplySuggestionPanel>
   >({});
   const [chatRiskByUid, setChatRiskByUid] = useState<Record<number, ChatRiskProfile>>({});
   const [chatRiskLoadingByUid, setChatRiskLoadingByUid] = useState<Record<number, boolean>>({});
-  const [assistantProfileSnapshot, setAssistantProfileSnapshot] =
-    useState<AssistantProfileSnapshot | null>(null);
   const [emojiPanelVisible, setEmojiPanelVisible] = useState(false);
   const [emojiActiveCategory, setEmojiActiveCategory] = useState<EmojiCategoryKey>('recent');
   const [recentEmojis, setRecentEmojis] = useState<string[]>(DEFAULT_RECENT_EMOJIS);
@@ -2194,6 +2182,7 @@ export default function Home({
   const [tourVisible, setTourVisible] = useState(false);
   const [tourSeenLoaded, setTourSeenLoaded] = useState(false);
   const [tourSeen, setTourSeen] = useState(false);
+  const replyAssistantSkeletonPulse = useRef(new Animated.Value(0.45)).current;
 
   const openImagePreview = useCallback((url?: string) => {
     const finalUrl = String(url || '').trim();
@@ -2817,14 +2806,6 @@ export default function Home({
   }, []);
 
   useEffect(() => {
-    const loadReplySuggestTapSend = async () => {
-      const raw = String((await storage.getString(STORAGE_KEYS.replySuggestTapSend)) || '').trim();
-      setReplySuggestTapSend(raw === '1');
-    };
-    loadReplySuggestTapSend().catch(() => undefined);
-  }, []);
-
-  useEffect(() => {
     const uid = Number(profileData.uid) || 0;
     if (!uid) {
       setCustomStickers([]);
@@ -2970,6 +2951,27 @@ export default function Home({
     setChatMenuVisible(false);
   }, [closeQuickMenu, tourVisible]);
 
+  useEffect(() => {
+    const pulse = Animated.loop(
+      Animated.sequence([
+        Animated.timing(replyAssistantSkeletonPulse, {
+          toValue: 0.95,
+          duration: 700,
+          useNativeDriver: true,
+        }),
+        Animated.timing(replyAssistantSkeletonPulse, {
+          toValue: 0.42,
+          duration: 700,
+          useNativeDriver: true,
+        }),
+      ])
+    );
+    pulse.start();
+    return () => {
+      pulse.stop();
+    };
+  }, [replyAssistantSkeletonPulse]);
+
   const activeChatTarget = useMemo(() => {
     if (!activeChatUid) {
       return { targetUid: 0, targetType: 'private' as ChatTargetType };
@@ -3027,6 +3029,7 @@ export default function Home({
   useEffect(() => {
     if (canUseEmojiPanel) return;
     setEmojiPanelVisible(false);
+    setReplyAssistantPanelVisible(false);
   }, [canUseEmojiPanel]);
   useEffect(() => {
     recentEmojisRef.current = recentEmojis;
@@ -3055,6 +3058,18 @@ export default function Home({
     setRecentEmojis(pending);
   }, [emojiPanelVisible]);
   const selfUid = useMemo(() => profileData.uid, [profileData.uid]);
+  const activeChatLastMessage = useMemo(
+    () => (activeChatMessages.length ? activeChatMessages[activeChatMessages.length - 1] : null),
+    [activeChatMessages]
+  );
+  const canOpenReplyAssistantMenu = useMemo(() => {
+    if (!activeChatUid || !selfUid || !activeChatLastMessage) return false;
+    return Number(activeChatLastMessage.senderUid) !== Number(selfUid);
+  }, [activeChatLastMessage, activeChatUid, selfUid]);
+  const replyAssistantSeedText = useMemo(() => {
+    if (!canOpenReplyAssistantMenu) return '';
+    return String(activeChatLastMessage?.content || '').trim().slice(0, 300);
+  }, [activeChatLastMessage?.content, canOpenReplyAssistantMenu]);
   const profileDisplayName = useMemo(
     () => String(profileData.nickname || profileData.username || '我'),
     [profileData.nickname, profileData.username]
@@ -3112,6 +3127,10 @@ export default function Home({
     () => (activeChatUid ? Math.max(0, keyboardInset) : 0),
     [activeChatUid, keyboardInset]
   );
+  useEffect(() => {
+    if (canOpenReplyAssistantMenu) return;
+    setReplyAssistantPanelVisible(false);
+  }, [canOpenReplyAssistantMenu]);
 
   const getAvatarText = useCallback((value?: string) => {
     const text = String(value || '').trim();
@@ -4017,21 +4036,11 @@ export default function Home({
       payload: Record<string, any>;
     }) => {
       if (!selfUid || !chatUid || !localMessageId || !clientMessageId || !payload) return false;
-      const safeType = String(payload?.type || '').toLowerCase();
-      const payloadToSend =
-        safeType === 'text'
-          ? {
-              ...payload,
-              replySuggest: payload?.replySuggest ?? true,
-              replyStyle: String(payload?.replyStyle || replySuggestStyle).trim() || replySuggestStyle,
-              replySuggestUseProfile: payload?.replySuggestUseProfile ?? replySuggestUseProfile,
-            }
-          : payload;
       try {
         const response = await fetch(`${API_BASE}/api/chat/send`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json', ...authHeaders() },
-          body: JSON.stringify(payloadToSend),
+          body: JSON.stringify(payload),
         });
         const data = await response.json().catch(() => ({}));
         if (response.ok && data?.success && data?.data) {
@@ -4047,14 +4056,6 @@ export default function Home({
               withOutgoingEnterAnimation(data.data, { clientMessageId, appearAtMs: Date.now() }),
             ]);
           }
-          const replyPanel = normalizeReplySuggestionPanel(data?.assistant);
-          if (replyPanel && chatUid > 0) {
-            setReplySuggestionPanelByUid((prev) => ({ ...prev, [chatUid]: replyPanel }));
-          }
-          const riskProfile = normalizeChatRiskProfile(data?.risk);
-          if (riskProfile && chatUid > 0) {
-            setChatRiskByUid((prev) => ({ ...prev, [chatUid]: riskProfile }));
-          }
           return true;
         }
       } catch {}
@@ -4065,8 +4066,6 @@ export default function Home({
       authHeaders,
       insertMessages,
       markMessageAsFailed,
-      replySuggestStyle,
-      replySuggestUseProfile,
       resolvePendingMessageByServerEntry,
       selfUid,
     ]
@@ -4089,33 +4088,6 @@ export default function Home({
       setPendingRequestCount(Math.max(0, pending.length));
     } catch {}
   }, [authHeaders, handleAuthFailure]);
-
-  const loadAssistantProfile = useCallback(async () => {
-    if (!tokenRef.current) return;
-    try {
-      const response = await fetch(`${API_BASE}/api/translate/profile`, {
-        headers: { ...authHeaders() },
-      });
-      const data = await response.json().catch(() => ({}));
-      if (await handleAuthFailure(response, data)) return;
-      if (!response.ok || !data?.success || !data?.data?.profile) return;
-      const profile = data.data.profile;
-      const snapshot: AssistantProfileSnapshot = {
-        translateStyle: String(profile?.translateStyle || 'formal'),
-        explanationLevel: String(profile?.explanationLevel || 'short'),
-        replyStyle: normalizeReplySuggestStyle(profile?.replyStyle),
-      };
-      setAssistantProfileSnapshot(snapshot);
-      if (replySuggestUseProfile) {
-        setReplySuggestStyle(snapshot.replyStyle);
-      }
-    } catch {}
-  }, [authHeaders, handleAuthFailure, replySuggestUseProfile]);
-
-  useEffect(() => {
-    if (!tokenReady || !tokenRef.current) return;
-    loadAssistantProfile().catch(() => undefined);
-  }, [loadAssistantProfile, tokenReady]);
 
   const loadChatRiskProfile = useCallback(
     async (chatUid: number, { silent = true }: { silent?: boolean } = {}) => {
@@ -5947,70 +5919,93 @@ export default function Home({
     await sendTextContent(draftMessage, { clearDraft: true, focusInput: true });
   }, [canSend, draftMessage, sendTextContent]);
 
-  const requestReplySuggestions = useCallback(async () => {
-    if (replySuggestLoading) return;
-    if (!tokenRef.current || !activeChatUid || !selfUid) return;
-    const chatUid = Number(activeChatUid);
-    if (!chatUid) return;
-    const { targetUid, targetType } = decodeChatUid(chatUid);
-    if (!Number.isInteger(targetUid) || targetUid <= 0) return;
+  const requestReplySuggestions = useCallback(
+    async ({
+      sourceText = '',
+      silent = false,
+    }: {
+      sourceText?: string;
+      silent?: boolean;
+    } = {}) => {
+      if (replySuggestLoading) return false;
+      if (!tokenRef.current || !activeChatUid || !selfUid) return false;
+      if (!canOpenReplyAssistantMenu) {
+        if (!silent) {
+          Alert.alert('暂无可生成内容', '仅当最后一条消息是对方发送时可生成建议。');
+        }
+        return false;
+      }
+      const chatUid = Number(activeChatUid);
+      if (!chatUid) return false;
+      const { targetUid, targetType } = decodeChatUid(chatUid);
+      if (!Number.isInteger(targetUid) || targetUid <= 0) return false;
 
-    const draftText = String(draftMessage || '').trim();
-    const latestIncomingText = [...activeChatMessages]
-      .reverse()
-      .find(
-        (item) =>
-          String(item?.type || '').toLowerCase() === 'text' &&
-          Number(item?.senderUid) !== Number(selfUid) &&
-          String(item?.content || '').trim()
-      )?.content;
-    const text = String(draftText || latestIncomingText || '').trim().slice(0, 300);
-    if (!text) {
-      Alert.alert('暂无可生成内容', '请输入文本或等待对方消息后再试。');
-      return;
-    }
+      const text = String(sourceText || replyAssistantSeedText || '').trim().slice(0, 300);
+      if (!text) {
+        if (!silent) {
+          Alert.alert('暂无可生成内容', '当前消息不支持生成建议。');
+        }
+        return false;
+      }
 
-    setReplySuggestLoading(true);
-    try {
-      const response = await fetch(`${API_BASE}/api/chat/reply-suggest`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', ...authHeaders() },
-        body: JSON.stringify({
-          targetUid,
-          targetType,
-          text,
-          style: replySuggestStyle,
-          useProfile: replySuggestUseProfile,
-        }),
+      setReplySuggestLoading(true);
+      setReplySuggestionPanelByUid((prev) => {
+        const next = { ...prev };
+        delete next[chatUid];
+        return next;
       });
-      const data = await response.json().catch(() => ({}));
-      if (await handleAuthFailure(response, data)) return;
-      if (!response.ok || !data?.success) {
-        Alert.alert('生成失败', String(data?.message || '请稍后重试。'));
-        return;
+      setReplyAssistantFetchFailedByUid((prev) => ({ ...prev, [chatUid]: false }));
+      try {
+        const response = await fetch(`${API_BASE}/api/chat/reply-assistant`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', ...authHeaders() },
+          body: JSON.stringify({
+            targetUid,
+            targetType,
+            text,
+            count: 3,
+          }),
+        });
+        const data = await response.json().catch(() => ({}));
+        if (await handleAuthFailure(response, data)) return false;
+        if (!response.ok || !data?.success) {
+          setReplyAssistantFetchFailedByUid((prev) => ({ ...prev, [chatUid]: true }));
+          if (!silent) {
+            Alert.alert('生成失败', String(data?.message || '请稍后重试。'));
+          }
+          return false;
+        }
+        const panel = normalizeReplySuggestionPanel(data?.data);
+        if (!panel) {
+          setReplyAssistantFetchFailedByUid((prev) => ({ ...prev, [chatUid]: true }));
+          if (!silent) {
+            Alert.alert('暂无建议', '当前内容未生成可用建议。');
+          }
+          return false;
+        }
+        setReplySuggestionPanelByUid((prev) => ({ ...prev, [chatUid]: panel }));
+        setReplyAssistantFetchFailedByUid((prev) => ({ ...prev, [chatUid]: false }));
+        return true;
+      } catch {
+        setReplyAssistantFetchFailedByUid((prev) => ({ ...prev, [chatUid]: true }));
+        if (!silent) {
+          Alert.alert('网络异常', '建议生成失败，请稍后重试。');
+        }
+        return false;
+      } finally {
+        setReplySuggestLoading(false);
       }
-      const panel = normalizeReplySuggestionPanel(data?.data);
-      if (!panel) {
-        Alert.alert('暂无建议', '当前内容未生成可用建议。');
-        return;
-      }
-      setReplySuggestionPanelByUid((prev) => ({ ...prev, [chatUid]: panel }));
-    } catch {
-      Alert.alert('网络异常', '建议生成失败，请稍后重试。');
-    } finally {
-      setReplySuggestLoading(false);
-    }
-  }, [
-    activeChatMessages,
-    activeChatUid,
-    authHeaders,
-    draftMessage,
-    handleAuthFailure,
-    replySuggestLoading,
-    replySuggestStyle,
-    replySuggestUseProfile,
-    selfUid,
-  ]);
+    },
+    [
+      activeChatUid,
+      authHeaders,
+      canOpenReplyAssistantMenu,
+      handleAuthFailure,
+      replyAssistantSeedText,
+      replySuggestLoading,
+      selfUid,
+    ]
+  );
 
   const clearVoiceTicker = useCallback(() => {
     if (!voiceRecordingTickerRef.current) return;
@@ -6863,11 +6858,40 @@ export default function Home({
       return;
     }
     setEmojiPanelVisible(false);
+    setReplyAssistantPanelVisible(false);
     setVoicePanelVisible(true);
     setVoiceStatusText('按住开始录制语音');
     setVoiceGestureAction('send');
     setVoiceElapsedSec(0);
   }, [closeVoicePanel, dismissChatKeyboard]);
+
+  const toggleReplyAssistantPanel = useCallback(async () => {
+    if (!activeChatUid || !selfUid) return;
+    dismissChatKeyboard();
+    setEmojiPanelVisible(false);
+    await closeVoicePanel().catch(() => undefined);
+    if (replyAssistantPanelVisible) {
+      setReplyAssistantPanelVisible(false);
+      return;
+    }
+    if (!canOpenReplyAssistantMenu || !replyAssistantSeedText) {
+      return;
+    }
+    setReplyAssistantPanelVisible(true);
+    requestReplySuggestions({
+      sourceText: replyAssistantSeedText,
+      silent: true,
+    }).catch(() => undefined);
+  }, [
+    activeChatUid,
+    canOpenReplyAssistantMenu,
+    closeVoicePanel,
+    dismissChatKeyboard,
+    replyAssistantPanelVisible,
+    replyAssistantSeedText,
+    requestReplySuggestions,
+    selfUid,
+  ]);
 
   const preventWebVoicePanelDefault = useCallback((event: any) => {
     if (Platform.OS !== 'web') return;
@@ -8376,6 +8400,10 @@ export default function Home({
     if (!activeChatUid) return null;
     return replySuggestionPanelByUid[activeChatUid] || null;
   }, [activeChatUid, replySuggestionPanelByUid]);
+  const activeReplyAssistantFetchFailed = useMemo(() => {
+    if (!activeChatUid) return false;
+    return replyAssistantFetchFailedByUid[activeChatUid] === true;
+  }, [activeChatUid, replyAssistantFetchFailedByUid]);
   const activeChatRisk = useMemo(() => {
     if (!activeChatUid) return null;
     return chatRiskByUid[activeChatUid] || null;
@@ -8720,144 +8748,6 @@ export default function Home({
               { paddingBottom: 8 + insets.bottom, marginBottom: chatComposerBottomInset },
             ]}
           >
-            <View style={styles.replyAssistControlRow}>
-              <View style={styles.replyAssistControlTop}>
-                <Text style={styles.replyAssistControlLabel}>
-                  回复风格
-                  {assistantProfileSnapshot
-                    ? ` (默认: ${REPLY_STYLE_LABEL_MAP[assistantProfileSnapshot.replyStyle]})`
-                    : ''}
-                </Text>
-                <Pressable
-                  style={[
-                    styles.replyAssistRefreshBtn,
-                    replySuggestLoading && styles.replyAssistRefreshBtnDisabled,
-                  ]}
-                  onPress={requestReplySuggestions}
-                  disabled={replySuggestLoading}
-                >
-                  <Text style={styles.replyAssistRefreshBtnText}>
-                    {replySuggestLoading ? '生成中...' : '生成建议'}
-                  </Text>
-                </Pressable>
-              </View>
-              <View style={styles.replyAssistStyleChips}>
-                {REPLY_STYLE_OPTIONS.map((styleOption) => {
-                  const active = replySuggestStyle === styleOption;
-                  return (
-                    <Pressable
-                      key={`reply-style-${styleOption}`}
-                      style={[
-                        styles.replyAssistStyleChip,
-                        active && styles.replyAssistStyleChipActive,
-                      ]}
-                      onPress={() => {
-                        setReplySuggestStyle(styleOption);
-                        setReplySuggestUseProfile(false);
-                      }}
-                    >
-                      <Text
-                        style={[
-                          styles.replyAssistStyleChipText,
-                          active && styles.replyAssistStyleChipTextActive,
-                        ]}
-                      >
-                        {REPLY_STYLE_LABEL_MAP[styleOption]}
-                      </Text>
-                    </Pressable>
-                  );
-                })}
-              </View>
-              <View style={styles.replyAssistToggleRow}>
-                <Pressable
-                  style={[
-                    styles.replyAssistProfileBtn,
-                    replySuggestUseProfile && styles.replyAssistProfileBtnActive,
-                  ]}
-                  onPress={() => {
-                    const next = !replySuggestUseProfile;
-                    setReplySuggestUseProfile(next);
-                    if (next && assistantProfileSnapshot) {
-                      setReplySuggestStyle(assistantProfileSnapshot.replyStyle);
-                    }
-                  }}
-                >
-                  <Text
-                    style={[
-                      styles.replyAssistProfileBtnText,
-                      replySuggestUseProfile && styles.replyAssistProfileBtnTextActive,
-                    ]}
-                  >
-                    {replySuggestUseProfile ? '跟随偏好' : '手动风格'}
-                  </Text>
-                </Pressable>
-                <Pressable
-                  style={[
-                    styles.replyAssistProfileBtn,
-                    replySuggestTapSend && styles.replyAssistProfileBtnActive,
-                  ]}
-                  onPress={() => {
-                    const next = !replySuggestTapSend;
-                    setReplySuggestTapSend(next);
-                    storage
-                      .setString(STORAGE_KEYS.replySuggestTapSend, next ? '1' : '0')
-                      .catch(() => undefined);
-                  }}
-                >
-                  <Text
-                    style={[
-                      styles.replyAssistProfileBtnText,
-                      replySuggestTapSend && styles.replyAssistProfileBtnTextActive,
-                    ]}
-                  >
-                    {replySuggestTapSend ? '点击即发送: 开' : '点击即发送: 关'}
-                  </Text>
-                </Pressable>
-              </View>
-            </View>
-
-            {activeReplySuggestionPanel?.suggestions?.length ? (
-              <View style={styles.replySuggestPanel}>
-                <View style={styles.replySuggestHeader}>
-                  <Text style={styles.replySuggestTitle}>回复建议</Text>
-                  <Text style={styles.replySuggestMeta}>
-                    {activeReplySuggestionPanel.intent || 'general'}
-                    {activeReplySuggestionPanel.model ? ` · ${activeReplySuggestionPanel.model}` : ''}
-                  </Text>
-                </View>
-                <ScrollView
-                  horizontal
-                  showsHorizontalScrollIndicator={false}
-                  contentContainerStyle={styles.replySuggestList}
-                >
-                  {activeReplySuggestionPanel.suggestions.map((entry) => (
-                    <Pressable
-                      key={`reply-suggest-${entry.id}`}
-                      style={styles.replySuggestItem}
-                      onPress={() => {
-                        if (replySuggestTapSend) {
-                          void sendTextContent(entry.text, { clearDraft: false, focusInput: false });
-                          return;
-                        }
-                        setDraftMessage(entry.text);
-                        focusChatInput();
-                      }}
-                    >
-                      <Text style={styles.replySuggestText}>{entry.text}</Text>
-                      <Text style={styles.replySuggestSubText}>
-                        {REPLY_STYLE_LABEL_MAP[entry.style]} · {Math.round(entry.confidence * 100)}%
-                      </Text>
-                    </Pressable>
-                  ))}
-                </ScrollView>
-                {activeReplySuggestionPanel.suggestions[0]?.reason ? (
-                  <Text style={styles.replySuggestReason} numberOfLines={1}>
-                    {activeReplySuggestionPanel.suggestions[0].reason}
-                  </Text>
-                ) : null}
-              </View>
-            ) : null}
-
             <View style={styles.chatInputRow}>
               <TextInput
                 ref={chatInputRef}
@@ -8891,6 +8781,7 @@ export default function Home({
                 onPress={() => {
                   dismissChatKeyboard();
                   closeVoicePanel().catch(() => undefined);
+                  setReplyAssistantPanelVisible(false);
                   sendPickedImages();
                 }}
                 disabled={chatImageSending}
@@ -8903,6 +8794,7 @@ export default function Home({
                   dismissChatKeyboard();
                   setEmojiPanelVisible(false);
                   closeVoicePanel().catch(() => undefined);
+                  setReplyAssistantPanelVisible(false);
                 }}
               >
                 <ToolCameraIcon />
@@ -8913,22 +8805,86 @@ export default function Home({
                   if (!canUseEmojiPanel) return;
                   dismissChatKeyboard();
                   closeVoicePanel().catch(() => undefined);
+                  setReplyAssistantPanelVisible(false);
                   setEmojiPanelVisible((prev) => !prev);
                 }}
               >
                 <ToolEmojiIcon active={canUseEmojiPanel && emojiPanelVisible} />
               </Pressable>
               <Pressable
-                style={styles.chatToolBtn}
+                style={[styles.chatToolBtn, replyAssistantPanelVisible && styles.chatToolBtnActive]}
                 onPress={() => {
-                  dismissChatKeyboard();
-                  setEmojiPanelVisible(false);
-                  closeVoicePanel().catch(() => undefined);
+                  toggleReplyAssistantPanel().catch(() => undefined);
                 }}
               >
                 <ToolPlusIcon />
               </Pressable>
             </View>
+            {replyAssistantPanelVisible ? (
+              <View style={styles.replyAssistantPanel}>
+                <View style={styles.replyAssistantHeader}>
+                  <Text style={styles.replyAssistantTitle}>回复助手</Text>
+                  <Text style={styles.replyAssistantSub}>
+                    {replySuggestLoading
+                      ? '正在生成 3 条建议...'
+                      : activeReplyAssistantFetchFailed
+                        ? '生成失败，当前为占位状态'
+                        : '点左侧图标填充，点右侧文字直接发送'}
+                  </Text>
+                </View>
+                {activeReplySuggestionPanel?.suggestions?.length && !replySuggestLoading ? (
+                  <View style={styles.replySuggestColumn}>
+                    {activeReplySuggestionPanel.suggestions.map((entry) => (
+                      <View key={`reply-suggest-${entry.id}`} style={styles.replySuggestRowCard}>
+                        <Pressable
+                          style={styles.replySuggestEditBtn}
+                          onPress={() => {
+                            setDraftMessage(entry.text);
+                            focusChatInput();
+                            setReplyAssistantPanelVisible(false);
+                          }}
+                        >
+                          <ReplyAssistEditIcon />
+                        </Pressable>
+                        <View style={styles.replySuggestRowDivider} />
+                        <Pressable
+                          style={styles.replySuggestSendTap}
+                          onPress={() => {
+                            sendTextContent(entry.text, { clearDraft: false, focusInput: false }).catch(
+                              () => undefined
+                            );
+                            setReplyAssistantPanelVisible(false);
+                          }}
+                        >
+                          <Text style={styles.replySuggestRowText}>{entry.text}</Text>
+                        </Pressable>
+                      </View>
+                    ))}
+                  </View>
+                ) : (
+                  <View style={styles.replySuggestSkeletonList}>
+                    {[0, 1, 2].map((index) => (
+                      <Animated.View
+                        key={`reply-skeleton-${index}`}
+                        style={[styles.replySuggestSkeletonRow, { opacity: replyAssistantSkeletonPulse }]}
+                      >
+                        <View style={styles.replySuggestSkeletonEdit} />
+                        <View style={styles.replySuggestSkeletonDivider} />
+                        <View style={styles.replySuggestSkeletonBlocks}>
+                          <View style={styles.replySuggestSkeletonBlock} />
+                          <View
+                            style={[
+                              styles.replySuggestSkeletonBlock,
+                              styles.replySuggestSkeletonBlockShort,
+                            ]}
+                          />
+                        </View>
+                      </Animated.View>
+                    ))}
+                  </View>
+                )}
+              </View>
+            ) : null}
             {canUseEmojiPanel && emojiPanelVisible ? (
               <View style={styles.emojiPanel}>
                 <View style={styles.emojiPanelContent}>
@@ -11703,6 +11659,102 @@ const styles = StyleSheet.create({
     paddingHorizontal: 10,
     paddingTop: 8,
   },
+  replyAssistantPanel: {
+    marginTop: 8,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: '#e7eef8',
+    backgroundColor: '#f8fbff',
+    minHeight: 220,
+    maxHeight: 320,
+    padding: 8,
+  },
+  replyAssistantHeader: {
+    marginBottom: 8,
+    paddingHorizontal: 2,
+  },
+  replyAssistantTitle: {
+    fontSize: 15,
+    color: '#3b4d66',
+    fontWeight: '700',
+  },
+  replyAssistantSub: {
+    marginTop: 3,
+    fontSize: 12,
+    color: '#7b8ca2',
+  },
+  replySuggestColumn: {
+    gap: 10,
+  },
+  replySuggestRowCard: {
+    minHeight: 72,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: '#dbe5f4',
+    backgroundColor: '#ffffff',
+    flexDirection: 'row',
+    alignItems: 'stretch',
+    overflow: 'hidden',
+  },
+  replySuggestEditBtn: {
+    width: 56,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#f7f9fe',
+  },
+  replySuggestRowDivider: {
+    width: 1,
+    backgroundColor: '#e5ebf6',
+  },
+  replySuggestSendTap: {
+    flex: 1,
+    paddingHorizontal: 12,
+    paddingVertical: 12,
+    justifyContent: 'center',
+  },
+  replySuggestRowText: {
+    fontSize: 18,
+    lineHeight: 27,
+    color: '#4a3f4e',
+    fontWeight: '500',
+  },
+  replySuggestSkeletonList: {
+    gap: 10,
+  },
+  replySuggestSkeletonRow: {
+    minHeight: 72,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: '#dbe5f4',
+    backgroundColor: '#d9dbe2',
+    flexDirection: 'row',
+    alignItems: 'stretch',
+    overflow: 'hidden',
+  },
+  replySuggestSkeletonEdit: {
+    width: 56,
+    backgroundColor: '#cfd3dc',
+  },
+  replySuggestSkeletonDivider: {
+    width: 1,
+    backgroundColor: '#bec5d2',
+  },
+  replySuggestSkeletonBlocks: {
+    flex: 1,
+    paddingHorizontal: 12,
+    paddingVertical: 12,
+    justifyContent: 'center',
+    gap: 8,
+  },
+  replySuggestSkeletonBlock: {
+    height: 14,
+    width: '88%',
+    borderRadius: 6,
+    backgroundColor: '#c7ccd7',
+  },
+  replySuggestSkeletonBlockShort: {
+    width: '62%',
+  },
   replyAssistControlRow: {
     borderWidth: 1,
     borderColor: '#e8edf6',
@@ -11855,6 +11907,19 @@ const styles = StyleSheet.create({
   replySuggestReason: {
     marginTop: 7,
     fontSize: 11,
+    color: '#6b8099',
+  },
+  replySuggestEmpty: {
+    flex: 1,
+    borderWidth: 1,
+    borderColor: '#dfe9f7',
+    borderRadius: 10,
+    backgroundColor: '#ffffff',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  replySuggestEmptyText: {
+    fontSize: 12,
     color: '#6b8099',
   },
   chatInputRow: {
@@ -12365,6 +12430,22 @@ function ToolEmojiIcon({ active = false }: { active?: boolean }) {
       <Path d="M9 10H9.01" stroke={stroke} strokeWidth={2.6} strokeLinecap="round" />
       <Path d="M15 10H15.01" stroke={stroke} strokeWidth={2.6} strokeLinecap="round" />
       <Path d="M8.5 14C9.3 15.2 10.5 16 12 16C13.5 16 14.7 15.2 15.5 14" stroke={stroke} strokeWidth={2} strokeLinecap="round" />
+    </Svg>
+  );
+}
+
+function ReplyAssistEditIcon() {
+  return (
+    <Svg width={24} height={24} viewBox="0 0 24 24" fill="none">
+      <Path
+        d="M4 16.5V20h3.5L17.9 9.6l-3.5-3.5L4 16.5Z"
+        stroke="#e7ebf4"
+        strokeWidth={1.8}
+        fill="#f4f6fc"
+        strokeLinejoin="round"
+      />
+      <Path d="M13.6 6.8l3.5 3.5" stroke="#cfd8ea" strokeWidth={1.8} strokeLinecap="round" />
+      <Path d="M6 20h12" stroke="#d6dced" strokeWidth={1.8} strokeLinecap="round" />
     </Svg>
   );
 }

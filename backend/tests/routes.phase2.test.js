@@ -103,7 +103,7 @@ const buildFriendship = async (baseUrl, userA, userB) => {
   assert.equal(second.payload.success, true);
 };
 
-test('Phase2: chat/send returns risk info and /api/chat/risk shows conversation warning', async () => {
+test('Phase2: risk evaluation is decoupled from chat/send and available via dedicated API', async () => {
   await withEnv(
     {
       FEATURE_RISK_GUARD_ENABLED: 'true',
@@ -124,17 +124,30 @@ test('Phase2: chat/send returns risk info and /api/chat/risk shows conversation 
             targetUid: userB.uid,
             targetType: 'private',
             type: 'text',
-            content: '限时优惠，点击 http://bit.ly/wallet-verify 立即返现，长期稳定。',
+            content: 'limited offer: click http://bit.ly/wallet-verify now',
           },
         });
         assert.equal(sendResult.response.status, 200);
         assert.equal(sendResult.payload.success, true);
         assert.equal(typeof sendResult.payload.data?.id, 'string');
-        assert.equal(typeof sendResult.payload.risk?.score, 'number');
-        assert.equal(['low', 'medium', 'high'].includes(sendResult.payload.risk?.level), true);
+        assert.equal(Object.prototype.hasOwnProperty.call(sendResult.payload, 'risk'), false);
+
+        const evaluateResult = await jsonFetch(`${baseUrl}/api/chat/risk/evaluate`, {
+          method: 'POST',
+          token: userA.token,
+          body: {
+            targetType: 'private',
+            targetUid: userB.uid,
+            text: 'limited offer: click http://bit.ly/wallet-verify now',
+          },
+        });
+        assert.equal(evaluateResult.response.status, 200);
+        assert.equal(evaluateResult.payload.success, true);
+        assert.equal(typeof evaluateResult.payload.data?.score, 'number');
+        assert.equal(['low', 'medium', 'high'].includes(evaluateResult.payload.data?.level), true);
         assert.equal(
-          Array.isArray(sendResult.payload.risk?.tags) &&
-            sendResult.payload.risk.tags.some(
+          Array.isArray(evaluateResult.payload.data?.tags) &&
+            evaluateResult.payload.data.tags.some(
               (tag) => tag === 'malicious_link' || tag === 'ads_spam' || tag === 'flooding'
             ),
           true
@@ -322,3 +335,4 @@ test('Phase2: risk guard can be disabled and response falls back to old behavior
     }
   );
 });
+

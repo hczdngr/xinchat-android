@@ -6,6 +6,7 @@
  */
 
 import { parseBooleanEnv } from '../featureFlags.js';
+import { getRecoUserPersona } from '../reco/index.js';
 import { normalizeReplyStyle, resolveAssistantProfileFromUser } from './preferences.js';
 
 const STYLE_LIST = ['polite', 'concise', 'formal'];
@@ -41,52 +42,52 @@ const decodeHardcodedGeminiKey = () => {
 const TEMPLATE_MAP = {
   polite: {
     question: [
-      'Got it. Let me confirm and get back to you shortly.',
-      'Thanks for checking. I will verify and reply soon.',
-      'Understood. I will follow up after I confirm the details.',
+      '我明白了，我先确认一下，稍后回复你。',
+      '收到你的问题，我核实后第一时间回你。',
+      '好的，我先看下具体情况，马上给你答复。',
     ],
     gratitude: [
-      'You are welcome. Let me know if you need anything else.',
-      'Happy to help. I will keep following up on this.',
-      'No problem. I appreciate the update.',
+      '不客气，有需要你随时说。',
+      '收到，谢谢你的反馈，我会继续跟进。',
+      '没问题，感谢你及时更新信息。',
     ],
     urgent: [
-      'Received. I will prioritize this right away.',
-      'Understood. I am handling this now and will keep you posted.',
-      'Thanks for the reminder. I will move this up immediately.',
+      '收到，这件事我现在优先处理。',
+      '明白，我马上跟进并及时同步进展。',
+      '已收到提醒，我这边立即处理。',
     ],
     general: [
-      'Got it. I will review and reply soon.',
-      'Understood. I am following up on this now.',
-      'Received. I will send you an update shortly.',
+      '收到，我先看一下，稍后回复你。',
+      '明白了，我这边正在跟进。',
+      '好的，有进展我会马上告诉你。',
     ],
   },
   concise: {
-    question: ['Got it, will confirm soon.', 'Seen, reply soon.', 'On it, give me a moment.'],
-    gratitude: ['No problem.', 'Got it.', 'Anytime.'],
-    urgent: ['On it now.', 'Priority set, handling.', 'Seen, following up now.'],
-    general: ['Got it.', 'Seen.', 'Will reply soon.'],
+    question: ['收到，稍后确认。', '看到了，马上回你。', '明白，我先处理。'],
+    gratitude: ['不客气。', '收到。', '随时联系。'],
+    urgent: ['马上处理。', '已提优先级。', '已看到，正在跟进。'],
+    general: ['收到。', '明白。', '稍后回复。'],
   },
   formal: {
     question: [
-      'Your question has been received. I will verify and respond promptly.',
-      'Thank you for the clarification. I will confirm and follow up shortly.',
-      'I have received your request and will provide an update after validation.',
+      '已收到你的问题，我会核实后尽快回复。',
+      '感谢你的说明，我确认后会及时反馈。',
+      '你的请求我已收到，处理后会第一时间同步。',
     ],
     gratitude: [
-      'Thank you for your feedback. Please feel free to reach out anytime.',
-      'Your support is appreciated. I will continue to track this item.',
-      'Acknowledged. Subsequent progress will be shared in time.',
+      '感谢你的反馈，后续如有需要可随时联系。',
+      '感谢支持，我会持续跟进该事项。',
+      '已知悉，后续进展会及时同步给你。',
     ],
     urgent: [
-      'Acknowledged. This item will be handled with immediate priority.',
-      'Understood. I will expedite processing and report back promptly.',
-      'Thank you for the reminder. I am prioritizing this task now.',
+      '已知悉，该事项将立即优先处理。',
+      '明白，我会加快处理并及时反馈结果。',
+      '感谢提醒，我已将此任务提升为优先级。',
     ],
     general: [
-      'Message received. I will process it and reply as soon as possible.',
-      'Noted. I will proceed with follow-up according to plan.',
-      'Acknowledged. I will provide a timely update after handling this.',
+      '消息已收到，我会尽快处理并回复。',
+      '已记录，我会按计划推进并同步进展。',
+      '已知悉，处理后将及时向你反馈。',
     ],
   },
 };
@@ -148,15 +149,15 @@ const detectIntent = (text) => {
 
 const buildReason = (intent, style) => {
   const intentReasonMap = {
-    question: 'Detected a question-like message that benefits from a confirm-and-follow-up tone.',
-    gratitude: 'Detected appreciation language and kept a positive response tone.',
-    urgent: 'Detected urgency and prioritized direct action language.',
-    general: 'General conversation context, kept response clear and actionable.',
+    question: '检测到对方在提问，建议先确认再反馈。',
+    gratitude: '检测到感谢语气，建议保持积极友好回应。',
+    urgent: '检测到紧急语义，建议直接给出处理动作。',
+    general: '普通聊天语境，建议给出清晰可执行回复。',
   };
   const styleReasonMap = {
-    polite: 'Style set to polite for friendly communication.',
-    concise: 'Style set to concise for quick send.',
-    formal: 'Style set to formal for professional contexts.',
+    polite: '语气采用礼貌风格。',
+    concise: '语气采用简洁风格。',
+    formal: '语气采用正式风格。',
   };
   return `${intentReasonMap[intent] || intentReasonMap.general} ${styleReasonMap[style] || ''}`.trim();
 };
@@ -236,7 +237,7 @@ const normalizeIntent = (value, fallback = 'general') => {
   return fallback;
 };
 
-const buildPersonaContext = (user) => {
+const buildPersonaContext = ({ user, recoPersona = null } = {}) => {
   const analysis = user?.aiProfile?.analysis && typeof user.aiProfile.analysis === 'object'
     ? user.aiProfile.analysis
     : {};
@@ -255,6 +256,10 @@ const buildPersonaContext = (user) => {
     .map((item) => toShortText(item, 80))
     .filter(Boolean)
     .slice(0, 5);
+  const recoTags = (Array.isArray(recoPersona?.personalizedTags) ? recoPersona.personalizedTags : [])
+    .map((item) => toShortText(item, 60))
+    .filter(Boolean)
+    .slice(0, 8);
 
   const lines = [
     `profile_summary: ${toShortText(analysis.profileSummary || '', 420) || 'none'}`,
@@ -264,6 +269,7 @@ const buildPersonaContext = (user) => {
     `risk_level: ${toShortText(depression.level || 'unknown', 20) || 'unknown'}`,
     `risk_reason: ${toShortText(depression.reason || '', 200) || 'none'}`,
     `risk_signals: ${riskSignals.join('; ') || 'none'}`,
+    `vw_persona_tags: ${recoTags.join('; ') || 'none'}`,
   ];
   return lines.join('\n');
 };
@@ -275,18 +281,17 @@ const buildGeminiPrompt = ({ text, styleSequence, profile, personaContext }) => 
   const explanationLevel = toShortText(profile?.explanationLevel || '', 20) || 'none';
 
   return `
-You are a reply suggestion assistant for a social chat app.
-Return strict JSON only.
+你是社交聊天产品的“回复助手”。
+请严格输出 JSON，不要输出 markdown。
 
-Task:
-1) Generate exactly ${styleSequence.length} short sendable reply suggestions for the latest message.
-2) Follow style plan in exact order: [${stylesLine}].
-3) Keep each suggestion concise, natural, and context-aware.
-4) Use the same language as the latest message when clear.
-5) Ground tone using the user profile and inferred persona context.
-6) Do not output markdown or non-JSON text.
+任务要求：
+1) 生成 ${styleSequence.length} 条可直接发送的回复建议。
+2) 建议风格顺序必须是：[${stylesLine}]。
+3) 每条建议必须使用中文，简洁、自然、贴合上下文。
+4) 结合用户画像与 VW 偏好标签，自动匹配语气。
+5) 不要输出 JSON 以外的任何内容。
 
-Output schema:
+输出 JSON 结构：
 {
   "intent": "question|gratitude|urgent|general",
   "suggestions": [
@@ -299,15 +304,15 @@ Output schema:
   ]
 }
 
-Profile context:
+用户偏好上下文：
 - preferred_reply_style: ${preferredStyle}
 - preferred_translate_style: ${preferredTranslateStyle}
 - explanation_level: ${explanationLevel}
 
-Inferred persona context:
+画像与行为上下文：
 ${personaContext}
 
-Latest message:
+对方最后一条消息：
 ${text}
 `.trim();
 };
@@ -344,7 +349,7 @@ const callGeminiForReply = async ({ apiKey, prompt, requestedModel }) => {
       });
       const payload = await response.json().catch(() => ({}));
       if (!response.ok) {
-        const error = new Error(payload?.error?.message || `Gemini request failed (${response.status})`);
+        const error = new Error(payload?.error?.message || `Gemini 请求失败（${response.status}）`);
         error.status = response.status;
         lastError = error;
         continue;
@@ -352,7 +357,7 @@ const callGeminiForReply = async ({ apiKey, prompt, requestedModel }) => {
       const text = extractGeminiText(payload);
       const parsed = parseModelJson(text);
       if (!parsed || typeof parsed !== 'object') {
-        lastError = new Error('Gemini returned invalid JSON payload');
+        lastError = new Error('Gemini 返回了无效 JSON');
         continue;
       }
       return { model, payload: parsed };
@@ -360,7 +365,7 @@ const callGeminiForReply = async ({ apiKey, prompt, requestedModel }) => {
       lastError = error;
     }
   }
-  throw lastError || new Error('Gemini reply assistant unavailable');
+  throw lastError || new Error('Gemini 回复助手暂不可用');
 };
 
 const buildLocalSuggestionBundle = ({ text, intent, sequence, profile }) => {
@@ -437,12 +442,11 @@ const generateReplySuggestions = async ({
   text,
   user,
   requestedStyle = '',
-  useProfile = true,
   count = 3,
 } = {}) => {
   const safeText = String(text || '').replace(/\s+/g, ' ').trim().slice(0, REPLY_GEMINI_MAX_CHARS);
   const profile = resolveAssistantProfileFromUser(user);
-  const fallbackStyle = useProfile ? profile.replyStyle : '';
+  const fallbackStyle = profile.replyStyle;
   const styleForSingle = normalizeReplyStyle(requestedStyle, fallbackStyle);
   const safeCount = clampCount(count, 3);
   const sequence = buildStyleSequence({
@@ -458,13 +462,22 @@ const generateReplySuggestions = async ({
     sequence,
     profile,
   });
+  const safeUid = Number(user?.uid) || 0;
+  let recoPersona = null;
+  if (safeUid > 0) {
+    try {
+      recoPersona = await getRecoUserPersona(safeUid);
+    } catch {
+      recoPersona = null;
+    }
+  }
 
   const apiKey = String(process.env.GEMINI_API_KEY || decodeHardcodedGeminiKey()).trim();
   if (!REPLY_GEMINI_ENABLED || !apiKey || !safeText) {
     return {
       ...localBundle,
       degraded: REPLY_GEMINI_ENABLED && !apiKey,
-      reason: REPLY_GEMINI_ENABLED && !apiKey ? 'missing_gemini_api_key' : '',
+      reason: REPLY_GEMINI_ENABLED && !apiKey ? '未配置 Gemini 密钥，已使用本地建议。' : '',
     };
   }
 
@@ -477,7 +490,7 @@ const generateReplySuggestions = async ({
     text: safeText,
     styleSequence: sequence,
     profile,
-    personaContext: buildPersonaContext(user),
+    personaContext: buildPersonaContext({ user, recoPersona }),
   });
 
   try {
@@ -504,7 +517,7 @@ const generateReplySuggestions = async ({
     return {
       ...localBundle,
       degraded: true,
-      reason: String(error?.message || 'gemini_reply_failed'),
+      reason: String(error?.message || 'Gemini 服务暂不可用，已切换本地建议。'),
     };
   }
 };

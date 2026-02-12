@@ -519,6 +519,43 @@ const routeMeta = [
   },
   {
     method: 'POST',
+    path: '/api/chat/risk/evaluate',
+    label: 'Evaluate text risk',
+    note: 'Evaluate current outgoing text risk for a target chat (decoupled from chat/send).',
+    templates: [
+      {
+        name: 'Evaluate private chat text',
+        body: {
+          targetType: 'private',
+          targetUid: 100000001,
+          text: 'limited offer: click http://bit.ly/example now',
+        },
+        hint: 'Authorization: Bearer <token>',
+      },
+    ],
+  },
+  {
+    method: 'POST',
+    path: '/api/chat/reply-assistant',
+    label: 'Reply assistant',
+    note: 'Generate 3 reply suggestions for latest incoming message context.',
+    templates: [
+      {
+        name: 'Generate private chat reply suggestions',
+        body: {
+          targetType: 'private',
+          targetUid: 100000001,
+          text: '今晚有空吗？',
+          style: 'polite',
+          useProfile: true,
+          count: 3,
+        },
+        hint: 'Authorization: Bearer <token>',
+      },
+    ],
+  },
+  {
+    method: 'POST',
     path: '/api/chat/risk/ignore',
     label: 'Ignore chat risk',
     note: 'Ignore risk warning for current conversation.',

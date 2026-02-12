@@ -163,7 +163,7 @@ test('POST /api/chat/reply-suggest returns 3 suggestions with style and confiden
           body: {
             targetType: 'private',
             targetUid: userB.uid,
-            text: '你今晚有空吗？',
+            text: 'Are you free tonight?',
             style: 'formal',
           },
         });
@@ -182,7 +182,7 @@ test('POST /api/chat/reply-suggest returns 3 suggestions with style and confiden
   );
 });
 
-test('POST /api/chat/send can attach reply assistant suggestions when enabled', async () => {
+test('POST /api/chat/send is decoupled from reply assistant payload', async () => {
   await withEnv(
     {
       FEATURE_REPLY_ASSISTANT_ENABLED: 'true',
@@ -201,7 +201,7 @@ test('POST /api/chat/send can attach reply assistant suggestions when enabled', 
             targetUid: userB.uid,
             targetType: 'private',
             type: 'text',
-            content: '我晚点把文件发给你。',
+            content: 'I will send the file tonight.',
             replySuggest: true,
             replyStyle: 'polite',
           },
@@ -209,9 +209,25 @@ test('POST /api/chat/send can attach reply assistant suggestions when enabled', 
         assert.equal(sendResult.response.status, 200);
         assert.equal(sendResult.payload.success, true);
         assert.equal(typeof sendResult.payload.data?.id, 'string');
-        assert.equal(Array.isArray(sendResult.payload.assistant?.replySuggestions), true);
-        assert.equal(sendResult.payload.assistant?.replySuggestions?.length, 3);
+        assert.equal(Object.prototype.hasOwnProperty.call(sendResult.payload, 'assistant'), false);
+
+        const suggestResult = await jsonFetch(`${baseUrl}/api/chat/reply-assistant`, {
+          method: 'POST',
+          token: userA.token,
+          body: {
+            targetType: 'private',
+            targetUid: userB.uid,
+            text: 'Are you free tonight?',
+            style: 'polite',
+            count: 3,
+          },
+        });
+        assert.equal(suggestResult.response.status, 200);
+        assert.equal(suggestResult.payload.success, true);
+        assert.equal(Array.isArray(suggestResult.payload.data?.suggestions), true);
+        assert.equal(suggestResult.payload.data?.suggestions?.length, 3);
       });
     }
   );
 });
+

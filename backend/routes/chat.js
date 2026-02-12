@@ -65,6 +65,10 @@ const chatRiskQueryLimiter = createMemoryRateLimiter({
   windowMs: Number.parseInt(String(process.env.RISK_PROFILE_RATE_WINDOW_MS || '60000'), 10) || 60_000,
   max: Number.parseInt(String(process.env.RISK_PROFILE_RATE_MAX || '90'), 10) || 90,
 });
+const chatRiskEvaluateLimiter = createMemoryRateLimiter({
+  windowMs: Number.parseInt(String(process.env.RISK_EVALUATE_RATE_WINDOW_MS || '60000'), 10) || 60_000,
+  max: Number.parseInt(String(process.env.RISK_EVALUATE_RATE_MAX || '90'), 10) || 90,
+});
 const chatRiskIgnoreLimiter = createMemoryRateLimiter({
   windowMs: Number.parseInt(String(process.env.RISK_IGNORE_RATE_WINDOW_MS || '60000'), 10) || 60_000,
   max: Number.parseInt(String(process.env.RISK_IGNORE_RATE_MAX || '30'), 10) || 30,
@@ -1195,13 +1199,13 @@ const loadDeleteCutoffMapByDevice = (database, { uid, deviceId }) => {
 
 const verifyChatTargetAccess = async ({ user, users, targetType, targetUid }) => {
   if (!isValidTargetType(targetType) || !isValidUid(targetUid)) {
-    return { ok: false, status: 400, message: 'Request failed.' };
+    return { ok: false, status: 400, message: '会话参数无效。' };
   }
 
   if (targetType === 'private') {
     const targetUser = users.find((item) => item.uid === targetUid);
     if (!targetUser) {
-      return { ok: false, status: 404, message: 'Request failed.' };
+      return { ok: false, status: 404, message: '会话对象不存在。' };
     }
     const isMutualFriend =
       Array.isArray(user.friends) &&
@@ -1209,18 +1213,18 @@ const verifyChatTargetAccess = async ({ user, users, targetType, targetUid }) =>
       Array.isArray(targetUser.friends) &&
       targetUser.friends.includes(user.uid);
     if (!isMutualFriend) {
-      return { ok: false, status: 403, message: 'Request failed.' };
+      return { ok: false, status: 403, message: '暂无该会话访问权限。' };
     }
     return { ok: true, targetUser };
   }
 
   const group = await getGroupById(targetUid);
   if (!group) {
-    return { ok: false, status: 404, message: 'Request failed.' };
+    return { ok: false, status: 404, message: '会话对象不存在。' };
   }
   const memberSet = new Set(Array.isArray(group.memberUids) ? group.memberUids : []);
   if (!memberSet.has(user.uid)) {
-    return { ok: false, status: 403, message: 'Request failed.' };
+    return { ok: false, status: 403, message: '暂无该会话访问权限。' };
   }
   return { ok: true, group };
 };
@@ -1235,11 +1239,11 @@ const normalizeRiskTarget = (raw) => {
   return { targetType, targetUid };
 };
 
-router.post('/reply-suggest', authenticate, async (req, res) => {
+const handleReplySuggest = async (req, res) => {
   try {
     const rateKey = makeReplySuggestRateKey(req);
     if (!replySuggestLimiter.consume(rateKey)) {
-      res.status(429).json({ success: false, message: 'Too many requests.' });
+      res.status(429).json({ success: false, message: '请求过于频繁。' });
       return;
     }
 
@@ -1268,7 +1272,7 @@ router.post('/reply-suggest', authenticate, async (req, res) => {
             : '';
     const text = String(textRaw || '').trim().slice(0, 300);
     if (!text) {
-      res.status(400).json({ success: false, message: 'text is required.' });
+      res.status(400).json({ success: false, message: '缺少文本内容。' });
       return;
     }
 
@@ -1284,22 +1288,32 @@ router.post('/reply-suggest', authenticate, async (req, res) => {
       return;
     }
 
+    const isReplyAssistantRoute = String(req.path || '').endsWith('/reply-assistant');
     const suggestionBundle = await generateReplySuggestions({
       text,
       user,
-      requestedStyle: body.style || body.replyStyle || '',
-      useProfile: toBoolean(body.useProfile, true),
-      count: body.count,
+      requestedStyle: isReplyAssistantRoute ? '' : body.style || body.replyStyle || '',
+      count: isReplyAssistantRoute ? 3 : body.count,
     });
+    const intentLabelMap = {
+      question: '提问',
+      gratitude: '感谢',
+      urgent: '紧急',
+      general: '通用',
+    };
+    const localizedBundle = {
+      ...suggestionBundle,
+      intentLabel: intentLabelMap[String(suggestionBundle.intent || 'general')] || '通用',
+    };
 
     trackRouteEvent(req, {
       eventType: 'impression',
       targetUid,
       targetType,
-      tags: ['reply_suggest', suggestionBundle.styleMode],
+      tags: ['reply_suggest', localizedBundle.styleMode],
       metadata: {
-        count: suggestionBundle.count,
-        intent: suggestionBundle.intent,
+        count: localizedBundle.count,
+        intent: localizedBundle.intent,
       },
     });
 
@@ -1307,12 +1321,127 @@ router.post('/reply-suggest', authenticate, async (req, res) => {
       success: true,
       data: {
         enabled: true,
-        ...suggestionBundle,
+        ...localizedBundle,
       },
     });
   } catch (error) {
     console.error('Reply suggest error:', error);
-    res.status(500).json({ success: false, message: 'Request failed.' });
+    res.status(500).json({ success: false, message: '请求失败。' });
+  }
+};
+
+router.post('/reply-suggest', authenticate, handleReplySuggest);
+router.post('/reply-assistant', authenticate, handleReplySuggest);
+
+router.post('/risk/evaluate', authenticate, async (req, res) => {
+  try {
+    const rateKey = makeRiskRateKey(req, 'risk_evaluate');
+    if (!chatRiskEvaluateLimiter.consume(rateKey)) {
+      res.status(429).json({ success: false, message: '请求过于频繁。' });
+      return;
+    }
+
+    const body = req.body || {};
+    const target = normalizeRiskTarget(body);
+    if (!target) {
+      res.status(400).json({ success: false, message: '缺少目标会话参数。' });
+      return;
+    }
+    const text = String(body.text || body.content || '').trim().slice(0, 600);
+    if (!text) {
+      res.status(400).json({ success: false, message: '缺少文本内容。' });
+      return;
+    }
+
+    const { user, users } = req.auth;
+    const access = await verifyChatTargetAccess({
+      user,
+      users,
+      targetType: target.targetType,
+      targetUid: target.targetUid,
+    });
+    if (!access.ok) {
+      res.status(access.status).json({ success: false, message: access.message });
+      return;
+    }
+
+    if (!isFeatureEnabled('riskGuard')) {
+      res.json({
+        success: true,
+        data: {
+          enabled: false,
+          source: 'chat_send',
+          available: true,
+          score: 0,
+          level: 'low',
+          tags: [],
+          evidence: [],
+          summary: '风控功能未开启。',
+          generatedAt: new Date().toISOString(),
+        },
+      });
+      return;
+    }
+
+    const database = await openDb();
+    let risk = null;
+    try {
+      risk = await assessOutgoingTextRisk({
+        database,
+        senderUid: user.uid,
+        targetUid: target.targetUid,
+        targetType: target.targetType,
+        text,
+        nowMs: Date.now(),
+      });
+    } catch {
+      risk = {
+        source: 'chat_send',
+        available: false,
+        score: 0,
+        level: 'low',
+        tags: [],
+        evidence: [],
+        summary: '风险评估服务暂不可用。',
+        generatedAt: new Date().toISOString(),
+      };
+    }
+
+    if (risk && (risk.level === 'medium' || risk.level === 'high')) {
+      trackRouteEvent(req, {
+        eventType: 'risk_hit',
+        targetUid: target.targetUid,
+        targetType: target.targetType,
+        tags: ['chat_risk_evaluate', String(risk.level || 'low'), ...(Array.isArray(risk.tags) ? risk.tags : [])],
+        reason: String(risk.summary || '').slice(0, 120),
+        metadata: {
+          riskScore: Number(risk.score) || 0,
+          riskTags: Array.isArray(risk.tags) ? risk.tags : [],
+        },
+      });
+      void recordRiskDecision({
+        channel: 'chat_risk_evaluate',
+        actorUid: user.uid,
+        subjectUid: user.uid,
+        targetUid: target.targetUid,
+        targetType: target.targetType,
+        risk,
+        metadata: {
+          textLength: text.length,
+        },
+      }).catch(() => undefined);
+    }
+
+    res.json({
+      success: true,
+      data: {
+        enabled: true,
+        ...risk,
+      },
+    });
+  } catch (error) {
+    console.error('Chat risk evaluate error:', error);
+    res.status(500).json({ success: false, message: '请求失败。' });
   }
 });
 
@@ -1320,14 +1449,14 @@ router.get('/risk', authenticate, async (req, res) => {
   try {
     const rateKey = makeRiskRateKey(req, 'risk_profile');
     if (!chatRiskQueryLimiter.consume(rateKey)) {
-      res.status(429).json({ success: false, message: 'Too many requests.' });
+      res.status(429).json({ success: false, message: '请求过于频繁。' });
       return;
     }
 
     const payload = { ...(req.query || {}), ...(req.body || {}) };
     const target = normalizeRiskTarget(payload);
     if (!target) {
-      res.status(400).json({ success: false, message: 'targetType and targetUid are required.' });
+      res.status(400).json({ success: false, message: '缺少目标会话参数。' });
       return;
     }
 
@@ -1354,7 +1483,7 @@ router.get('/risk', authenticate, async (req, res) => {
           level: 'low',
           tags: [],
           evidence: [],
-          summary: 'risk guard is disabled.',
+          summary: '风控功能未开启。',
           ignored: false,
           targetUid: target.targetUid,
           targetType: target.targetType,
@@ -1381,7 +1510,7 @@ router.get('/risk', authenticate, async (req, res) => {
         level: 'low',
         tags: [],
         evidence: [],
-        summary: 'risk profile unavailable.',
+        summary: '风险画像暂不可用。',
         ignored: false,
         generatedAt: new Date().toISOString(),
         targetUid: target.targetUid,
@@ -1410,7 +1539,7 @@ router.get('/risk', authenticate, async (req, res) => {
     });
   } catch (error) {
     console.error('Chat risk profile error:', error);
-    res.status(500).json({ success: false, message: 'Request failed.' });
+    res.status(500).json({ success: false, message: '请求失败。' });
   }
 });
 
@@ -1418,7 +1547,7 @@ router.post('/risk/ignore', authenticate, async (req, res) => {
   try {
     const rateKey = makeRiskRateKey(req, 'risk_ignore');
     if (!chatRiskIgnoreLimiter.consume(rateKey)) {
-      res.status(429).json({ success: false, message: 'Too many requests.' });
+      res.status(429).json({ success: false, message: '请求过于频繁。' });
       return;
     }
 
@@ -1436,7 +1565,7 @@ router.post('/risk/ignore', authenticate, async (req, res) => {
 
     const target = normalizeRiskTarget(req.body || {});
     if (!target) {
-      res.status(400).json({ success: false, message: 'targetType and targetUid are required.' });
+      res.status(400).json({ success: false, message: '缺少目标会话参数。' });
       return;
     }
 
@@ -1482,7 +1611,7 @@ router.post('/risk/ignore', authenticate, async (req, res) => {
     });
   } catch (error) {
     console.error('Chat risk ignore error:', error);
-    res.status(500).json({ success: false, message: 'Request failed.' });
+    res.status(500).json({ success: false, message: '请求失败。' });
   }
 });
 
@@ -1490,7 +1619,7 @@ router.post('/risk/appeal', authenticate, async (req, res) => {
   try {
     const rateKey = makeRiskRateKey(req, 'risk_appeal');
     if (!chatRiskAppealLimiter.consume(rateKey)) {
-      res.status(429).json({ success: false, message: 'Too many requests.' });
+      res.status(429).json({ success: false, message: '请求过于频繁。' });
       return;
     }
 
@@ -1508,7 +1637,7 @@ router.post('/risk/appeal', authenticate, async (req, res) => {
 
     const target = normalizeRiskTarget(req.body || {});
     if (!target) {
-      res.status(400).json({ success: false, message: 'targetType and targetUid are required.' });
+      res.status(400).json({ success: false, message: '缺少目标会话参数。' });
       return;
     }
     const { user, users } = req.auth;
@@ -1556,7 +1685,7 @@ router.post('/risk/appeal', authenticate, async (req, res) => {
     });
   } catch (error) {
     console.error('Chat risk appeal error:', error);
-    res.status(500).json({ success: false, message: 'Request failed.' });
+    res.status(500).json({ success: false, message: '请求失败。' });
   }
 });
 
@@ -1598,23 +1727,11 @@ router.post('/send', authenticate, async (req, res) => {
       senderUid: _,
       targetUid: __,
       targetType: ___,
-      replySuggest: replySuggestRaw,
-      replyStyle: replyStyleRaw,
-      replySuggestStyle: replySuggestStyleRaw,
-      replySuggestUseProfile: replySuggestUseProfileRaw,
       recoDecisionId: recoDecisionIdRaw,
       recoCandidateId: recoCandidateIdRaw,
       recoFeedbackAction: recoFeedbackActionRaw,
       ...data
     } = body;
-    const shouldAttachReplySuggest =
-      toBoolean(replySuggestRaw, true) && isFeatureEnabled('replyAssistant');
-    const requestedReplyStyle =
-      typeof replySuggestStyleRaw === 'string' && replySuggestStyleRaw.trim()
-        ? replySuggestStyleRaw.trim()
-        : typeof replyStyleRaw === 'string'
-          ? replyStyleRaw.trim()
-          : '';
     const recoDecisionId =
       typeof recoDecisionIdRaw === 'string' ? recoDecisionIdRaw.trim().slice(0, 80) : '';
     const recoCandidateId =
@@ -1623,7 +1740,6 @@ router.post('/send', authenticate, async (req, res) => {
       typeof recoFeedbackActionRaw === 'string'
         ? recoFeedbackActionRaw.trim().toLowerCase().slice(0, 32)
         : 'reply';
-    const replySuggestUseProfile = toBoolean(replySuggestUseProfileRaw, true);
     const messageData = { ...data };
     const baseUrl = `${req.protocol}://${req.get('host')}`;
     if (type === 'text') {
@@ -1839,31 +1955,6 @@ router.post('/send', authenticate, async (req, res) => {
     };
 
     const database = await openDb();
-    let risk = null;
-    if (isFeatureEnabled('riskGuard') && type === 'text') {
-      try {
-        const text = String(messageData.content || '').trim();
-        risk = await assessOutgoingTextRisk({
-          database,
-          senderUid,
-          targetUid,
-          targetType,
-          text,
-          nowMs: createdAtMs,
-        });
-      } catch (riskError) {
-        risk = {
-          source: 'chat_send',
-          available: false,
-          score: 0,
-          level: 'low',
-          tags: [],
-          evidence: [],
-          summary: 'risk scorer unavailable.',
-          generatedAt: new Date().toISOString(),
-        };
-      }
-    }
 
     executePrepared(
       database,
@@ -1889,72 +1980,6 @@ router.post('/send', authenticate, async (req, res) => {
       setImmediate(() => chatNotifier(entry));
     }
 
-    if (risk && (risk.level === 'medium' || risk.level === 'high')) {
-      trackRouteEvent(req, {
-        eventType: 'risk_hit',
-        targetUid: entry.targetUid,
-        targetType: entry.targetType,
-        tags: ['chat_send', String(risk.level || 'low'), ...(Array.isArray(risk.tags) ? risk.tags : [])],
-        reason: String(risk.summary || '').slice(0, 120),
-        metadata: {
-          messageId: entry.id,
-          riskScore: Number(risk.score) || 0,
-          riskTags: Array.isArray(risk.tags) ? risk.tags : [],
-        },
-      });
-      void recordRiskDecision({
-        channel: 'chat_send',
-        actorUid: senderUid,
-        subjectUid: senderUid,
-        targetUid,
-        targetType,
-        risk,
-        metadata: {
-          messageId: entry.id,
-        },
-      }).catch(() => undefined);
-    }
-
-    let assistant = null;
-    if (shouldAttachReplySuggest && type === 'text') {
-      try {
-        const suggestText = String(messageData.content || '').trim();
-        if (suggestText) {
-          const suggestionBundle = await generateReplySuggestions({
-            text: suggestText,
-            user,
-            requestedStyle: requestedReplyStyle,
-            useProfile: replySuggestUseProfile,
-            count: 3,
-          });
-          assistant = {
-            replySuggestions: suggestionBundle.suggestions,
-            styleMode: suggestionBundle.styleMode,
-            intent: suggestionBundle.intent,
-            generatedAt: suggestionBundle.generatedAt,
-            model: suggestionBundle.model,
-            degraded: false,
-          };
-          trackRouteEvent(req, {
-            eventType: 'impression',
-            targetUid: entry.targetUid,
-            targetType: entry.targetType,
-            tags: ['reply_suggest_attach', suggestionBundle.styleMode],
-            metadata: {
-              count: suggestionBundle.count,
-              intent: suggestionBundle.intent,
-            },
-          });
-        }
-      } catch (replySuggestError) {
-        assistant = {
-          replySuggestions: [],
-          degraded: true,
-          reason: 'reply_suggest_failed',
-        };
-      }
-    }
-
     trackRouteEvent(req, {
       eventType: 'reply',
       targetUid: entry.targetUid,
@@ -1962,7 +1987,6 @@ router.post('/send', authenticate, async (req, res) => {
       tags: [entry.targetType, entry.type],
       metadata: {
         messageType: entry.type,
-        replySuggestAttached: Boolean(assistant && !assistant.degraded),
         recoDecisionId: recoDecisionId || '',
       },
     });
@@ -1981,15 +2005,6 @@ router.post('/send', authenticate, async (req, res) => {
     }
 
     const responsePayload = { success: true, data: entry };
-    if (assistant) {
-      responsePayload.assistant = assistant;
-    }
-    if (risk) {
-      responsePayload.risk = {
-        enabled: true,
-        ...risk,
-      };
-    }
     res.json(responsePayload);
   } catch (error) {
     console.error('Chat send error:', error);

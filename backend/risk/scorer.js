@@ -234,7 +234,7 @@ const toRiskResponse = ({
   const safeSummary =
     sanitizeText(summary, 280) ||
     safeEvidence[0]?.description ||
-    (safeTags.length ? `Risk tags: ${safeTags.join(', ')}` : 'No high-risk signal.');
+    (safeTags.length ? `风险标签：${safeTags.join('、')}` : '未发现明显高风险信号。');
   return {
     available: available !== false,
     source: sanitizeText(String(source || ''), 40).toLowerCase() || 'unknown',
@@ -298,7 +298,7 @@ const computeFloodEvidence = ({
     evidence.push({
       rule: 'flooding',
       type: 'frequency',
-      description: `High frequency sending in short window (${texts.length} messages).`,
+      description: `短时间内发送频率过高（${texts.length} 条消息）。`,
       snippet: `${senderUid} -> ${targetType}:${targetUid}`,
     });
   } else if (texts.length >= FLOOD_WARN_THRESHOLD) {
@@ -306,7 +306,7 @@ const computeFloodEvidence = ({
     evidence.push({
       rule: 'flooding',
       type: 'frequency',
-      description: `Frequent sending behavior (${texts.length} messages).`,
+      description: `发送行为较频繁（${texts.length} 条消息）。`,
       snippet: `${senderUid} -> ${targetType}:${targetUid}`,
     });
   }
@@ -315,7 +315,7 @@ const computeFloodEvidence = ({
     evidence.push({
       rule: 'duplicate_spam',
       type: 'repeat',
-      description: `Repeated same message ${duplicateCount} times.`,
+      description: `重复发送相同内容 ${duplicateCount} 次。`,
       snippet: sanitizeText(currentText, 120),
     });
   } else if (duplicateCount >= 2) {
@@ -323,7 +323,7 @@ const computeFloodEvidence = ({
     evidence.push({
       rule: 'duplicate_spam',
       type: 'repeat',
-      description: `Repeated same message ${duplicateCount} times.`,
+      description: `重复发送相同内容 ${duplicateCount} 次。`,
       snippet: sanitizeText(currentText, 120),
     });
   }
@@ -332,14 +332,14 @@ const computeFloodEvidence = ({
     evidence.push({
       rule: 'low_variance_spam',
       type: 'repeat',
-      description: 'Low variance content in message burst.',
+      description: '短时消息内容相似度过高。',
       snippet: `unique=${uniqueTexts.size}, total=${texts.length}`,
     });
   }
   return { score, evidence };
 };
 
-const summarizeReasons = (evidence = [], fallback = 'No high-risk signal.') => {
+const summarizeReasons = (evidence = [], fallback = '未发现明显高风险信号。') => {
   const parts = (Array.isArray(evidence) ? evidence : [])
     .map((item) => sanitizeText(String(item?.description || ''), 120))
     .filter(Boolean)
@@ -363,13 +363,13 @@ const assessOutgoingTextRisk = async ({
       source: 'chat_send',
       available: false,
       score: 0,
-      summary: 'Risk scorer unavailable.',
+      summary: '风险评估服务暂不可用。',
     });
   }
   const safeTargetType = normalizeTargetType(targetType);
   const safeText = sanitizeText(text, 1200);
   if (!safeText) {
-    return toRiskResponse({ source: 'chat_send', score: 0, summary: 'Empty text payload.' });
+    return toRiskResponse({ source: 'chat_send', score: 0, summary: '文本内容为空。' });
   }
 
   const windowMs = Math.max(1_000, DEFAULT_CHAT_WINDOW_MS);
@@ -439,7 +439,7 @@ const assessFriendAddRisk = async ({
     return toRiskResponse({
       source: 'friends_add',
       available: false,
-      summary: 'Invalid actor uid.',
+      summary: '无效的用户标识。',
     });
   }
   const safeTargetUid = toUid(targetUid);
@@ -471,7 +471,7 @@ const assessFriendAddRisk = async ({
     evidence.push({
       rule: 'friend_add_burst',
       type: 'frequency',
-      description: `High friend add frequency in short window (${attemptsShort.length} requests/10m).`,
+      description: `短时间内加好友请求频率过高（10 分钟 ${attemptsShort.length} 次）。`,
       snippet: `actor=${safeActorUid}`,
     });
   } else if (attemptsShort.length >= FRIEND_WARN_THRESHOLD) {
@@ -480,7 +480,7 @@ const assessFriendAddRisk = async ({
     evidence.push({
       rule: 'friend_add_burst',
       type: 'frequency',
-      description: `Frequent friend add behavior (${attemptsShort.length} requests/10m).`,
+      description: `加好友行为较频繁（10 分钟 ${attemptsShort.length} 次）。`,
       snippet: `actor=${safeActorUid}`,
     });
   }
@@ -490,7 +490,7 @@ const assessFriendAddRisk = async ({
     evidence.push({
       rule: 'friend_add_wide_scan',
       type: 'spread',
-      description: `Too many unique friend targets in 1h (${uniqueTargetsHour.size}).`,
+      description: `1 小时内触达的不同目标过多（${uniqueTargetsHour.size} 个）。`,
       snippet: `actor=${safeActorUid}`,
     });
   }
@@ -500,7 +500,7 @@ const assessFriendAddRisk = async ({
     evidence.push({
       rule: 'friend_add_pending_overflow',
       type: 'pending',
-      description: `Large pending friend request queue (${outgoingPendingCount}).`,
+      description: `待处理好友请求数量过多（${outgoingPendingCount} 条）。`,
       snippet: `actor=${safeActorUid}`,
     });
   }
@@ -510,7 +510,7 @@ const assessFriendAddRisk = async ({
     evidence.push({
       rule: 'friend_add_repeat_target',
       type: 'repeat',
-      description: `Repeated same target in short window (${duplicateTargetShort}).`,
+      description: `短时间内重复添加同一目标（${duplicateTargetShort} 次）。`,
       snippet: `target=${safeTargetUid}`,
     });
   }
@@ -712,7 +712,7 @@ const computeConversationRiskProfileCore = async ({
     return toRiskResponse({
       source: 'chat_profile',
       available: false,
-      summary: 'Risk profile unavailable.',
+      summary: '风险画像暂不可用。',
     });
   }
 
@@ -778,7 +778,7 @@ const computeConversationRiskProfileCore = async ({
     evidence.push({
       rule: 'flooding',
       type: 'frequency',
-      description: 'Sender has frequent recent messages in this conversation.',
+      description: '该会话中对方最近发送消息较为频繁。',
       snippet: `window=${Math.floor(safeWindowMs / 1000)}s`,
     });
   }
@@ -793,7 +793,7 @@ const computeConversationRiskProfileCore = async ({
     evidence.push({
       rule: 'prior_risk_history',
       type: 'history',
-      description: `Recent risk history score max=${priorMaxScore}.`,
+      description: `近期风险历史最高分为 ${priorMaxScore}。`,
       snippet: `decisions=${priorDecisions.length}`,
     });
   }
@@ -803,7 +803,7 @@ const computeConversationRiskProfileCore = async ({
     score,
     tags: Array.from(tags),
     evidence,
-    summary: summarizeReasons(evidence, 'No obvious risk from recent conversation.'),
+    summary: summarizeReasons(evidence, '近期会话未发现明显风险。'),
     ignored: Boolean(ignoredEntryResolved),
     ignoredEntry: ignoredEntryResolved,
   });
