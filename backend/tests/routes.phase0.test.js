@@ -24,6 +24,16 @@ test('GET /api/admin/feature-flags returns snapshot data', async () => {
     const body = await response.json();
     assert.equal(body.success, true);
     assert.equal(typeof body.data?.flags?.eventLogging, 'boolean');
+    assert.equal(typeof body.data?.flags?.translate, 'boolean');
+    assert.equal(Array.isArray(body.data?.definitions), true);
+    assert.equal(
+      body.data.definitions.some(
+        (item) =>
+          String(item?.name || '') === 'translate' &&
+          String(item?.env || '') === 'FEATURE_TRANSLATE_ENABLED'
+      ),
+      true
+    );
   });
 });
 

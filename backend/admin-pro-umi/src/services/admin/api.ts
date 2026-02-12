@@ -448,6 +448,7 @@ export type Phase1Overview = {
   generatedAt: string;
   featureEnabled: {
     replyAssistant: boolean;
+    translate: boolean;
     translatePersonalization: boolean;
   };
   users: {

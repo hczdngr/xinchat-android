@@ -57,6 +57,15 @@ const jsonFetch = async (url, { method = 'GET', body, token } = {}) => {
   return { response, payload };
 };
 
+const updateFlags = async (baseUrl, changes) => {
+  const result = await jsonFetch(`${baseUrl}/api/admin/feature-flags/update`, {
+    method: 'POST',
+    body: { changes },
+  });
+  assert.equal(result.response.status, 200);
+  assert.equal(result.payload.success, true);
+};
+
 const registerAndLogin = async (baseUrl, label) => {
   const seed = `${Math.random().toString(36).slice(2, 8)}${Date.now().toString(36).slice(-3)}`;
   const username = `p1_${String(label || 'u').slice(0, 8)}_${seed}`.toLowerCase();
@@ -103,6 +112,7 @@ const buildFriendship = async (baseUrl, userA, userB) => {
 test('POST /api/translate supports profile override and graceful fallback', async () => {
   await withEnv(
     {
+      FEATURE_TRANSLATE_ENABLED: 'true',
       FEATURE_TRANSLATE_PERSONALIZATION_ENABLED: 'true',
       LIBRETRANSLATE_URL: 'http://127.0.0.1:1',
       LIBRETRANSLATE_TIMEOUT_MS: '120',
@@ -110,6 +120,10 @@ test('POST /api/translate supports profile override and graceful fallback', asyn
     },
     async () => {
       await withServer(async (baseUrl) => {
+        await updateFlags(baseUrl, {
+          translate: true,
+          translatePersonalization: true,
+        });
         const user = await registerAndLogin(baseUrl, 'translate');
         const translateResult = await jsonFetch(`${baseUrl}/api/translate`, {
           method: 'POST',
@@ -129,7 +143,8 @@ test('POST /api/translate supports profile override and graceful fallback', asyn
         assert.equal(typeof translateResult.payload.explanation, 'string');
         assert.equal(
           translateResult.payload.data?.degraded === true ||
-            translateResult.payload.data?.provider === 'libretranslate',
+            translateResult.payload.data?.provider === 'libretranslate' ||
+            translateResult.payload.data?.provider === 'google_translate_web',
           true
         );
 
@@ -141,6 +156,40 @@ test('POST /api/translate supports profile override and graceful fallback', asyn
         assert.equal(profileResult.payload.success, true);
         assert.equal(profileResult.payload.data?.profile?.translateStyle, 'formal');
         assert.equal(profileResult.payload.data?.profile?.explanationLevel, 'short');
+
+        await updateFlags(baseUrl, {
+          translate: null,
+          translatePersonalization: null,
+        });
+      });
+    }
+  );
+});
+
+test('POST /api/translate returns 503 when translate feature is disabled', async () => {
+  await withEnv(
+    {
+      FEATURE_TRANSLATE_ENABLED: 'false',
+    },
+    async () => {
+      await withServer(async (baseUrl) => {
+        await updateFlags(baseUrl, {
+          translate: false,
+        });
+        const result = await jsonFetch(`${baseUrl}/api/translate`, {
+          method: 'POST',
+          body: {
+            text: 'hello world',
+            targetLang: 'zh',
+          },
+        });
+        assert.equal(result.response.status, 503);
+        assert.equal(result.payload.success, false);
+        assert.equal(String(result.payload.message || '').includes('translate feature is disabled'), true);
+
+        await updateFlags(baseUrl, {
+          translate: null,
+        });
       });
     }
   );

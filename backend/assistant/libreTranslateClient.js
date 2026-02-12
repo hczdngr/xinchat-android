@@ -7,6 +7,15 @@ import { logger, serializeError } from '../observability.js';
 const DEFAULT_LIBRE_BASE_URL = 'http://127.0.0.1:5000';
 const DEFAULT_TIMEOUT_MS = 2200;
 const DEFAULT_RETRIES = 1;
+const RETRYABLE_NETWORK_ERROR_CODES = new Set([
+  'ETIMEDOUT',
+  'ECONNRESET',
+  'ECONNABORTED',
+  'ENOTFOUND',
+  'EAI_AGAIN',
+  'EHOSTUNREACH',
+  'ECONNREFUSED',
+]);
 
 const toPositiveInt = (value, fallback, min = 1, max = Number.MAX_SAFE_INTEGER) => {
   const parsed = Number.parseInt(String(value || ''), 10);
@@ -23,9 +32,22 @@ const buildEndpoint = () => {
   return `${normalized}/translate`;
 };
 
+const isRetryableNetworkError = (error) => {
+  if (!error || typeof error !== 'object') return false;
+  const code = String(error.code || '').toUpperCase();
+  const causeCode = String(error?.cause?.code || '').toUpperCase();
+  if (RETRYABLE_NETWORK_ERROR_CODES.has(code) || RETRYABLE_NETWORK_ERROR_CODES.has(causeCode)) {
+    return true;
+  }
+  const message = String(error.message || '').toLowerCase();
+  return /timeout|fetch failed|network|socket|temporar|connection|reset|refused|unreach|enotfound|eai_again/.test(
+    message
+  );
+};
+
 const shouldRetry = ({ status = 0, error = null }) => {
-  if (error) return true;
-  return status >= 500 || status === 429;
+  if (status >= 500 || status === 429) return true;
+  return isRetryableNetworkError(error);
 };
 
 const withTimeout = async (promiseFactory, timeoutMs) => {

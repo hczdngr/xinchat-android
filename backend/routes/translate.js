@@ -128,6 +128,11 @@ router.post('/', async (req, res) => {
     res.status(400).json({ success: false, message: 'text is required.' });
     return;
   }
+  const translateEnabled = isFeatureEnabled('translate');
+  if (!translateEnabled) {
+    res.status(503).json({ success: false, message: 'translate feature is disabled.' });
+    return;
+  }
 
   const authUser = await resolveOptionalAuthUser(req);
   if (authUser) {
@@ -198,6 +203,7 @@ router.post('/', async (req, res) => {
       useProfile: personalizationEnabled ? useProfile : false,
       profile: storedProfile,
       featureEnabled: personalizationEnabled,
+      translateEnabled,
     },
   });
 });
@@ -209,11 +215,13 @@ router.get('/profile', authenticate, async (req, res) => {
     return;
   }
   const profile = resolveAssistantProfileFromUser(req.auth.user);
+  const translateEnabled = isFeatureEnabled('translate');
   res.json({
     success: true,
     data: {
       profile,
       featureEnabled: isFeatureEnabled('translatePersonalization'),
+      translateEnabled,
     },
   });
 });
@@ -222,6 +230,14 @@ router.post('/profile', authenticate, async (req, res) => {
   const key = makeRateKey(req, 'profile_post');
   if (!profileLimiter.consume(key)) {
     res.status(429).json({ success: false, message: 'Too many requests.' });
+    return;
+  }
+
+  if (!isFeatureEnabled('translate')) {
+    res.status(503).json({
+      success: false,
+      message: 'translate feature is disabled.',
+    });
     return;
   }
 
@@ -267,6 +283,7 @@ router.post('/profile', authenticate, async (req, res) => {
     data: {
       profile: nextProfile,
       featureEnabled: true,
+      translateEnabled: true,
     },
   });
 });

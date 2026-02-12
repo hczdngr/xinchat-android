@@ -33,6 +33,10 @@ const FEATURE_DEFINITIONS = Object.freeze({
     env: 'FEATURE_REPLY_ASSISTANT_ENABLED',
     defaultValue: false,
   },
+  translate: {
+    env: 'FEATURE_TRANSLATE_ENABLED',
+    defaultValue: false,
+  },
   translatePersonalization: {
     env: 'FEATURE_TRANSLATE_PERSONALIZATION_ENABLED',
     defaultValue: false,

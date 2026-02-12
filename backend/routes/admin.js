@@ -352,6 +352,7 @@ const buildPhase1Overview = ({ users, flags, snapshot }) => {
     generatedAt: new Date().toISOString(),
     featureEnabled: {
       replyAssistant: Boolean(flags.replyAssistant),
+      translate: Boolean(flags.translate),
       translatePersonalization: Boolean(flags.translatePersonalization),
     },
     users: {

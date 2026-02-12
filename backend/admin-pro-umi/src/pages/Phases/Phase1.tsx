@@ -110,6 +110,9 @@ const Phase1: React.FC = () => {
             <Tag color={overview?.featureEnabled?.replyAssistant ? 'green' : 'red'}>
               回复助手 {overview?.featureEnabled?.replyAssistant ? 'ON' : 'OFF'}
             </Tag>
+            <Tag color={overview?.featureEnabled?.translate ? 'green' : 'red'}>
+              翻译服务 {overview?.featureEnabled?.translate ? 'ON' : 'OFF'}
+            </Tag>
             <Tag color={overview?.featureEnabled?.translatePersonalization ? 'green' : 'red'}>
               翻译个性化 {overview?.featureEnabled?.translatePersonalization ? 'ON' : 'OFF'}
             </Tag>
